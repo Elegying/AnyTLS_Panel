@@ -1,0 +1,15 @@
+[Unit]
+Description=AnyTLS Panel - 节点统一管理面板
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/anytls-panel
+ExecStart=/root/anytls-panel/venv/bin/gunicorn -w 2 -b 0.0.0.0:8866 --timeout 60 app:app
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

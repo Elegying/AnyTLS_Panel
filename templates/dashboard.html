@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}仪表盘 - AnyTLS Panel{% endblock %}
+{% block content %}
+<div class="header">
+    <h1>📊 仪表盘</h1>
+    <span style="color:var(--text2);font-size:13px">{{ now.strftime('%Y-%m-%d %H:%M') }}</span>
+</div>
+
+<div class="stats">
+    <div class="stat-card">
+        <div class="label">账号数</div>
+        <div class="value blue">{{ total_accounts }}</div>
+    </div>
+    <div class="stat-card" style="display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer" onclick="syncAll()">
+        <div style="font-size:32px;margin-bottom:8px">🔄</div>
+        <div style="font-size:15px;font-weight:600">一键同步全部</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">更新所有账号订阅</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">总流量使用</div>
+        <div class="value">{{ format_bytes(total_traffic_used) }}</div>
+        {% if total_traffic_limit > 0 %}
+        <div class="progress">
+            <div class="progress-bar {{ 'red' if total_traffic_used > total_traffic_limit * 0.9 else 'orange' if total_traffic_used > total_traffic_limit * 0.7 else 'green' }}" style="width:{{ (total_traffic_used / total_traffic_limit * 100) | round(1) }}%"></div>
+        </div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">/ {{ format_bytes(total_traffic_limit) }}</div>
+        {% endif %}
+    </div>
+    <div class="stat-card">
+        <div class="label">告警账号 (≥80%)</div>
+        <div class="value {{ 'orange' if warning_accounts else 'green' }}">{{ warning_accounts | length }}</div>
+    </div>
+</div>
+
+{% if warning_accounts %}
+<div class="card" style="border-color:rgba(253,203,110,0.3)">
+    <h2>⚠️ 流量告警</h2>
+    <table>
+        <tr><th>账号</th><th>使用率</th><th>已用 / 上限</th><th>操作</th></tr>
+        {% for a in warning_accounts %}
+        <tr>
+            <td><a href="{{ url_for('account_detail', account_id=a.id) }}" style="color:var(--accent)">{{ a.name }}</a></td>
+            <td><span class="badge badge-orange">{{ a.usage_pct }}%</span></td>
+            <td>{{ format_bytes(a.traffic_used_bytes or 0) }} / {{ a.traffic_limit_gb }}GB</td>
+            <td>
+                <form method="POST" action="{{ url_for('account_reset_traffic', account_id=a.id) }}" style="display:inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button class="btn btn-sm btn-danger" type="submit">重置流量</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
+<div class="card">
+    <h2>👤 账号概览</h2>
+    {% if accounts %}
+    <table>
+        <tr><th>账号</th><th>节点数</th><th>流量</th><th>状态</th><th>最后同步</th></tr>
+        {% for a in accounts %}
+        <tr class="clickable" onclick="location.href='{{ url_for('account_detail', account_id=a.id) }}'">
+            <td><strong>{{ a.name }}</strong></td>
+            <td><span class="badge badge-blue">{{ a.node_count or 0 }} 个</span></td>
+            <td>
+                {% set pct = calc_traffic_percent(a.traffic_used_bytes or 0, a.traffic_limit_gb or 250) %}
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-size:13px">{{ format_bytes(a.traffic_used_bytes or 0) }} / {{ a.traffic_limit_gb }}GB</span>
+                    <span class="badge {{ 'badge-red' if pct >= 90 else 'badge-orange' if pct >= 70 else 'badge-green' }}">{{ pct }}%</span>
+                </div>
+                <div class="progress"><div class="progress-bar {{ 'red' if pct >= 90 else 'orange' if pct >= 70 else 'green' }}" style="width:{{ pct }}%"></div></div>
+            </td>
+            <td>
+                {% if a.status == 'active' %}
+                <span class="badge badge-green">活跃</span>
+                {% elif a.status == 'suspended' %}
+                <span class="badge badge-orange">暂停</span>
+                {% else %}
+                <span class="badge badge-red">停用</span>
+                {% endif %}
+            </td>
+            <td style="font-size:12px;color:var(--text2)">{{ a.last_synced_at or '未同步' }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">📦</div>
+        <p>暂无账号，前往 <a href="{{ url_for('accounts_list') }}" style="color:var(--accent)">账号管理</a> 导入订阅</p>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+async function syncAll() {
+    if (!confirm('确认同步所有账号的订阅？')) return;
+    const card = event.currentTarget;
+    const orig = card.innerHTML;
+    card.innerHTML = '<div style="font-size:32px;margin-bottom:8px">⏳</div><div style="font-size:15px;font-weight:600">同步中...</div>';
+    card.style.pointerEvents = 'none';
+    try {
+        const resp = await fetch('/api/sync-all', {method: 'POST'});
+        const data = await resp.json();
+        let msg = data.results.map(r => {
+            return r.status === 'ok'
+                ? '✅ ' + r.name + ': ' + r.nodes + ' 个节点'
+                : '❌ ' + r.name + ': ' + r.msg;
+        }).join('\n');
+        alert('同步完成:\n' + msg);
+        location.reload();
+    } catch(e) {
+        alert('同步失败: ' + e.message);
+        card.innerHTML = orig;
+        card.style.pointerEvents = '';
+    }
+}
+</script>
+{% endblock %}

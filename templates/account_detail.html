@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+{% block title %}{{ account.name }} - AnyTLS Panel{% endblock %}
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('accounts_list') }}">账号管理</a>
+    <span class="sep">/</span>
+    <span>{{ account.name }}</span>
+</div>
+
+<div class="header">
+    <div style="display:flex;align-items:center;gap:16px">
+        <h1 id="account-name-display">{{ account.name }}</h1>
+        <button class="btn btn-sm btn-ghost" onclick="openModal('renameModal')">✏️ 重命名</button>
+        {% if account.status == 'active' %}
+        <span class="badge badge-green">活跃</span>
+        {% elif account.status == 'suspended' %}
+        <span class="badge badge-orange">暂停</span>
+        {% else %}
+        <span class="badge badge-red">停用</span>
+        {% endif %}
+    </div>
+    <div style="display:flex;gap:10px">
+        <button class="btn btn-ghost" onclick="checkAll()">🔍 检测全部</button>
+        <form method="POST" action="{{ url_for('account_sync', account_id=account.id) }}" style="display:inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-green" type="submit">🔄 同步订阅</button>
+        </form>
+        <button class="btn btn-ghost" onclick="openModal('editModal')">⚙️ 设置</button>
+    </div>
+</div>
+
+<!-- 流量卡片 -->
+<div class="stats" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr))">
+    <div class="stat-card">
+        <div class="label">节点数</div>
+        <div class="value blue">{{ nodes | length }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">流量使用</div>
+        {% set pct = calc_traffic_percent(account.traffic_used_bytes or 0, account.traffic_limit_gb or 250) %}
+        <div class="value {{ 'orange' if pct >= 70 else 'green' }}">{{ format_bytes(account.traffic_used_bytes or 0) }}</div>
+        <div class="progress"><div class="progress-bar {{ 'red' if pct >= 90 else 'orange' if pct >= 70 else 'green' }}" style="width:{{ pct }}%"></div></div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">/ {{ account.traffic_limit_gb }}GB ({{ pct }}%)</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">最后同步</div>
+        <div style="font-size:16px;color:var(--text2)">{{ account.last_synced_at or '未同步' }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">流量操作</div>
+        <form method="POST" action="{{ url_for('account_reset_traffic', account_id=account.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-sm btn-danger" type="submit" style="margin-top:8px">🔄 重置流量</button>
+        </form>
+    </div>
+</div>
+
+<!-- 节点列表 -->
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="margin-bottom:0">🖥️ 节点列表</h2>
+        <span style="font-size:13px;color:var(--text2)">共 {{ nodes | length }} 个节点</span>
+    </div>
+
+    {% if nodes %}
+    <table>
+        <tr>
+            <th>#</th><th>节点名称</th><th>地址</th><th>密码</th>
+            <th>状态</th><th>最后检测</th><th>操作</th>
+        </tr>
+        {% for n in nodes %}
+        <tr>
+            <td style="color:var(--text2)">{{ loop.index }}</td>
+            <td><strong>{{ n.name }}</strong></td>
+            <td>
+                <code style="background:var(--bg);padding:2px 8px;border-radius:4px;font-size:13px">{{ n.host }}:{{ n.port }}</code>
+                <span class="copy-btn" onclick="copyText('{{ n.host }}:{{ n.port }}')" title="复制地址" style="cursor:pointer;color:var(--accent);margin-left:4px">📋</span>
+            </td>
+            <td>
+                <span style="font-family:monospace;font-size:13px" id="pw-{{ n.id }}">{{ n.password[:6] }}•••</span>
+                <span class="copy-btn" onclick="copyText('{{ n.password }}')" title="复制密码" style="cursor:pointer;color:var(--accent);margin-left:4px">📋</span>
+                <span onclick="togglePw({{ n.id }}, '{{ n.password }}')" style="cursor:pointer;color:var(--text2);margin-left:4px;font-size:12px">👁️</span>
+            </td>
+            <td id="status-{{ n.id }}">
+                {% if n.is_online == 1 %}
+                <span class="badge badge-green">在线</span>
+                {% elif n.is_online == 0 %}
+                <span class="badge badge-red">离线</span>
+                {% else %}
+                <span class="badge" style="background:rgba(139,143,163,0.15);color:var(--text2)">未检测</span>
+                {% endif %}
+            </td>
+            <td style="font-size:12px;color:var(--text2)">{{ n.last_checked_at or '-' }}</td>
+            <td>
+                <button class="btn btn-sm btn-ghost" onclick="checkNode({{ n.id }})">检测</button>
+                <button class="btn btn-sm btn-ghost" data-uri="{{ n.raw_uri | e }}" onclick="shareNode(this)" title="分享链接">🔗 分享</button>
+                <form method="POST" action="{{ url_for('node_delete', node_id=n.id) }}" style="display:inline" onsubmit="return confirm('确认删除节点 {{ n.name }}？')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button class="btn btn-sm btn-danger" type="submit">删除</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">🔍</div>
+        <p>该账号下暂无节点，请同步订阅</p>
+        <form method="POST" action="{{ url_for('account_sync', account_id=account.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-primary" type="submit">🔄 同步订阅</button>
+        </form>
+    </div>
+    {% endif %}
+</div>
+
+<!-- 重命名弹窗 -->
+<div class="modal-overlay" id="renameModal">
+    <div class="modal" style="max-width:380px">
+        <h3>✏️ 重命名账号</h3>
+        <form method="POST" action="{{ url_for('account_rename', account_id=account.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-group">
+                <label>新名称</label>
+                <input name="name" value="{{ account.name }}" required autofocus>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeModal('renameModal')">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 设置弹窗 -->
+<div class="modal-overlay" id="editModal">
+    <div class="modal">
+        <h3>⚙️ 账号设置</h3>
+        <form method="POST" action="{{ url_for('account_edit', account_id=account.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-group">
+                <label>订阅链接</label>
+                <textarea name="subscribe_url" rows="3">{{ account.subscribe_url }}</textarea>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>流量上限 (GB)</label>
+                    <input name="traffic_limit_gb" type="number" value="{{ account.traffic_limit_gb }}" step="0.1">
+                </div>
+                <div class="form-group">
+                    <label>状态</label>
+                    <select name="status">
+                        <option value="active" {{ 'selected' if account.status == 'active' }}>活跃</option>
+                        <option value="suspended" {{ 'selected' if account.status == 'suspended' }}>暂停</option>
+                        <option value="disabled" {{ 'selected' if account.status == 'disabled' }}>停用</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>备注</label>
+                <input name="notes" value="{{ account.notes or '' }}">
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-danger" onclick="if(confirm('确认删除此账号及所有节点？')){document.getElementById('deleteForm').submit()}">删除账号</button>
+                <div style="flex:1"></div>
+                <button type="button" class="btn btn-ghost" onclick="closeModal('editModal')">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+        <form id="deleteForm" method="POST" action="{{ url_for('account_delete', account_id=account.id) }}" style="display:none">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        </form>
+    </div>
+</div>
+
+<script>
+function shareNode(btn) {
+    const uri = btn.getAttribute('data-uri');
+    if (!uri) return;
+    let ok = false;
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = uri;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ok = document.execCommand('copy');
+        ta.remove();
+    } catch(e) {}
+    const toast = document.createElement('div');
+    toast.textContent = ok ? '✅ 已复制分享链接' : '❌ 复制失败，请手动复制';
+    toast.style.cssText = 'position:fixed;bottom:20px;right:20px;background:' + (ok ? '#00b894' : '#ff6b6b') + ';color:#fff;padding:10px 18px;border-radius:8px;z-index:999;font-size:14px;';
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2000);
+}
+
+let pwVisible = {};
+function togglePw(id, full) {
+    const el = document.getElementById('pw-' + id);
+    if (pwVisible[id]) {
+        el.textContent = full.substring(0, 6) + '•••';
+        pwVisible[id] = false;
+    } else {
+        el.textContent = full;
+        pwVisible[id] = true;
+    }
+}
+
+async function checkNode(id) {
+    const el = document.getElementById('status-' + id);
+    el.innerHTML = '<span class="badge" style="background:rgba(116,185,255,0.15);color:var(--blue)">检测中...</span>';
+    try {
+        const resp = await fetch('/api/nodes/' + id + '/check', {method: 'POST'});
+        const data = await resp.json();
+        if (data.status === 'online') {
+            el.innerHTML = '<span class="badge badge-green">在线</span>';
+        } else {
+            el.innerHTML = '<span class="badge badge-red">离线</span>';
+        }
+    } catch(e) {
+        el.innerHTML = '<span class="badge badge-red">错误</span>';
+    }
+}
+
+async function checkAll() {
+    const accountId = {{ account.id }};
+    const statusEls = document.querySelectorAll('[id^="status-"]');
+    statusEls.forEach(el => {
+        el.innerHTML = '<span class="badge" style="background:rgba(116,185,255,0.15);color:var(--blue)">检测中...</span>';
+    });
+    try {
+        const resp = await fetch('/api/accounts/' + accountId + '/check-all', {method: 'POST'});
+        const data = await resp.json();
+        data.results.forEach(r => {
+            const el = document.getElementById('status-' + r.node_id);
+            if (el) {
+                el.innerHTML = r.online
+                    ? '<span class="badge badge-green">在线</span>'
+                    : '<span class="badge badge-red">离线</span>';
+            }
+        });
+    } catch(e) {
+        statusEls.forEach(el => {
+            el.innerHTML = '<span class="badge badge-red">错误</span>';
+        });
+    }
+}
+</script>
+{% endblock %}
