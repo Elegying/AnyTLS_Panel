@@ -147,7 +147,7 @@ def parse_subscribe_url(url):
                 node = parse_anytls_uri(line)
                 if node:
                     nodes.append(node)
-        return nodes
+        return nodes, {}
 
     # 情况2：尝试作为 HTTP URL 拉取（用 Shadowrocket UA 以获取全部协议节点）
     content = url.strip()
@@ -676,17 +676,7 @@ def account_sync(account_id):
     flash(f'同步完成，更新了 {len(nodes)} 个节点', 'success')
     return redirect(url_for('account_detail', account_id=account_id))
 
-@app.route('/accounts/<int:account_id>/reset-traffic', methods=['POST'])
-@login_required
-def account_reset_traffic(account_id):
-    db = get_db()
-    db.execute(
-        'UPDATE accounts SET traffic_used_bytes=0, updated_at=CURRENT_TIMESTAMP WHERE id=?',
-        (account_id,)
-    )
-    db.commit()
-    flash('流量已重置', 'success')
-    return redirect(url_for('account_detail', account_id=account_id))
+
 
 # ─── 节点操作 ──────────────────────────────────────────────
 
@@ -782,6 +772,7 @@ def api_set_traffic():
     password = data.get('password')
     total_bytes = data.get('total_bytes', 0)
 
+    db = get_db()
     if not account_id and password:
         node = db.execute('SELECT account_id FROM nodes WHERE password=?', (password,)).fetchone()
         if node:
@@ -790,7 +781,6 @@ def api_set_traffic():
     if not account_id:
         return jsonify({"error": "account not found"}), 404
 
-    db = get_db()
     db.execute(
         'UPDATE accounts SET traffic_used_bytes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
         (total_bytes, account_id)

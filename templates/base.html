@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
     <title>{% block title %}AnyTLS Panel{% endblock %}</title>
     <style>
@@ -14,9 +14,13 @@
             --orange: #fdcb6e; --blue: #74b9ff;
         }
         body { font-family: -apple-system, 'Segoe UI', 'PingFang SC', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+        /* ===== Sidebar ===== */
         .sidebar {
             position: fixed; left: 0; top: 0; bottom: 0; width: 220px;
             background: var(--card); border-right: 1px solid var(--border); padding: 20px 0; z-index: 100;
+            transition: transform 0.3s ease;
+            box-shadow: 2px 0 20px rgba(0,0,0,0.4);
         }
         .sidebar .logo { text-align: center; padding: 10px 20px 30px; }
         .sidebar .logo .title { font-size: 22px; font-weight: 700; color: var(--accent2); }
@@ -30,11 +34,35 @@
         .sidebar .bottom { position: absolute; bottom: 20px; left: 0; right: 0; }
 
         .main { margin-left: 220px; padding: 24px 32px; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
         .header h1 { font-size: 24px; font-weight: 600; }
 
+        /* ===== Mobile hamburger ===== */
+        .mobile-header {
+            display: none; position: fixed; top: 0; left: 0; right: 0; height: 52px;
+            background: var(--card); border-bottom: 1px solid var(--border); z-index: 90;
+            align-items: center; padding: 0 16px; justify-content: space-between;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.4);
+        }
+        .mobile-header .logo-text { font-size: 18px; font-weight: 700; color: var(--accent2); }
+        .hamburger {
+            display: none; background: none; border: none; color: var(--text); font-size: 24px;
+            cursor: pointer; padding: 4px 8px; border-radius: 6px; line-height: 1;
+        }
+        .hamburger:hover { background: rgba(108,92,231,0.15); }
+        .sidebar-overlay {
+            display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+            z-index: 99; opacity: 0; transition: opacity 0.3s;
+        }
+        .sidebar-overlay.show { display: block; opacity: 1; }
+
+        /* ===== Stats ===== */
         .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
-        .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; transition: transform 0.2s; }
+        .stat-card {
+            background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+            padding: 20px; transition: transform 0.2s;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.3);
+        }
         .stat-card:hover { transform: translateY(-2px); }
         .stat-card .label { font-size: 13px; color: var(--text2); margin-bottom: 8px; }
         .stat-card .value { font-size: 28px; font-weight: 700; }
@@ -42,17 +70,22 @@
         .stat-card .value.blue { color: var(--blue); }
         .stat-card .value.orange { color: var(--orange); }
 
-        .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+        .card {
+            background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+            padding: 20px; margin-bottom: 20px;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.3);
+        }
         .card h2 { font-size: 16px; margin-bottom: 16px; color: var(--text2); }
 
+        /* ===== Table ===== */
         table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        th { text-align: left; padding: 10px 12px; color: var(--text2); border-bottom: 1px solid var(--border); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        td { padding: 12px; border-bottom: 1px solid var(--border); }
+        th { text-align: left; padding: 10px 12px; color: var(--text2); border-bottom: 1px solid var(--border); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
+        td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
         tr:hover { background: rgba(108,92,231,0.05); }
         tr.clickable { cursor: pointer; }
         tr.clickable:hover { background: rgba(108,92,231,0.1); }
 
-        .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+        .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; white-space: nowrap; }
         .badge-green { background: rgba(0,184,148,0.15); color: var(--green); }
         .badge-red { background: rgba(255,107,107,0.15); color: var(--red); }
         .badge-orange { background: rgba(253,203,110,0.15); color: var(--orange); }
@@ -68,6 +101,7 @@
             display: inline-flex; align-items: center; gap: 6px;
             padding: 8px 16px; border-radius: 8px; font-size: 13px;
             border: none; cursor: pointer; transition: all 0.2s; text-decoration: none;
+            white-space: nowrap;
         }
         .btn-primary { background: var(--accent); color: white; }
         .btn-primary:hover { background: var(--accent2); }
@@ -91,17 +125,18 @@
 
         .modal-overlay {
             display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-            z-index: 200; justify-content: center; align-items: center;
+            z-index: 200; justify-content: center; align-items: center; padding: 16px;
         }
         .modal-overlay.show { display: flex; }
         .modal {
             background: var(--card); border: 1px solid var(--border); border-radius: 16px;
-            padding: 24px; width: 90%; max-width: 560px; max-height: 80vh; overflow-y: auto;
+            padding: 24px; width: 90%; max-width: 560px; max-height: 85vh; overflow-y: auto;
+            box-shadow: 0 8px 40px rgba(0,0,0,0.6);
         }
         .modal h3 { margin-bottom: 16px; }
-        .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+        .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; flex-wrap: wrap; }
 
-        .flash { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+        .flash { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; box-shadow: 0 2px 10px rgba(0,0,0,0.25); }
         .flash-success { background: rgba(0,184,148,0.15); color: var(--green); border: 1px solid rgba(0,184,148,0.3); }
         .flash-error { background: rgba(255,107,107,0.15); color: var(--red); border: 1px solid rgba(255,107,107,0.3); }
 
@@ -117,24 +152,111 @@
         .account-card {
             background: var(--card); border: 1px solid var(--border); border-radius: 12px;
             padding: 20px; cursor: pointer; transition: all 0.2s;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.3);
         }
         .account-card:hover { border-color: var(--accent); transform: translateY(-2px); }
-        .account-card .name { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+        .account-card .name { font-size: 18px; font-weight: 600; margin-bottom: 8px; word-break: break-all; }
         .account-card .meta { font-size: 13px; color: var(--text2); margin-bottom: 12px; }
         .account-card .footer { display: flex; justify-content: space-between; align-items: center; }
 
         .accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
 
+        /* ===== Mobile Responsive ===== */
         @media (max-width: 768px) {
-            .sidebar { display: none; }
-            .main { margin-left: 0; padding: 16px; }
-            .stats { grid-template-columns: 1fr 1fr; }
-            .accounts-grid { grid-template-columns: 1fr; }
+            .sidebar {
+                transform: translateX(-100%);
+                width: 260px;
+                box-shadow: 4px 0 24px rgba(0,0,0,0.5);
+            }
+            .sidebar.open { transform: translateX(0); }
+            .mobile-header { display: flex; }
+            .hamburger { display: block; }
+            .main { margin-left: 0; padding: 68px 16px 24px; }
+
+            .header { flex-direction: column; align-items: stretch; }
+            .header h1 { font-size: 20px; }
+            .header > div { display: flex; gap: 8px; flex-wrap: wrap; }
+            .header .btn { flex: 1; justify-content: center; min-width: 0; }
+
+            .stats { grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+            .stat-card { padding: 14px; border-radius: 10px; }
+            .stat-card .value { font-size: 22px; }
+
+            .card { padding: 14px; margin-bottom: 12px; border-radius: 10px; }
+            .card h2 { font-size: 15px; margin-bottom: 12px; }
+
+            .accounts-grid { grid-template-columns: 1fr; gap: 12px; }
+            .account-card { padding: 16px; border-radius: 10px; }
+            .account-card .name { font-size: 16px; }
+
+            .modal { width: 95%; padding: 20px; border-radius: 14px; max-height: 90vh; }
+            .modal h3 { font-size: 16px; }
+            .modal-actions { flex-direction: column-reverse; }
+            .modal-actions .btn { width: 100%; justify-content: center; padding: 12px; }
+
+            .breadcrumb { font-size: 12px; margin-bottom: 14px; }
+            .detail-header { flex-direction: column; align-items: stretch !important; }
+            .detail-header > div { justify-content: flex-start !important; flex-wrap: wrap; }
+            .detail-header .btn { font-size: 12px; padding: 6px 12px; }
+
+            .flash { font-size: 13px; padding: 10px 14px; }
+            .form-row { grid-template-columns: 1fr; }
+
+            /* ===== Table → Card on mobile ===== */
+            .rwd-table thead { display: none; }
+            .rwd-table, .rwd-table tbody, .rwd-table tr, .rwd-table td {
+                display: block;
+                width: 100% !important;
+            }
+            .rwd-table tr {
+                background: var(--card);
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                padding: 12px 14px;
+                margin-bottom: 10px;
+                box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+            }
+            .rwd-table tr:hover { background: var(--card); border-color: var(--accent); }
+            .rwd-table td {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 6px 0;
+                border-bottom: 1px solid rgba(42,45,58,0.5);
+                font-size: 13px;
+                gap: 12px;
+            }
+            .rwd-table td:last-child { border-bottom: none; }
+            .rwd-table td[data-label]::before {
+                content: attr(data-label);
+                color: var(--text2);
+                font-size: 12px;
+                font-weight: 500;
+                min-width: 50px;
+                flex-shrink: 0;
+            }
+            .rwd-table td.hide-mobile { display: none !important; }
+            .rwd-table td .m-traffic {
+                display: flex; flex-direction: column; align-items: flex-end; gap: 2px; width: 100%;
+            }
+        }
+
+        @media (max-width: 380px) {
+            .stats { grid-template-columns: 1fr; }
+            .stat-card .value { font-size: 20px; }
+            .header h1 { font-size: 18px; }
         }
     </style>
 </head>
 <body>
-    <div class="sidebar">
+    <div class="mobile-header">
+        <button class="hamburger" onclick="toggleSidebar()">☰</button>
+        <span class="logo-text">⚡ AnyTLS</span>
+        <div style="width:32px"></div>
+    </div>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+
+    <div class="sidebar" id="sidebar">
         <div class="logo">
             <div class="title">⚡ AnyTLS</div>
             <div class="sub">节点统一管理面板</div>
@@ -158,7 +280,6 @@
         {% block content %}{% endblock %}
     </div>
 
-    <!-- 修改密码弹窗 -->
     <div class="modal-overlay" id="pwModal">
         <div class="modal" style="max-width:400px">
             <h3>🔑 修改密码</h3>
@@ -185,6 +306,20 @@
     </div>
 
     <script>
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            const overlay = document.getElementById('sidebarOverlay');
+            sidebar.classList.toggle('open');
+            overlay.classList.toggle('show');
+        }
+        document.querySelectorAll('.sidebar a').forEach(a => {
+            a.addEventListener('click', () => {
+                if (window.innerWidth <= 768) {
+                    document.getElementById('sidebar').classList.remove('open');
+                    document.getElementById('sidebarOverlay').classList.remove('show');
+                }
+            });
+        });
         function openModal(id) { document.getElementById(id).classList.add('show'); }
         function closeModal(id) { document.getElementById(id).classList.remove('show'); }
         document.querySelectorAll('.modal-overlay').forEach(m => {
@@ -194,7 +329,7 @@
             navigator.clipboard.writeText(text).then(() => {
                 const t = document.createElement('div');
                 t.textContent = '已复制';
-                t.style.cssText = 'position:fixed;bottom:20px;right:20px;background:#6c5ce7;color:#fff;padding:8px 16px;border-radius:8px;z-index:999;font-size:13px;';
+                t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#6c5ce7;color:#fff;padding:8px 16px;border-radius:8px;z-index:999;font-size:13px;';
                 document.body.appendChild(t);
                 setTimeout(() => t.remove(), 1500);
             });

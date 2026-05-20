@@ -7,9 +7,9 @@
     <span>{{ account.name }}</span>
 </div>
 
-<div class="header">
-    <div style="display:flex;align-items:center;gap:16px">
-        <h1 id="account-name-display">{{ account.name }}</h1>
+<div class="header detail-header">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <h1 id="account-name-display" style="font-size:20px">{{ account.name }}</h1>
         <button class="btn btn-sm btn-ghost" onclick="openModal('renameModal')">✏️ 重命名</button>
         {% if account.status == 'active' %}
         <span class="badge badge-green">活跃</span>
@@ -19,18 +19,17 @@
         <span class="badge badge-red">停用</span>
         {% endif %}
     </div>
-    <div style="display:flex;gap:10px">
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-ghost" onclick="checkAll()">🔍 检测全部</button>
         <form method="POST" action="{{ url_for('account_sync', account_id=account.id) }}" style="display:inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button class="btn btn-green" type="submit">🔄 同步订阅</button>
+            <button class="btn btn-green" type="submit">🔄 同步</button>
         </form>
         <button class="btn btn-ghost" onclick="openModal('editModal')">⚙️ 设置</button>
     </div>
 </div>
 
-<!-- 流量卡片 -->
-<div class="stats" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr))">
+<div class="stats" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr))">
     <div class="stat-card">
         <div class="label">节点数</div>
         <div class="value blue">{{ nodes | length }}</div>
@@ -44,44 +43,38 @@
     </div>
     <div class="stat-card">
         <div class="label">最后同步</div>
-        <div style="font-size:16px;color:var(--text2)">{{ account.last_synced_at or '未同步' }}</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">流量操作</div>
-        <form method="POST" action="{{ url_for('account_reset_traffic', account_id=account.id) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button class="btn btn-sm btn-danger" type="submit" style="margin-top:8px">🔄 重置流量</button>
-        </form>
+        <div style="font-size:14px;color:var(--text2);word-break:break-all">{{ account.last_synced_at or '未同步' }}</div>
     </div>
 </div>
 
-<!-- 节点列表 -->
 <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
         <h2 style="margin-bottom:0">🖥️ 节点列表</h2>
         <span style="font-size:13px;color:var(--text2)">共 {{ nodes | length }} 个节点</span>
     </div>
 
     {% if nodes %}
-    <table>
+    <table class="rwd-table">
+        <thead>
         <tr>
-            <th>#</th><th>节点名称</th><th>地址</th><th>密码</th>
-            <th>状态</th><th>最后检测</th><th>操作</th>
+            <th class="hide-mobile">#</th><th>节点名称</th><th>地址</th><th>密码</th>
+            <th>状态</th><th class="hide-mobile">最后检测</th><th>操作</th>
         </tr>
+        </thead>
         {% for n in nodes %}
         <tr>
-            <td style="color:var(--text2)">{{ loop.index }}</td>
-            <td><strong>{{ n.name }}</strong></td>
-            <td>
-                <code style="background:var(--bg);padding:2px 8px;border-radius:4px;font-size:13px">{{ n.host }}:{{ n.port }}</code>
-                <span class="copy-btn" onclick="copyText('{{ n.host }}:{{ n.port }}')" title="复制地址" style="cursor:pointer;color:var(--accent);margin-left:4px">📋</span>
+            <td data-label="#" class="hide-mobile" style="color:var(--text2)">{{ loop.index }}</td>
+            <td data-label="节点"><strong>{{ n.name }}</strong></td>
+            <td data-label="地址">
+                <code style="background:var(--bg);padding:2px 8px;border-radius:4px;font-size:12px;word-break:break-all">{{ n.host }}:{{ n.port }}</code>
+                <span onclick="copyText('{{ n.host }}:{{ n.port }}')" style="cursor:pointer;color:var(--accent);margin-left:4px;flex-shrink:0">📋</span>
             </td>
-            <td>
-                <span style="font-family:monospace;font-size:13px" id="pw-{{ n.id }}">{{ n.password[:6] }}•••</span>
-                <span class="copy-btn" onclick="copyText('{{ n.password }}')" title="复制密码" style="cursor:pointer;color:var(--accent);margin-left:4px">📋</span>
-                <span onclick="togglePw({{ n.id }}, '{{ n.password }}')" style="cursor:pointer;color:var(--text2);margin-left:4px;font-size:12px">👁️</span>
+            <td data-label="密码">
+                <span style="font-family:monospace;font-size:12px" id="pw-{{ n.id }}">{{ n.password[:6] }}•••</span>
+                <span onclick="copyText('{{ n.password }}')" style="cursor:pointer;color:var(--accent);margin-left:4px;flex-shrink:0">📋</span>
+                <span onclick="togglePw({{ n.id }}, '{{ n.password }}')" style="cursor:pointer;color:var(--text2);margin-left:4px;font-size:12px;flex-shrink:0">👁️</span>
             </td>
-            <td id="status-{{ n.id }}">
+            <td data-label="状态" id="status-{{ n.id }}">
                 {% if n.is_online == 1 %}
                 <span class="badge badge-green">在线</span>
                 {% elif n.is_online == 0 %}
@@ -90,14 +83,16 @@
                 <span class="badge" style="background:rgba(139,143,163,0.15);color:var(--text2)">未检测</span>
                 {% endif %}
             </td>
-            <td style="font-size:12px;color:var(--text2)">{{ n.last_checked_at or '-' }}</td>
-            <td>
-                <button class="btn btn-sm btn-ghost" onclick="checkNode({{ n.id }})">检测</button>
-                <button class="btn btn-sm btn-ghost" data-uri="{{ n.raw_uri | e }}" onclick="shareNode(this)" title="分享链接">🔗 分享</button>
-                <form method="POST" action="{{ url_for('node_delete', node_id=n.id) }}" style="display:inline" onsubmit="return confirm('确认删除节点 {{ n.name }}？')">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <button class="btn btn-sm btn-danger" type="submit">删除</button>
-                </form>
+            <td data-label="检测时间" class="hide-mobile" style="font-size:12px;color:var(--text2)">{{ n.last_checked_at or '-' }}</td>
+            <td data-label="操作">
+                <div style="display:flex;gap:6px;flex-wrap:wrap">
+                    <button class="btn btn-sm btn-ghost" onclick="checkNode({{ n.id }})">检测</button>
+                    <button class="btn btn-sm btn-ghost" data-uri="{{ n.raw_uri | e }}" onclick="shareNode(this)">🔗</button>
+                    <form method="POST" action="{{ url_for('node_delete', node_id=n.id) }}" style="display:inline" onsubmit="return confirm('确认删除节点 {{ n.name }}？')">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button class="btn btn-sm btn-danger" type="submit">删除</button>
+                    </form>
+                </div>
             </td>
         </tr>
         {% endfor %}
@@ -114,7 +109,6 @@
     {% endif %}
 </div>
 
-<!-- 重命名弹窗 -->
 <div class="modal-overlay" id="renameModal">
     <div class="modal" style="max-width:380px">
         <h3>✏️ 重命名账号</h3>
@@ -132,7 +126,6 @@
     </div>
 </div>
 
-<!-- 设置弹窗 -->
 <div class="modal-overlay" id="editModal">
     <div class="modal">
         <h3>⚙️ 账号设置</h3>
@@ -190,7 +183,7 @@ function shareNode(btn) {
     } catch(e) {}
     const toast = document.createElement('div');
     toast.textContent = ok ? '✅ 已复制分享链接' : '❌ 复制失败，请手动复制';
-    toast.style.cssText = 'position:fixed;bottom:20px;right:20px;background:' + (ok ? '#00b894' : '#ff6b6b') + ';color:#fff;padding:10px 18px;border-radius:8px;z-index:999;font-size:14px;';
+    toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:' + (ok ? '#00b894' : '#ff6b6b') + ';color:#fff;padding:10px 18px;border-radius:8px;z-index:999;font-size:14px;';
     document.body.appendChild(toast);
     setTimeout(() => toast.remove(), 2000);
 }

@@ -3,39 +3,41 @@
 {% block content %}
 <div class="header">
     <h1>📡 节点检测</h1>
-    <div style="display:flex;gap:10px;align-items:center">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <span id="check-status" style="font-size:13px;color:var(--text2)"></span>
         <button class="btn btn-primary" id="checkAllBtn" onclick="checkAll()">🔍 一键检测全部</button>
     </div>
 </div>
 
 <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
         <h2 style="margin-bottom:0">唯一节点列表</h2>
         <span style="font-size:13px;color:var(--text2)">共 {{ nodes | length }} 个唯一节点（按地址去重）</span>
     </div>
 
     {% if nodes %}
-    <table>
+    <table class="rwd-table">
+        <thead>
         <tr>
-            <th>#</th>
+            <th class="hide-mobile">#</th>
             <th>节点名称</th>
             <th>协议</th>
-            <th>地址</th>
+            <th class="hide-mobile">地址</th>
             <th>状态</th>
             <th>延迟</th>
-            <th>最后检测</th>
+            <th class="hide-mobile">最后检测</th>
             <th>操作</th>
         </tr>
+        </thead>
         {% for n in nodes %}
         <tr>
-            <td style="color:var(--text2)">{{ loop.index }}</td>
-            <td><strong>{{ n.name }}</strong></td>
-            <td><span class="badge badge-blue">{{ n.protocol or 'anytls' }}</span></td>
-            <td>
+            <td data-label="#" class="hide-mobile" style="color:var(--text2)">{{ loop.index }}</td>
+            <td data-label="节点"><strong>{{ n.name }}</strong></td>
+            <td data-label="协议"><span class="badge badge-blue">{{ n.protocol or 'anytls' }}</span></td>
+            <td data-label="地址" class="hide-mobile">
                 <code style="background:var(--bg);padding:2px 8px;border-radius:4px;font-size:13px">{{ n.host }}:{{ n.port }}</code>
             </td>
-            <td id="status-{{ n.host }}-{{ n.port }}">
+            <td data-label="状态" id="status-{{ n.host }}-{{ n.port }}">
                 {% if n.is_online == 1 %}
                 <span class="badge badge-green">在线</span>
                 {% elif n.is_online == 0 %}
@@ -44,7 +46,7 @@
                 <span class="badge" style="background:rgba(139,143,163,0.15);color:var(--text2)">未检测</span>
                 {% endif %}
             </td>
-            <td id="latency-{{ n.host }}-{{ n.port }}" style="font-size:13px">
+            <td data-label="延迟" id="latency-{{ n.host }}-{{ n.port }}" style="font-size:13px">
                 {% if n.latency_ms is not none and n.latency_ms >= 0 %}
                     {% if n.latency_ms < 200 %}
                     <span style="color:var(--green)">{{ n.latency_ms }}ms</span>
@@ -57,8 +59,8 @@
                 <span style="color:var(--text2)">-</span>
                 {% endif %}
             </td>
-            <td style="font-size:12px;color:var(--text2)">{{ n.last_checked_at or '-' }}</td>
-            <td>
+            <td data-label="检测时间" class="hide-mobile" style="font-size:12px;color:var(--text2)">{{ n.last_checked_at or '-' }}</td>
+            <td data-label="操作">
                 <button class="btn btn-sm btn-ghost" onclick="checkOne('{{ n.host }}', {{ n.port }})">检测</button>
             </td>
         </tr>
@@ -74,7 +76,7 @@
 
 <div class="card">
     <h2>📊 统计</h2>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;text-align:center">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:12px;text-align:center">
         <div>
             <div style="font-size:24px;font-weight:700;color:var(--blue)">{{ nodes | length }}</div>
             <div style="font-size:12px;color:var(--text2)">唯一节点</div>
@@ -129,7 +131,7 @@ async function checkAll() {
     btn.textContent = '⏳ 检测中...';
     status.textContent = '';
 
-    const rows = document.querySelectorAll('table tbody tr, table tr:not(:first-child)');
+    const rows = document.querySelectorAll('.rwd-table tbody tr');
     let total = 0, online = 0, offline = 0;
 
     for (const row of rows) {
