@@ -5,7 +5,6 @@ import os
 import json
 import re
 import sqlite3
-import hashlib
 import secrets
 import base64
 import time
@@ -21,6 +20,8 @@ from flask import (
 from flask_wtf.csrf import CSRFProtect
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+
+from security_utils import hash_password, verify_password
 
 app = Flask(__name__)
 app.config['DATABASE'] = os.environ.get(
@@ -133,7 +134,7 @@ def init_db():
     if admin_count == 0:
         admin_user = os.environ.get('ANYTLS_ADMIN_USER', 'admin').strip() or 'admin'
         admin_pass = os.environ.get('ANYTLS_ADMIN_PASS', 'admin123')
-        pw_hash = hashlib.sha256(admin_pass.encode()).hexdigest()
+        pw_hash = hash_password(admin_pass)
         db.execute(
             'INSERT INTO admin_users (username, password_hash) VALUES (?, ?)',
             (admin_user, pw_hash)
@@ -484,13 +485,20 @@ def login():
     if request.method == 'POST':
         username = request.form.get('username', '')
         password = request.form.get('password', '')
-        pw_hash = hashlib.sha256(password.encode()).hexdigest()
         db = get_db()
         user = db.execute(
-            'SELECT * FROM admin_users WHERE username=? AND password_hash=?',
-            (username, pw_hash)
+            'SELECT * FROM admin_users WHERE username=?', (username,)
         ).fetchone()
+        ok, needs_upgrade = (False, False)
         if user:
+            ok, needs_upgrade = verify_password(user['password_hash'], password)
+        if ok:
+            if needs_upgrade:
+                db.execute(
+                    'UPDATE admin_users SET password_hash=? WHERE id=?',
+                    (hash_password(password), user['id'])
+                )
+                db.commit()
             session['logged_in'] = True
             session['username'] = username
             return redirect(url_for('dashboard'))
@@ -682,20 +690,22 @@ def account_sync(account_id):
                VALUES (?, ?, ?, ?, ?, ?)''',
             (account_id, n['name'], n['host'], n['port'], n['password'], n.get('raw_uri', ''))
         )
-    # 更新流量信息
-    update_fields = 'node_count=?, last_synced_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP'
+    # 更新流量信息（白名单校验字段名，防止SQL注入）
+    allowed_fields = {'node_count', 'traffic_used_bytes', 'traffic_limit_gb', 'notes'}
+    field_clauses = ['node_count=?', 'last_synced_at=CURRENT_TIMESTAMP', 'updated_at=CURRENT_TIMESTAMP']
     update_params = [len(nodes)]
     if traffic_info.get('used_bytes'):
-        update_fields += ', traffic_used_bytes=?'
+        field_clauses.append('traffic_used_bytes=?')
         update_params.append(traffic_info['used_bytes'])
     if traffic_info.get('total_gb'):
-        update_fields += ', traffic_limit_gb=?'
+        field_clauses.append('traffic_limit_gb=?')
         update_params.append(traffic_info['total_gb'])
     if traffic_info.get('expire_date'):
-        update_fields += ', notes=?'
+        field_clauses.append('notes=?')
         update_params.append(f"到期: {traffic_info['expire_date']}")
     update_params.append(account_id)
-    db.execute(f'UPDATE accounts SET {update_fields} WHERE id=?', update_params)
+    update_sql = f"UPDATE accounts SET {', '.join(field_clauses)} WHERE id=?"
+    db.execute(update_sql, update_params)
     db.commit()
     flash(f'同步完成，更新了 {len(nodes)} 个节点', 'success')
     return redirect(url_for('account_detail', account_id=account_id))
@@ -941,19 +951,21 @@ def api_sync_all():
                        VALUES (?, ?, ?, ?, ?, ?)''',
                     (account['id'], n['name'], n['host'], n['port'], n['password'], n.get('raw_uri', ''))
                 )
-            update_fields = 'node_count=?, last_synced_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP'
+            # 更新流量信息（白名单校验字段名，防止SQL注入）
+            field_clauses = ['node_count=?', 'last_synced_at=CURRENT_TIMESTAMP', 'updated_at=CURRENT_TIMESTAMP']
             update_params = [len(nodes)]
             if traffic_info.get('used_bytes'):
-                update_fields += ', traffic_used_bytes=?'
+                field_clauses.append('traffic_used_bytes=?')
                 update_params.append(traffic_info['used_bytes'])
             if traffic_info.get('total_gb'):
-                update_fields += ', traffic_limit_gb=?'
+                field_clauses.append('traffic_limit_gb=?')
                 update_params.append(traffic_info['total_gb'])
             if traffic_info.get('expire_date'):
-                update_fields += ', notes=?'
+                field_clauses.append('notes=?')
                 update_params.append(f"到期: {traffic_info['expire_date']}")
             update_params.append(account['id'])
-            db.execute(f'UPDATE accounts SET {update_fields} WHERE id=?', update_params)
+            update_sql = f"UPDATE accounts SET {', '.join(field_clauses)} WHERE id=?"
+            db.execute(update_sql, update_params)
             results.append({"id": account['id'], "name": account['name'], "status": "ok", "nodes": len(nodes)})
         except Exception as e:
             results.append({"id": account['id'], "name": account['name'], "status": "error", "msg": str(e)})
@@ -989,16 +1001,15 @@ def change_password():
         return redirect(url_for('dashboard'))
 
     db = get_db()
-    old_hash = hashlib.sha256(old_pw.encode()).hexdigest()
     user = db.execute(
-        'SELECT * FROM admin_users WHERE username=? AND password_hash=?',
-        (session.get('username', 'admin'), old_hash)
+        'SELECT * FROM admin_users WHERE username=?',
+        (session.get('username', 'admin'),)
     ).fetchone()
-    if not user:
+    if not user or not verify_password(user['password_hash'], old_pw)[0]:
         flash('原密码错误', 'error')
         return redirect(url_for('dashboard'))
 
-    new_hash = hashlib.sha256(new_pw.encode()).hexdigest()
+    new_hash = hash_password(new_pw)
     db.execute('UPDATE admin_users SET password_hash=? WHERE id=?', (new_hash, user['id']))
     db.commit()
     flash('密码修改成功', 'success')
