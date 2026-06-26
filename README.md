@@ -1,6 +1,6 @@
 # AnyTLS 节点统一管理面板
 
-[![CI](https://github.com/Elegying/anytls-panel/actions/workflows/ci.yml/badge.svg)](https://github.com/Elegying/anytls-panel/actions/workflows/ci.yml)
+[GitHub Actions](https://github.com/Elegying/SSR_Panel/actions)
 
 轻量级 Web 面板，通过订阅导入统一管理多个代理节点账号。支持 anytls / trojan / vmess / vless / hysteria2 / tuic / shadowsocks 等多种协议。
 
@@ -25,14 +25,14 @@
 ### 方式一：在线部署
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/Elegying/anytls-panel/main/deploy.sh)
+bash <(curl -sL https://raw.githubusercontent.com/Elegying/SSR_Panel/main/anytls-panel/deploy.sh)
 ```
 
 ### 方式二：克隆部署
 
 ```bash
-git clone https://github.com/Elegying/anytls-panel.git
-cd anytls-panel
+git clone https://github.com/Elegying/SSR_Panel.git
+cd SSR_Panel/anytls-panel
 bash deploy.sh
 ```
 

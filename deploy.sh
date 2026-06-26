@@ -6,8 +6,9 @@ set -Eeuo pipefail
 PANEL_DIR="${ANYTLS_PANEL_DIR:-/opt/anytls-panel}"
 PORT="${1:-${ANYTLS_PANEL_PORT:-8866}}"
 SERVICE_NAME="${ANYTLS_SERVICE_NAME:-anytls-panel}"
-REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/anytls-panel.git}"
+REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/SSR_Panel.git}"
 REPO_REF="${ANYTLS_REPO_REF:-main}"
+REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-anytls-panel}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
 
 log() {
@@ -59,6 +60,7 @@ sync_project_files() {
 
     if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/app.py" ]]; then
         log "copying local project files to $PANEL_DIR"
+        find "$PANEL_DIR" -mindepth 1 -maxdepth 1 ! -name anytls.db -exec rm -rf {} +
         cp "$SCRIPT_DIR/app.py" "$SCRIPT_DIR/requirements.txt" "$PANEL_DIR/"
         if [[ -f "$SCRIPT_DIR/uninstall.sh" ]]; then
             cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"
@@ -73,16 +75,21 @@ sync_project_files() {
     fi
 
     log "fetching project from $REPO_URL ($REPO_REF)"
-    if [[ -d "$PANEL_DIR/.git" ]]; then
-        git -C "$PANEL_DIR" fetch -q origin "$REPO_REF"
-        git -C "$PANEL_DIR" merge --ff-only -q "origin/$REPO_REF"
-        return
-    fi
 
     local tmp_dir
+    local source_dir
     tmp_dir="$(mktemp -d /tmp/anytls-panel.XXXXXX)"
     git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$tmp_dir" -q
-    cp -R "$tmp_dir"/. "$PANEL_DIR"/
+    source_dir="$tmp_dir"
+    if [[ -n "$REPO_SUBDIR" ]]; then
+        source_dir="$tmp_dir/$REPO_SUBDIR"
+    fi
+    if [[ ! -f "$source_dir/app.py" ]]; then
+        rm -rf "$tmp_dir"
+        fail "project files not found: $source_dir"
+    fi
+    find "$PANEL_DIR" -mindepth 1 -maxdepth 1 ! -name anytls.db -exec rm -rf {} +
+    cp -R "$source_dir"/. "$PANEL_DIR"/
     rm -rf "$tmp_dir"
 }
 

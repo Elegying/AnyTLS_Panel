@@ -16,14 +16,14 @@
 在线部署：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/anytls-panel/main/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/SSR_Panel/main/anytls-panel/deploy.sh)
 ```
 
 克隆后部署：
 
 ```bash
-git clone https://github.com/Elegying/anytls-panel.git
-cd anytls-panel
+git clone https://github.com/Elegying/SSR_Panel.git
+cd SSR_Panel/anytls-panel
 bash deploy.sh
 ```
 
@@ -33,6 +33,7 @@ bash deploy.sh
 ANYTLS_PANEL_DIR="/opt/anytls-panel" \
 ANYTLS_SERVICE_NAME="anytls-panel" \
 ANYTLS_PANEL_PORT="8866" \
+ANYTLS_REPO_SUBDIR="anytls-panel" \
 ANYTLS_ADMIN_USER="admin" \
 ANYTLS_ADMIN_PASS="change-this-password" \
 bash deploy.sh
@@ -53,7 +54,7 @@ curl -I http://127.0.0.1:8866/login
 重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/anytls-panel/main/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/SSR_Panel/main/anytls-panel/deploy.sh)
 ```
 
 如果使用自定义目录或服务名，更新时需要继续传入相同环境变量。
