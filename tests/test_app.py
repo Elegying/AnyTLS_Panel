@@ -57,7 +57,7 @@ proxies:
                 os.environ,
                 {
                     "ANYTLS_DATABASE": str(database),
-                    "ANYTLS_ADMIN_USER": "Elegy",
+                    "ANYTLS_ADMIN_USER": "test-admin",
                     "ANYTLS_ADMIN_PASS": "strong-password",
                 },
                 clear=False,
@@ -68,7 +68,7 @@ proxies:
             row = db.execute("SELECT username, password_hash FROM admin_users").fetchone()
             db.close()
 
-        self.assertEqual(row[0], "Elegy")
+        self.assertEqual(row[0], "test-admin")
         self.assertEqual(row[1], app.hashlib.sha256(b"strong-password").hexdigest())
 
     def test_generated_subscription_url_uses_current_request_host(self):
