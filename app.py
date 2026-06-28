@@ -8,10 +8,13 @@ import sqlite3
 import secrets
 import base64
 import time
+import sys
 from datetime import datetime
 from functools import wraps
 from urllib.parse import urlparse, parse_qs, unquote
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
@@ -68,6 +71,39 @@ def close_db(exception):
     db = g.pop('db', None)
     if db is not None:
         db.close()
+
+
+def get_initial_admin_credentials():
+    admin_user = os.environ.get('ANYTLS_ADMIN_USER', 'admin').strip() or 'admin'
+    env_password = os.environ.get('ANYTLS_ADMIN_PASS')
+    if env_password:
+        return admin_user, env_password, ''
+
+    password_file = Path(
+        os.environ.get('ANYTLS_ADMIN_PASSWORD_FILE')
+        or Path(app.config['DATABASE']).with_name('.initial_admin_password')
+    )
+    try:
+        if password_file.exists():
+            password = password_file.read_text(encoding='utf-8').strip()
+            if password:
+                app.config['INITIAL_ADMIN_PASSWORD_FILE'] = str(password_file)
+                return admin_user, password, str(password_file)
+
+        alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+        password = ''.join(secrets.choice(alphabet) for _ in range(18))
+        password_file.parent.mkdir(parents=True, exist_ok=True)
+        password_file.write_text(password + '\n', encoding='utf-8')
+        try:
+            password_file.chmod(0o600)
+        except OSError:
+            pass
+        app.config['INITIAL_ADMIN_PASSWORD_FILE'] = str(password_file)
+        return admin_user, password, str(password_file)
+    except OSError:
+        password = secrets.token_urlsafe(18)
+        return admin_user, password, ''
+
 
 def init_db():
     db = sqlite3.connect(app.config['DATABASE'])
@@ -132,8 +168,7 @@ def init_db():
 
     admin_count = db.execute('SELECT COUNT(*) FROM admin_users').fetchone()[0]
     if admin_count == 0:
-        admin_user = os.environ.get('ANYTLS_ADMIN_USER', 'admin').strip() or 'admin'
-        admin_pass = os.environ.get('ANYTLS_ADMIN_PASS', 'admin123')
+        admin_user, admin_pass, _ = get_initial_admin_credentials()
         pw_hash = hash_password(admin_pass)
         db.execute(
             'INSERT INTO admin_users (username, password_hash) VALUES (?, ?)',
@@ -1274,5 +1309,7 @@ if __name__ == '__main__':
     host = os.environ.get('HOST', '0.0.0.0')
     debug = os.environ.get('DEBUG', '0') == '1'
     print(f"\n  AnyTLS Panel running at http://{host}:{port}")
-    print(f"  Default login: admin / admin123\n")
+    if app.config.get('INITIAL_ADMIN_PASSWORD_FILE'):
+        print(f"  Initial admin user: admin")
+        print(f"  Initial password file: {app.config['INITIAL_ADMIN_PASSWORD_FILE']}\n")
     app.run(host=host, port=port, debug=debug)

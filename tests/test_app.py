@@ -57,7 +57,7 @@ proxies:
                 os.environ,
                 {
                     "ANYTLS_DATABASE": str(database),
-                    "ANYTLS_ADMIN_USER": "test-admin",
+                    "ANYTLS_ADMIN_USER": "Elegy",
                     "ANYTLS_ADMIN_PASS": "strong-password",
                 },
                 clear=False,
@@ -68,8 +68,37 @@ proxies:
             row = db.execute("SELECT username, password_hash FROM admin_users").fetchone()
             db.close()
 
-        self.assertEqual(row[0], "test-admin")
-        self.assertEqual(row[1], app.hashlib.sha256(b"strong-password").hexdigest())
+        self.assertEqual(row[0], "Elegy")
+        ok, needs_upgrade = app.verify_password(row[1], "strong-password")
+        self.assertTrue(ok)
+        self.assertFalse(needs_upgrade)
+
+    def test_initial_admin_password_is_generated_without_environment_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            password_file = Path(tmp) / ".initial_admin_password"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "ANYTLS_DATABASE": str(database),
+                    "ANYTLS_ADMIN_PASSWORD_FILE": str(password_file),
+                },
+                clear=False,
+            ):
+                os.environ.pop("ANYTLS_ADMIN_PASS", None)
+                app = load_app(database)
+
+            generated_password = password_file.read_text(encoding="utf-8").strip()
+            db = sqlite3.connect(app.app.config["DATABASE"])
+            row = db.execute("SELECT username, password_hash FROM admin_users").fetchone()
+            db.close()
+
+        self.assertEqual(row[0], "admin")
+        self.assertNotEqual(generated_password, "admin123")
+        ok, _ = app.verify_password(row[1], generated_password)
+        self.assertTrue(ok)
+        weak_ok, _ = app.verify_password(row[1], "admin123")
+        self.assertFalse(weak_ok)
 
     def test_generated_subscription_url_uses_current_request_host(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,6 +148,12 @@ proxies:
         self.assertIn('cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"', content)
         self.assertNotIn("默认账号:", content)
         self.assertNotIn("默认密码:", content)
+
+    def test_start_script_does_not_advertise_static_default_password(self):
+        content = (REPO_ROOT / "start.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn("admin123", content)
+        self.assertIn(".initial_admin_password", content)
 
     def test_uninstall_script_requires_explicit_confirmation(self):
         content = (REPO_ROOT / "uninstall.sh").read_text(encoding="utf-8")
