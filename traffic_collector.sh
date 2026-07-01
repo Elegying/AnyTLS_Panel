@@ -14,6 +14,7 @@
 # ─── 配置 ─────────────────────────────
 PANEL_URL="http://面板地址:8866"  # 修改为你的面板地址
 PASSWORD="your_password_here"       # 当前节点的 anytls 密码
+API_TOKEN="your_traffic_api_token"  # 面板部署时输出，或读取 .traffic_api_token
 
 # ─── iptables 方式 ────────────────────
 # 需要先添加 iptables 规则（首次运行自动添加）:
@@ -46,6 +47,7 @@ report_traffic() {
     local bytes=$1
     curl -s -X POST "${PANEL_URL}/api/traffic/set" \
         -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${API_TOKEN}" \
         -d "{\"password\": \"${PASSWORD}\", \"total_bytes\": ${bytes}}" \
         > /dev/null 2>&1
 }

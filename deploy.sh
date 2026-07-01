@@ -60,7 +60,12 @@ sync_project_files() {
 
     if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/app.py" ]]; then
         log "copying local project files to $PANEL_DIR"
-        find "$PANEL_DIR" -mindepth 1 -maxdepth 1 ! -name anytls.db -exec rm -rf {} +
+        find "$PANEL_DIR" -mindepth 1 -maxdepth 1 \
+            ! -name anytls.db \
+            ! -name .secret_key \
+            ! -name .initial_admin_password \
+            ! -name .traffic_api_token \
+            -exec rm -rf {} +
         cp "$SCRIPT_DIR/app.py" "$SCRIPT_DIR/requirements.txt" "$PANEL_DIR/"
         if [[ -f "$SCRIPT_DIR/uninstall.sh" ]]; then
             cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"
@@ -88,7 +93,12 @@ sync_project_files() {
         rm -rf "$tmp_dir"
         fail "project files not found: $source_dir"
     fi
-    find "$PANEL_DIR" -mindepth 1 -maxdepth 1 ! -name anytls.db -exec rm -rf {} +
+    find "$PANEL_DIR" -mindepth 1 -maxdepth 1 \
+        ! -name anytls.db \
+        ! -name .secret_key \
+        ! -name .initial_admin_password \
+        ! -name .traffic_api_token \
+        -exec rm -rf {} +
     cp -R "$source_dir"/. "$PANEL_DIR"/
     rm -rf "$tmp_dir"
 }
@@ -103,6 +113,14 @@ print(''.join(secrets.choice(alphabet) for _ in range(18)))
 PY
 }
 
+generate_api_token() {
+    python3 - <<'PY'
+import secrets
+
+print(secrets.token_urlsafe(32))
+PY
+}
+
 prepare_admin_credentials() {
     ADMIN_USER="${ANYTLS_ADMIN_USER:-admin}"
     ADMIN_PASS="${ANYTLS_ADMIN_PASS:-}"
@@ -113,6 +131,25 @@ prepare_admin_credentials() {
     if [[ -z "$ADMIN_PASS" ]]; then
         ADMIN_PASS="$(generate_password)"
     fi
+}
+
+prepare_traffic_api_token() {
+    TRAFFIC_API_TOKEN_FILE="${ANYTLS_TRAFFIC_API_TOKEN_FILE:-$PANEL_DIR/.traffic_api_token}"
+    TRAFFIC_API_TOKEN="${ANYTLS_TRAFFIC_API_TOKEN:-}"
+    FRESH_TRAFFIC_API_TOKEN=0
+
+    if [[ -z "$TRAFFIC_API_TOKEN" && -s "$TRAFFIC_API_TOKEN_FILE" ]]; then
+        TRAFFIC_API_TOKEN="$(tr -d '\r\n' < "$TRAFFIC_API_TOKEN_FILE")"
+    fi
+    if [[ -z "$TRAFFIC_API_TOKEN" ]]; then
+        TRAFFIC_API_TOKEN="$(generate_api_token)"
+        FRESH_TRAFFIC_API_TOKEN=1
+    fi
+
+    mkdir -p "$(dirname "$TRAFFIC_API_TOKEN_FILE")"
+    install -m 600 /dev/null "$TRAFFIC_API_TOKEN_FILE"
+    printf '%s\n' "$TRAFFIC_API_TOKEN" > "$TRAFFIC_API_TOKEN_FILE"
+    chmod 600 "$TRAFFIC_API_TOKEN_FILE" 2>/dev/null || true
 }
 
 install_python_deps() {
@@ -156,6 +193,7 @@ ExecStart=${PANEL_DIR}/venv/bin/gunicorn -w 2 -b 0.0.0.0:${PORT} --timeout 60 ap
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+Environment=ANYTLS_TRAFFIC_API_TOKEN_FILE=${TRAFFIC_API_TOKEN_FILE}
 
 [Install]
 WantedBy=multi-user.target
@@ -188,6 +226,10 @@ print_summary() {
     else
         echo "  Existing database preserved; use the current admin credentials."
     fi
+    echo "  Traffic API token file: ${TRAFFIC_API_TOKEN_FILE}"
+    if [[ "${FRESH_TRAFFIC_API_TOKEN:-0}" -eq 1 ]]; then
+        echo "  Traffic API token: ${TRAFFIC_API_TOKEN}"
+    fi
     echo "  Service:    ${SERVICE_NAME}"
     echo
 }
@@ -195,6 +237,7 @@ print_summary() {
 ensure_runtime
 sync_project_files
 prepare_admin_credentials
+prepare_traffic_api_token
 install_python_deps
 initialize_database
 write_service

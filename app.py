@@ -9,6 +9,7 @@ import secrets
 import base64
 import time
 import sys
+import hmac
 from datetime import datetime
 from functools import wraps
 from urllib.parse import urlparse, parse_qs, unquote
@@ -103,6 +104,55 @@ def get_initial_admin_credentials():
     except OSError:
         password = secrets.token_urlsafe(18)
         return admin_user, password, ''
+
+
+def get_traffic_api_token():
+    env_token = os.environ.get('ANYTLS_TRAFFIC_API_TOKEN', '').strip()
+    if env_token:
+        return env_token
+
+    token_file = Path(
+        os.environ.get('ANYTLS_TRAFFIC_API_TOKEN_FILE')
+        or Path(app.config['DATABASE']).with_name('.traffic_api_token')
+    )
+    app.config['TRAFFIC_API_TOKEN_FILE'] = str(token_file)
+
+    try:
+        if token_file.exists():
+            token = token_file.read_text(encoding='utf-8').strip()
+            if token:
+                return token
+
+        token = secrets.token_urlsafe(32)
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(token + '\n', encoding='utf-8')
+        try:
+            token_file.chmod(0o600)
+        except OSError:
+            pass
+        return token
+    except OSError:
+        return ''
+
+
+def _request_api_token():
+    auth = request.headers.get('Authorization', '').strip()
+    if auth.lower().startswith('bearer '):
+        return auth[7:].strip()
+    return request.headers.get('X-API-Token', '').strip()
+
+
+def require_traffic_api_token(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        expected = get_traffic_api_token()
+        supplied = _request_api_token()
+        if not expected:
+            return jsonify({"error": "traffic api token is not configured"}), 503
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            return jsonify({"error": "invalid traffic api token"}), 401
+        return f(*args, **kwargs)
+    return decorated
 
 
 def init_db():
@@ -786,6 +836,8 @@ def node_delete(node_id):
 
 @app.route('/api/traffic/report', methods=['POST'])
 @csrf.exempt
+@limiter.limit("60 per minute")
+@require_traffic_api_token
 def api_report_traffic():
     """上报流量: {"account_id": 1, "bytes_used": 123} 或 {"password": "xxx", ...}"""
     data = request.get_json(silent=True)
@@ -831,6 +883,9 @@ def api_report_traffic():
     return jsonify({"results": results})
 
 @app.route('/api/traffic/set', methods=['POST'])
+@csrf.exempt
+@limiter.limit("60 per minute")
+@require_traffic_api_token
 def api_set_traffic():
     """设置流量绝对值: {"account_id": 1, "total_bytes": 999}"""
     data = request.get_json(silent=True)

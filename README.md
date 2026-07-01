@@ -90,14 +90,18 @@ bash deploy.sh 9090
 ```bash
 # 按账号 ID 上报
 curl -X POST http://面板地址:8866/api/traffic/report \
+  -H "Authorization: Bearer YOUR_TRAFFIC_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"account_id": 1, "bytes_used": 1073741824}'
 
 # 按密码定位账号
 curl -X POST http://面板地址:8866/api/traffic/report \
+  -H "Authorization: Bearer YOUR_TRAFFIC_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"password": "xxx", "bytes_used": 1073741824}'
 ```
+
+流量上报接口使用独立 API token 鉴权。部署脚本会生成并保存到面板目录的 `.traffic_api_token`，也可以通过环境变量 `ANYTLS_TRAFFIC_API_TOKEN` 或 `ANYTLS_TRAFFIC_API_TOKEN_FILE` 指定。
 
 ## 🛠️ 管理命令
 
@@ -144,6 +148,7 @@ anytls-panel/
 - ✅ CSRF 保护（所有 POST 表单验证 Token）
 - ✅ 登录速率限制（5次/分钟，防暴力破解）
 - ✅ API 接口豁免 CSRF（供外部脚本调用）
+- ✅ 流量上报 API 需要 Bearer token，避免匿名写入流量数据
 - ✅ Session HttpOnly + SameSite=Lax
 - ✅ 密码 SHA256 哈希存储
 - ✅ Secret Key 持久化（多 Worker 共享）

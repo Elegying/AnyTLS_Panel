@@ -125,6 +125,62 @@ proxies:
         payload = response.get_json()
         self.assertTrue(payload["url"].startswith("https://panel.example:9443/sub/"))
 
+    def test_traffic_api_requires_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            token_file = Path(tmp) / ".traffic_api_token"
+            token_file.write_text("traffic-token\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "ANYTLS_DATABASE": str(database),
+                    "ANYTLS_TRAFFIC_API_TOKEN_FILE": str(token_file),
+                },
+                clear=False,
+            ):
+                app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                cursor = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "anytls://node-secret@example.com:443#demo"),
+                )
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        cursor.lastrowid,
+                        "demo-node",
+                        "example.com",
+                        443,
+                        "node-secret",
+                        "anytls://node-secret@example.com:443#demo",
+                    ),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                missing = client.post(
+                    "/api/traffic/set",
+                    json={"password": "node-secret", "total_bytes": 123},
+                )
+                bad = client.post(
+                    "/api/traffic/set",
+                    headers={"Authorization": "Bearer wrong-token"},
+                    json={"password": "node-secret", "total_bytes": 123},
+                )
+                ok = client.post(
+                    "/api/traffic/set",
+                    headers={"Authorization": "Bearer traffic-token"},
+                    json={"password": "node-secret", "total_bytes": 123},
+                )
+
+            self.assertEqual(missing.status_code, 401)
+            self.assertEqual(bad.status_code, 401)
+            self.assertEqual(ok.status_code, 200)
+            self.assertEqual(ok.get_json()["total_bytes"], 123)
+
     def test_account_detail_template_escapes_js_arguments(self):
         content = (REPO_ROOT / "templates" / "account_detail.html").read_text(encoding="utf-8")
 
@@ -143,7 +199,10 @@ proxies:
         self.assertNotIn("https://github.com/Elegying/anytls-panel.git", content)
         self.assertIn("ANYTLS_ADMIN_USER", content)
         self.assertIn("ANYTLS_ADMIN_PASS", content)
+        self.assertIn("ANYTLS_TRAFFIC_API_TOKEN_FILE", content)
+        self.assertIn(".traffic_api_token", content)
         self.assertIn("generate_password", content)
+        self.assertIn("generate_api_token", content)
         self.assertIn('systemctl restart "$SERVICE_NAME"', content)
         self.assertIn('cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"', content)
         self.assertNotIn("默认账号:", content)
