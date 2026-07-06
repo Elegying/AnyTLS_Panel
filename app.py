@@ -271,8 +271,10 @@ def parse_subscribe_url(url):
     if content.startswith('http://') or content.startswith('https://'):
         fetched = False
         for ua in [
-            'Shadowrocket/2209 CFNetwork/1410.1 Darwin/22.6.0',
+            'SSRVPN/2.4.0',
+            'Clash.Meta/1.18.0',
             'ClashForAndroid/2.5.12',
+            'Shadowrocket/2209 CFNetwork/1410.1 Darwin/22.6.0',
         ]:
             try:
                 import urllib.request
@@ -1260,19 +1262,22 @@ def public_subscribe(token):
         resp_headers['Content-Type'] = 'text/plain; charset=utf-8'
         return content, 200, resp_headers
 
+    ua = request.headers.get('User-Agent', '')
+    shadowrocket_compat = 'shadowrocket' in ua.lower()
+
     # 构建转换后的节点链接
     lines = []
     for n in nodes:
         uri = n.get('raw_uri', '')
         if not uri:
             continue
-        # anytls:// → trojan://（Shadowrocket 不支持 anytls 协议名）
-        if uri.startswith('anytls://'):
+        # Shadowrocket 旧版本不识别 anytls://，只在这个客户端上输出 trojan 兼容格式。
+        if shadowrocket_compat and uri.startswith('anytls://'):
             try:
                 m = re.match(r'anytls://([^@]+)@([^:/?#]+):(\d+)(?:/)?(?:\?([^#]*))?(?:#(.*))?', uri)
                 if m:
                     pw, host, port, q, frag = m.groups()
-                    from urllib.parse import parse_qs, urlencode, quote
+                    from urllib.parse import urlencode, quote
                     params = parse_qs(q or '')
                     sni = params.get('sni', [host])[0]
                     new_params = urlencode({'sni': sni, 'allowInsecure': '0'})
@@ -1302,7 +1307,6 @@ def public_subscribe(token):
         lines.append(uri)
 
     # 根据 User-Agent 返回不同格式
-    ua = request.headers.get('User-Agent', '')
     content = '\n'.join(lines)
 
     if 'Clash' in ua or 'clash' in ua:
@@ -1319,10 +1323,19 @@ def public_subscribe(token):
             p = node['protocol']
             proxy = {'name': node['name'], 'server': node['host'], 'port': node['port']}
             if p in ('anytls', 'anytls1'):
-                proxy['type'] = 'trojan'
+                params = parse_qs(urlparse(line).query)
+                allow_insecure = params.get(
+                    'allowInsecure',
+                    params.get('allow-insecure', params.get('insecure', ['0'])),
+                )[0]
+                proxy['type'] = 'anytls'
                 proxy['password'] = node['password']
-                proxy['sni'] = node['host']
-                proxy['skip-cert-verify'] = False
+                proxy['udp'] = True
+                proxy['sni'] = params.get('sni', [node['host']])[0] or node['host']
+                fingerprint = params.get('fp', [''])[0]
+                if fingerprint:
+                    proxy['client-fingerprint'] = fingerprint
+                proxy['skip-cert-verify'] = str(allow_insecure).lower() in ('1', 'true', 'yes')
             elif p == 'trojan':
                 proxy['type'] = 'trojan'
                 proxy['password'] = node['password']
