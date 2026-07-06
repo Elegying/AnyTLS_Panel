@@ -10,6 +10,8 @@ REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
 REPO_REF="${ANYTLS_REPO_REF:-main}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+APT_UPDATED=0
+RPM_UPDATED=0
 
 log() {
     printf '[anytls-panel] %s\n' "$*"
@@ -31,18 +33,48 @@ fi
 install_packages() {
     if command -v apt-get >/dev/null 2>&1; then
         export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
-        apt-get update -qq
+        if [[ "$APT_UPDATED" -eq 0 ]]; then
+            apt-get update -qq
+            APT_UPDATED=1
+        fi
         apt-get install -y -qq --no-install-recommends "$@"
         return
     fi
-    fail "apt-get not found; this installer currently supports Ubuntu/Debian"
+
+    local rpm_cmd=""
+    if command -v dnf >/dev/null 2>&1; then
+        rpm_cmd="dnf"
+    elif command -v yum >/dev/null 2>&1; then
+        rpm_cmd="yum"
+    fi
+    if [[ -n "$rpm_cmd" ]]; then
+        if [[ "$RPM_UPDATED" -eq 0 ]]; then
+            "$rpm_cmd" makecache -q >/dev/null 2>&1 || true
+            RPM_UPDATED=1
+        fi
+        "$rpm_cmd" install -y -q "$@"
+        return
+    fi
+
+    fail "no supported package manager found; please use Ubuntu/Debian or CentOS/RHEL"
+}
+
+python_venv_packages() {
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "python3-venv python3-pip"
+    else
+        echo "python3-pip python3-virtualenv"
+    fi
 }
 
 ensure_runtime() {
     local missing=()
-    command -v python3 >/dev/null 2>&1 || missing+=(python3)
-    command -v git >/dev/null 2>&1 || missing+=(git)
-    command -v curl >/dev/null 2>&1 || missing+=(curl)
+    local cmd_pkg cmd pkg
+    for cmd_pkg in "python3:python3" "git:git" "curl:curl" "systemctl:systemd"; do
+        cmd="${cmd_pkg%%:*}"
+        pkg="${cmd_pkg##*:}"
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$pkg")
+    done
 
     if (( ${#missing[@]} > 0 )); then
         log "installing missing tools: ${missing[*]}"
@@ -54,7 +86,13 @@ ensure_runtime() {
     if ! python3 -m venv "$probe_dir/venv" >/dev/null 2>&1 || ! "$probe_dir/venv/bin/python" -m pip --version >/dev/null 2>&1; then
         rm -rf "$probe_dir"
         log "installing Python venv support"
-        install_packages python3-venv
+        install_packages $(python_venv_packages) || install_packages python3-pip || true
+        probe_dir="$(mktemp -d /tmp/anytls-venv-check.XXXXXX)"
+        if ! python3 -m venv "$probe_dir/venv" >/dev/null 2>&1 || ! "$probe_dir/venv/bin/python" -m pip --version >/dev/null 2>&1; then
+            rm -rf "$probe_dir"
+            fail "Python venv/pip support is unavailable after installing system packages"
+        fi
+        rm -rf "$probe_dir"
     else
         rm -rf "$probe_dir"
     fi
