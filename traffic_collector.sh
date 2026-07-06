@@ -35,8 +35,8 @@ ensure_iptables() {
 
 # 获取流量计数
 get_traffic_bytes() {
-    local in_bytes=$(iptables -L INPUT -n -v -x 2>/dev/null | grep "dpt:${ANYTLS_PORT}" | awk '{print $2}')
-    local out_bytes=$(iptables -L OUTPUT -n -v -x 2>/dev/null | grep "spt:${ANYTLS_PORT}" | awk '{print $2}')
+    local in_bytes=$(iptables -L INPUT -n -v -x 2>/dev/null | grep "dpt:${ANYTLS_PORT}" | awk '{sum += $2} END {print sum + 0}')
+    local out_bytes=$(iptables -L OUTPUT -n -v -x 2>/dev/null | grep "spt:${ANYTLS_PORT}" | awk '{sum += $2} END {print sum + 0}')
     in_bytes=${in_bytes:-0}
     out_bytes=${out_bytes:-0}
     echo $((in_bytes + out_bytes))
@@ -59,4 +59,6 @@ main() {
     report_traffic ${total_bytes}
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main
+fi

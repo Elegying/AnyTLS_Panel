@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +35,33 @@ class AnyTlsPanelTests(unittest.TestCase):
         for script in REPO_ROOT.glob("*.sh"):
             data = script.read_bytes()
             self.assertNotIn(b"\r\n", data, msg=f"{script.name} uses CRLF line endings")
+
+    def test_traffic_collector_sums_multiple_iptables_matches(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        probe = f"""
+iptables() {{
+    if [ "$1" = "-L" ] && [ "$2" = "INPUT" ]; then
+        printf '%s\\n' \
+            '0 100 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443' \
+            '0 200 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443'
+        return 0
+    fi
+    if [ "$1" = "-L" ] && [ "$2" = "OUTPUT" ]; then
+        printf '%s\\n' \
+            '0 30 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp spt:443' \
+            '0 40 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp spt:443'
+        return 0
+    fi
+    return 0
+}}
+curl() {{ return 0; }}
+source "{script}"
+get_traffic_bytes
+"""
+
+        result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True)
+
+        self.assertEqual(result.stdout.strip(), "370")
 
     def test_clash_yaml_subscription_returns_nodes_and_traffic_tuple(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -649,6 +677,77 @@ proxies:
             self.assertIn("#demo", decoded)
             self.assertNotIn("trojan://", decoded)
             self.assertNotIn("#renamed", decoded)
+
+    def test_api_subscribe_preserves_synced_raw_uris(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            anytls_uri = "anytls://apw@any.example.com:443?sni=any.example.com#any-node"
+            trojan_uri = "trojan://tpw@trojan.example.com:443?sni=trojan.example.com#trojan-node"
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, status) VALUES (?, ?, ?)",
+                    ("demo", "https://sub.example/list", "active"),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (account_id, "any-node", "any.example.com", 443, "apw", anytls_uri, "anytls"),
+                )
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (account_id, "trojan-node", "trojan.example.com", 443, "tpw", trojan_uri, "trojan"),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["logged_in"] = True
+                    session["username"] = "admin"
+
+                response = client.get("/api/subscribe")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["links"], [anytls_uri, trojan_uri])
+
+    def test_check_all_nodes_persists_latency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "anytls://pw@example.com:443#demo"),
+                ).lastrowid
+                node_id = db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (account_id, "node", "example.com", 443, "pw", "anytls://pw@example.com:443#demo"),
+                ).lastrowid
+                db.commit()
+
+            check_result = {"online": True, "status": "online", "msg": "ok", "latency": 123}
+            with mock.patch.object(app, "_check_node_connect", return_value=check_result):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                        session["username"] = "admin"
+
+                    response = client.post(f"/api/accounts/{account_id}/check-all")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["results"][0]["latency"], 123)
+            with sqlite3.connect(database) as db:
+                is_online, latency_ms = db.execute(
+                    "SELECT is_online, latency_ms FROM nodes WHERE id=?",
+                    (node_id,),
+                ).fetchone()
+            self.assertEqual((is_online, latency_ms), (1, 123))
 
     def test_check_by_host_rejects_invalid_port(self):
         with tempfile.TemporaryDirectory() as tmp:

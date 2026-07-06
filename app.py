@@ -1093,13 +1093,20 @@ def api_check_all_nodes(account_id):
     for node in nodes:
         try:
             r = _check_node_connect(node['host'], node['port'])
+            latency = r.get('latency', -1)
             db.execute(
-                'UPDATE nodes SET is_online=?, last_checked_at=CURRENT_TIMESTAMP WHERE id=?',
-                (1 if r['online'] else 0, node['id'])
+                'UPDATE nodes SET is_online=?, last_checked_at=CURRENT_TIMESTAMP, latency_ms=? WHERE id=?',
+                (1 if r['online'] else 0, latency, node['id'])
             )
-            results.append({"node_id": node['id'], "name": node['name'], "online": r['online'], "msg": r['msg']})
+            results.append({
+                "node_id": node['id'],
+                "name": node['name'],
+                "online": r['online'],
+                "msg": r['msg'],
+                "latency": latency,
+            })
         except Exception as e:
-            results.append({"node_id": node['id'], "name": node['name'], "online": False, "msg": str(e)})
+            results.append({"node_id": node['id'], "name": node['name'], "online": False, "msg": str(e), "latency": -1})
     db.commit()
     return jsonify({"results": results})
 
@@ -1192,8 +1199,8 @@ def api_subscribe():
     for a in accounts:
         nodes = db.execute('SELECT * FROM nodes WHERE account_id=?', (a['id'],)).fetchall()
         for n in nodes:
-            link = f"anytls://{n['password']}@{n['host']}:{n['port']}?security=tls&allowInsecure=0#{n['name']}"
-            links.append(link)
+            if n['raw_uri']:
+                links.append(n['raw_uri'])
     return jsonify({"links": links, "count": len(links)})
 
 @app.route('/settings/password', methods=['POST'])
