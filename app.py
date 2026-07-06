@@ -268,7 +268,6 @@ def parse_subscribe_url(url):
     # 需要取样后选择最完整、AnyTLS 原生节点最多的结果。
     content = url.strip()
     traffic_info = {}
-    normalize_anytls_compat = False
     if content.startswith('http://') or content.startswith('https://'):
         candidates = []
         for ua in [
@@ -295,11 +294,8 @@ def parse_subscribe_url(url):
         if not candidates:
             raise ValueError("拉取订阅失败（所有 UA 均无法访问）")
         _score, content, traffic_info = max(candidates, key=lambda item: item[0])
-        normalize_anytls_compat = _score[0] > 0
 
     nodes = _parse_subscription_content(content)
-    if normalize_anytls_compat:
-        nodes = _normalize_anytls_compat_nodes(nodes)
     if not nodes:
         preview = content[:100].replace('\n', ' ').replace('\r', '')
         raise ValueError(f"订阅中未找到可用节点 (内容前100字符: {preview})")
@@ -334,27 +330,6 @@ def _subscription_candidate_score(nodes):
         if protocol in ('anytls', 'anytls1') or raw_uri.startswith('anytls://'):
             anytls_count += 1
     return anytls_count, len(nodes)
-
-
-def _normalize_anytls_compat_nodes(nodes):
-    has_native_anytls = any(
-        str(n.get('protocol', '')).lower().replace('-', '').replace('_', '') in ('anytls', 'anytls1')
-        or n.get('raw_uri', '').startswith('anytls://')
-        for n in nodes
-    )
-    if not has_native_anytls:
-        return nodes
-
-    normalized = []
-    for node in nodes:
-        protocol = str(node.get('protocol', '')).lower().replace('-', '').replace('_', '')
-        raw_uri = node.get('raw_uri', '')
-        if protocol == 'trojan' and raw_uri.startswith('trojan://'):
-            node = dict(node)
-            node['protocol'] = 'anytls'
-            node['raw_uri'] = 'anytls://' + raw_uri[len('trojan://'):]
-        normalized.append(node)
-    return normalized
 
 
 def _parse_subscription_content(content):
@@ -1314,7 +1289,7 @@ def _nodes_from_db_rows(db_nodes):
 @app.route('/sub/<token>')
 @csrf.exempt
 def public_subscribe(token):
-    """公开订阅端点：优先读取本地同步节点 → 应用重命名规则 → 返回转换后的订阅"""
+    """公开订阅端点：优先读取本地同步节点 → 原样分享真实节点"""
     if not token:
         return 'Invalid token', 404
 
@@ -1364,58 +1339,9 @@ def public_subscribe(token):
         if parts:
             resp_headers['Subscription-Userinfo'] = '; '.join(parts)
 
-    if not rules:
-        # 没有重命名规则，直接返回原始订阅
-        links = []
-        for n in nodes:
-            links.append(n.get('raw_uri', ''))
-        content = '\n'.join(links)
-        resp_headers['Content-Type'] = 'text/plain; charset=utf-8'
-        return content, 200, resp_headers
-
     ua = request.headers.get('User-Agent', '')
-    shadowrocket_compat = 'shadowrocket' in ua.lower()
 
-    # 构建转换后的节点链接
-    lines = []
-    for n in nodes:
-        uri = n.get('raw_uri', '')
-        if not uri:
-            continue
-        # Shadowrocket 旧版本不识别 anytls://，只在这个客户端上输出 trojan 兼容格式。
-        if shadowrocket_compat and uri.startswith('anytls://'):
-            try:
-                m = re.match(r'anytls://([^@]+)@([^:/?#]+):(\d+)(?:/)?(?:\?([^#]*))?(?:#(.*))?', uri)
-                if m:
-                    pw, host, port, q, frag = m.groups()
-                    from urllib.parse import urlencode, quote
-                    params = parse_qs(q or '')
-                    sni = params.get('sni', [host])[0]
-                    new_params = urlencode({'sni': sni, 'allowInsecure': '0'})
-                    name = quote(unquote(frag), safe='') if frag else ''
-                    uri = f'trojan://{pw}@{host}:{port}?{new_params}#{name}'
-            except Exception:
-                pass
-        # 处理 vmess://（base64 JSON，名字在 ps 字段）
-        if uri.startswith('vmess://'):
-            try:
-                payload = uri.split('://', 1)[1]
-                data = json.loads(base64.b64decode(payload).decode())
-                data['ps'] = _apply_rename(data.get('ps', ''), rules)
-                uri = 'vmess://' + base64.b64encode(json.dumps(data, ensure_ascii=False).encode()).decode()
-            except Exception:
-                pass
-        else:
-            # 通用格式：替换 fragment (#name) 中的名字
-            if '#' in uri:
-                base_part, frag = uri.rsplit('#', 1)
-                frag = unquote(frag)
-                frag = _apply_rename(frag, rules)
-                from urllib.parse import quote
-                uri = base_part + '#' + quote(frag, safe='')
-            # 也替换 URI 中其他位置出现的匹配文本（如 host 中的域名）
-            uri = _apply_rename(uri, rules)
-        lines.append(uri)
+    lines = [n.get('raw_uri', '') for n in nodes if n.get('raw_uri', '')]
 
     # 根据 User-Agent 返回不同格式
     content = '\n'.join(lines)
