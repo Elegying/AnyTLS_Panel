@@ -1,6 +1,6 @@
 # AnyTLS 节点统一管理面板
 
-[GitHub Actions](https://github.com/Elegying/SSR_Panel/actions)
+[GitHub Actions](https://github.com/Elegying/AnyTLS_Panel/actions)
 
 轻量级 Web 面板，通过订阅导入统一管理多个代理节点账号。支持 anytls / trojan / vmess / vless / hysteria2 / tuic / shadowsocks 等多种协议。
 
@@ -25,14 +25,14 @@
 ### 方式一：在线部署
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/Elegying/SSR_Panel/main/anytls-panel/deploy.sh)
+bash <(curl -sL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
 ```
 
 ### 方式二：克隆部署
 
 ```bash
-git clone https://github.com/Elegying/SSR_Panel.git
-cd SSR_Panel/anytls-panel
+git clone https://github.com/Elegying/AnyTLS_Panel.git
+cd AnyTLS_Panel
 bash deploy.sh
 ```
 
@@ -126,7 +126,7 @@ journalctl -u anytls-panel -n 50 # 最近50条
 ## 📁 项目结构
 
 ```
-anytls-panel/
+AnyTLS_Panel/
 ├── app.py                  # 主程序（Flask 应用）
 ├── templates/              # HTML 模板
 │   ├── base.html          # 基础布局

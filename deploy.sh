@@ -6,9 +6,9 @@ set -Eeuo pipefail
 PANEL_DIR="${ANYTLS_PANEL_DIR:-/opt/anytls-panel}"
 PORT="${1:-${ANYTLS_PANEL_PORT:-8866}}"
 SERVICE_NAME="${ANYTLS_SERVICE_NAME:-anytls-panel}"
-REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/SSR_Panel.git}"
+REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
 REPO_REF="${ANYTLS_REPO_REF:-main}"
-REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-anytls-panel}"
+REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
 
 log() {

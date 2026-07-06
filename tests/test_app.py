@@ -193,9 +193,10 @@ proxies:
         content = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
 
         self.assertIn("git clone --depth 1 --branch", content)
-        self.assertIn("https://github.com/Elegying/SSR_Panel.git", content)
+        self.assertIn("https://github.com/Elegying/AnyTLS_Panel.git", content)
         self.assertIn("ANYTLS_REPO_SUBDIR", content)
-        self.assertIn("anytls-panel", content)
+        self.assertIn('REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"', content)
+        self.assertNotIn("https://github.com/Elegying/SSR_Panel.git", content)
         self.assertNotIn("https://github.com/Elegying/anytls-panel.git", content)
         self.assertIn("ANYTLS_ADMIN_USER", content)
         self.assertIn("ANYTLS_ADMIN_PASS", content)
