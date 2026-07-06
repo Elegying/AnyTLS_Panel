@@ -39,6 +39,7 @@ bash deploy.sh
 ```
 
 首次安装时脚本会初始化管理员账号；如果数据库已存在，会保留原有账号。
+未通过 `ANYTLS_ADMIN_PASS` 指定密码时，随机初始密码会保存到面板目录的 `.initial_admin_password`，文件仅 root 可读。部署输出默认隐藏密码和流量 API token；如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
 
 ## 部署后验证
 

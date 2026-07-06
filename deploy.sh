@@ -32,7 +32,7 @@ install_packages() {
     if command -v apt-get >/dev/null 2>&1; then
         export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
         apt-get update -qq
-        apt-get install -y -qq "$@"
+        apt-get install -y -qq --no-install-recommends "$@"
         return
     fi
     fail "apt-get not found; this installer currently supports Ubuntu/Debian"
@@ -49,9 +49,14 @@ ensure_runtime() {
         install_packages "${missing[@]}"
     fi
 
-    if ! python3 -m venv --help >/dev/null 2>&1 || ! python3 -m pip --version >/dev/null 2>&1; then
-        log "installing Python venv/pip support"
-        install_packages python3-venv python3-pip
+    local probe_dir
+    probe_dir="$(mktemp -d /tmp/anytls-venv-check.XXXXXX)"
+    if ! python3 -m venv "$probe_dir/venv" >/dev/null 2>&1 || ! "$probe_dir/venv/bin/python" -m pip --version >/dev/null 2>&1; then
+        rm -rf "$probe_dir"
+        log "installing Python venv support"
+        install_packages python3-venv
+    else
+        rm -rf "$probe_dir"
     fi
 }
 
@@ -65,6 +70,7 @@ sync_project_files() {
             ! -name .secret_key \
             ! -name .initial_admin_password \
             ! -name .traffic_api_token \
+            ! -name venv \
             -exec rm -rf {} +
         cp "$SCRIPT_DIR/app.py" "$SCRIPT_DIR/requirements.txt" "$PANEL_DIR/"
         if [[ -f "$SCRIPT_DIR/uninstall.sh" ]]; then
@@ -98,6 +104,7 @@ sync_project_files() {
         ! -name .secret_key \
         ! -name .initial_admin_password \
         ! -name .traffic_api_token \
+        ! -name venv \
         -exec rm -rf {} +
     cp -R "$source_dir"/. "$PANEL_DIR"/
     rm -rf "$tmp_dir"
@@ -124,12 +131,24 @@ PY
 prepare_admin_credentials() {
     ADMIN_USER="${ANYTLS_ADMIN_USER:-admin}"
     ADMIN_PASS="${ANYTLS_ADMIN_PASS:-}"
+    ADMIN_PASSWORD_FILE="${ANYTLS_ADMIN_PASSWORD_FILE:-$PANEL_DIR/.initial_admin_password}"
+    GENERATED_ADMIN_PASS=0
     FRESH_DB=0
     if [[ ! -f "$PANEL_DIR/anytls.db" ]]; then
         FRESH_DB=1
     fi
     if [[ -z "$ADMIN_PASS" ]]; then
         ADMIN_PASS="$(generate_password)"
+        GENERATED_ADMIN_PASS=1
+    fi
+}
+
+persist_generated_admin_password() {
+    if [[ "$FRESH_DB" -eq 1 && "$GENERATED_ADMIN_PASS" -eq 1 ]]; then
+        mkdir -p "$(dirname "$ADMIN_PASSWORD_FILE")"
+        install -m 600 /dev/null "$ADMIN_PASSWORD_FILE"
+        printf '%s\n' "$ADMIN_PASS" > "$ADMIN_PASSWORD_FILE"
+        chmod 600 "$ADMIN_PASSWORD_FILE" 2>/dev/null || true
     fi
 }
 
@@ -222,12 +241,18 @@ print_summary() {
     [[ -n "$public_ip" ]] && echo "  Public URL: http://${public_ip}:${PORT}"
     if [[ "$FRESH_DB" -eq 1 ]]; then
         echo "  Username:   ${ADMIN_USER}"
-        echo "  Password:   ${ADMIN_PASS}"
+        if [[ "${ANYTLS_SHOW_SECRETS:-0}" = "1" ]]; then
+            echo "  Password:   ${ADMIN_PASS}"
+        elif [[ "$GENERATED_ADMIN_PASS" -eq 1 ]]; then
+            echo "  Password file: ${ADMIN_PASSWORD_FILE}"
+        else
+            echo "  Password:   hidden (set ANYTLS_SHOW_SECRETS=1 to print)"
+        fi
     else
         echo "  Existing database preserved; use the current admin credentials."
     fi
     echo "  Traffic API token file: ${TRAFFIC_API_TOKEN_FILE}"
-    if [[ "${FRESH_TRAFFIC_API_TOKEN:-0}" -eq 1 ]]; then
+    if [[ "${FRESH_TRAFFIC_API_TOKEN:-0}" -eq 1 && "${ANYTLS_SHOW_SECRETS:-0}" = "1" ]]; then
         echo "  Traffic API token: ${TRAFFIC_API_TOKEN}"
     fi
     echo "  Service:    ${SERVICE_NAME}"
@@ -237,6 +262,7 @@ print_summary() {
 ensure_runtime
 sync_project_files
 prepare_admin_credentials
+persist_generated_admin_password
 prepare_traffic_api_token
 install_python_deps
 initialize_database

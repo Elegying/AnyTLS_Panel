@@ -103,6 +103,8 @@ curl -X POST http://面板地址:8866/api/traffic/report \
 
 流量上报接口使用独立 API token 鉴权。部署脚本会生成并保存到面板目录的 `.traffic_api_token`，也可以通过环境变量 `ANYTLS_TRAFFIC_API_TOKEN` 或 `ANYTLS_TRAFFIC_API_TOKEN_FILE` 指定。
 
+随机生成的初始管理员密码会保存到 `.initial_admin_password`；部署输出默认隐藏密码和流量 API token。如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
+
 ## 🛠️ 管理命令
 
 ```bash
