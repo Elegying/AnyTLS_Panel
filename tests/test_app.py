@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -18,6 +19,13 @@ def load_app(database_path):
     with mock.patch.dict(os.environ, {"ANYTLS_DATABASE": str(database_path)}, clear=False):
         spec.loader.exec_module(module)
     return module
+
+
+def extract_csrf_token(html):
+    match = re.search(r'name="csrf_token" value="([^"]+)"', html)
+    if not match:
+        raise AssertionError("csrf token not found in rendered page")
+    return match.group(1)
 
 
 class AnyTlsPanelTests(unittest.TestCase):
@@ -139,6 +147,38 @@ proxies:
 
         payload = response.get_json()
         self.assertTrue(payload["url"].startswith("https://panel.example:9443/sub/"))
+
+    def test_logged_in_json_post_apis_require_csrf_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=True)
+            with app.app.app_context():
+                db = app.get_db()
+                cursor = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "anytls://pw@example.com:443#demo"),
+                )
+                db.commit()
+                account_id = cursor.lastrowid
+
+            with app.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["logged_in"] = True
+                    session["username"] = "admin"
+
+                missing_csrf = client.post(f"/api/accounts/{account_id}/generate-token")
+                self.assertEqual(missing_csrf.status_code, 400)
+
+                page = client.get(f"/accounts/{account_id}")
+                token = extract_csrf_token(page.get_data(as_text=True))
+                response = client.post(
+                    f"/api/accounts/{account_id}/generate-token",
+                    headers={"X-CSRFToken": token},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("/sub/", response.get_json()["url"])
 
     def test_traffic_api_requires_token(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -359,6 +399,19 @@ proxies:
         self.assertIn("togglePw({{ n.id }}, {{ n.password|tojson }})", content)
         self.assertNotIn("copyText('{{ n.password }}')", content)
         self.assertNotIn("togglePw({{ n.id }}, '{{ n.password }}')", content)
+
+    def test_logged_in_fetch_calls_send_csrf_header(self):
+        base = (REPO_ROOT / "templates" / "base.html").read_text(encoding="utf-8")
+        dashboard = (REPO_ROOT / "templates" / "dashboard.html").read_text(encoding="utf-8")
+        detail = (REPO_ROOT / "templates" / "account_detail.html").read_text(encoding="utf-8")
+        monitor = (REPO_ROOT / "templates" / "monitor.html").read_text(encoding="utf-8")
+
+        self.assertIn("function csrfHeaders", base)
+        self.assertIn("X-CSRFToken", base)
+        self.assertIn("fetch('/api/sync-all', {method: 'POST', headers: csrfHeaders()}", dashboard)
+        self.assertIn("generate-token", detail)
+        self.assertIn("headers: csrfHeaders({'Content-Type': 'application/json'})", detail)
+        self.assertIn("headers: csrfHeaders({'Content-Type': 'application/json'})", monitor)
 
     def test_deploy_script_supports_online_curl_mode_and_random_passwords(self):
         content = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")

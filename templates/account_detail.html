@@ -213,7 +213,7 @@ async function regenerateToken() {
     try {
         const resp = await fetch('/api/accounts/' + accountId + '/generate-token', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'}
+            headers: csrfHeaders({'Content-Type': 'application/json'})
         });
         const data = await resp.json();
         if (data.url) {
@@ -247,7 +247,7 @@ async function checkNode(id) {
     const el = document.getElementById('status-' + id);
     el.innerHTML = '<span class="badge" style="background:rgba(116,185,255,0.15);color:var(--blue)">检测中...</span>';
     try {
-        const resp = await fetch('/api/nodes/' + id + '/check', {method: 'POST'});
+        const resp = await fetch('/api/nodes/' + id + '/check', {method: 'POST', headers: csrfHeaders()});
         const data = await resp.json();
         if (data.status === 'online') {
             el.innerHTML = '<span class="badge badge-green">在线</span>';
@@ -266,7 +266,7 @@ async function checkAll() {
         el.innerHTML = '<span class="badge" style="background:rgba(116,185,255,0.15);color:var(--blue)">检测中...</span>';
     });
     try {
-        const resp = await fetch('/api/accounts/' + accountId + '/check-all', {method: 'POST'});
+        const resp = await fetch('/api/accounts/' + accountId + '/check-all', {method: 'POST', headers: csrfHeaders()});
         const data = await resp.json();
         data.results.forEach(r => {
             const el = document.getElementById('status-' + r.node_id);

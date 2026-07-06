@@ -105,7 +105,7 @@ async function checkOne(host, port) {
     try {
         const resp = await fetch('/api/check-by-host', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: csrfHeaders({'Content-Type': 'application/json'}),
             body: JSON.stringify({host: host, port: port})
         });
         const data = await resp.json();
@@ -147,7 +147,7 @@ async function checkAll() {
         try {
             const resp = await fetch('/api/check-by-host', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: csrfHeaders({'Content-Type': 'application/json'}),
                 body: JSON.stringify({host: host, port: parseInt(port)})
             });
             const data = await resp.json();
