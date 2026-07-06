@@ -307,6 +307,10 @@
     </div>
 
     <script>
+        const CSRF_TOKEN = "{{ csrf_token() }}";
+        function csrfHeaders(extra) {
+            return Object.assign({'X-CSRFToken': CSRF_TOKEN}, extra || {});
+        }
         function toggleSidebar() {
             const sidebar = document.getElementById('sidebar');
             const overlay = document.getElementById('sidebarOverlay');

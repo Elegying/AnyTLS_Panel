@@ -96,7 +96,7 @@ async function syncAll() {
     card.innerHTML = '<div style="font-size:32px;margin-bottom:8px">⏳</div><div style="font-size:15px;font-weight:600">同步中...</div>';
     card.style.pointerEvents = 'none';
     try {
-        const resp = await fetch('/api/sync-all', {method: 'POST'});
+        const resp = await fetch('/api/sync-all', {method: 'POST', headers: csrfHeaders()});
         const data = await resp.json();
         let msg = data.results.map(r => {
             return r.status === 'ok'

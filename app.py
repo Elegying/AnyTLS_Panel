@@ -977,7 +977,6 @@ def api_set_traffic():
 
 @app.route('/api/accounts')
 @login_required
-@csrf.exempt
 def api_accounts():
     db = get_db()
     accounts = db.execute('SELECT * FROM accounts ORDER BY id').fetchall()
@@ -992,7 +991,6 @@ def api_account_nodes(account_id):
 
 @app.route('/api/check-by-host', methods=['POST'])
 @login_required
-@csrf.exempt
 def api_check_by_host():
     """按 host:port 检测节点，并更新所有匹配节点的状态"""
     data = request.get_json(silent=True)
@@ -1018,7 +1016,6 @@ def api_check_by_host():
 
 @app.route('/api/nodes/<int:node_id>/check', methods=['POST'])
 @login_required
-@csrf.exempt
 def api_check_node(node_id):
     import socket
     import ssl
@@ -1040,7 +1037,6 @@ def api_check_node(node_id):
 
 @app.route('/api/accounts/<int:account_id>/check-all', methods=['POST'])
 @login_required
-@csrf.exempt
 def api_check_all_nodes(account_id):
     db = get_db()
     nodes = db.execute('SELECT * FROM nodes WHERE account_id=?', (account_id,)).fetchall()
@@ -1093,7 +1089,6 @@ def _check_node_connect(host, port, timeout=8):
 
 @app.route('/api/sync-all', methods=['POST'])
 @login_required
-@csrf.exempt
 def api_sync_all():
     """一键同步所有账号的订阅"""
     db = get_db()
@@ -1367,7 +1362,6 @@ def public_subscribe(token):
 
 @app.route('/api/accounts/<int:account_id>/generate-token', methods=['POST'])
 @login_required
-@csrf.exempt
 def api_generate_token(account_id):
     """为账号生成/重新生成分享 token"""
     db = get_db()
