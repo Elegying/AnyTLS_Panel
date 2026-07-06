@@ -10,6 +10,7 @@ import base64
 import time
 import sys
 import hmac
+import math
 from datetime import datetime
 from functools import wraps
 from urllib.parse import urlparse, parse_qs, unquote
@@ -554,6 +555,36 @@ def calc_traffic_percent(used_bytes, limit_gb):
     limit_bytes = limit_gb * 1024 * 1024 * 1024
     return min(round((used_bytes or 0) / limit_bytes * 100, 1), 100)
 
+
+def parse_nonnegative_float(value, field_name):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{field_name}必须是有效数字")
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError(f"{field_name}不能为负数")
+    return parsed
+
+
+def parse_nonnegative_int(value, field_name):
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name}必须是非负整数")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{field_name}必须是非负整数")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{field_name}必须是非负整数")
+    if parsed < 0:
+        raise ValueError(f"{field_name}不能为负数")
+    return parsed
+
+
+def sanitize_header_value(value, default="subscription"):
+    cleaned = re.sub(r'[\r\n"\\]+', ' ', str(value or '')).strip()
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned[:120] or default
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -672,11 +703,17 @@ def account_add():
     if traffic_info.get('total_gb'):
         traffic_limit = traffic_info['total_gb']
 
+    try:
+        traffic_limit = parse_nonnegative_float(traffic_limit, '流量限制')
+    except ValueError as e:
+        flash(str(e), 'error')
+        return redirect(url_for('accounts_list'))
+
     db = get_db()
     cursor = db.execute(
         '''INSERT INTO accounts (name, subscribe_url, traffic_limit_gb, notes, node_count, last_synced_at, traffic_used_bytes)
            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)''',
-        (name, subscribe_url, float(traffic_limit), notes, len(nodes), traffic_info.get('used_bytes', 0))
+        (name, subscribe_url, traffic_limit, notes, len(nodes), traffic_info.get('used_bytes', 0))
     )
     account_id = cursor.lastrowid
 
@@ -736,11 +773,17 @@ def account_edit(account_id):
     notes = request.form.get('notes', '').strip()
     status = request.form.get('status', 'active')
 
+    try:
+        traffic_limit = parse_nonnegative_float(traffic_limit, '流量限制')
+    except ValueError as e:
+        flash(str(e), 'error')
+        return redirect(url_for('account_detail', account_id=account_id))
+
     db = get_db()
     db.execute(
         '''UPDATE accounts SET subscribe_url=?, traffic_limit_gb=?, notes=?, status=?,
            updated_at=CURRENT_TIMESTAMP WHERE id=?''',
-        (subscribe_url, float(traffic_limit), notes, status, account_id)
+        (subscribe_url, traffic_limit, notes, status, account_id)
     )
     db.commit()
     flash('账号信息已更新', 'success')
@@ -854,13 +897,20 @@ def api_report_traffic():
 
     if isinstance(data, dict):
         data = [data]
+    elif not isinstance(data, list):
+        return jsonify({"error": "Invalid JSON"}), 400
 
     db = get_db()
     results = []
     for item in data:
+        if not isinstance(item, dict):
+            return jsonify({"error": "Invalid traffic item"}), 400
         account_id = item.get('account_id')
         password = item.get('password')
-        bytes_used = item.get('bytes_used', 0)
+        try:
+            bytes_used = parse_nonnegative_int(item.get('bytes_used', 0), 'bytes_used')
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
         if not account_id and password:
             node = db.execute('SELECT account_id FROM nodes WHERE password=?', (password,)).fetchone()
@@ -899,10 +949,15 @@ def api_set_traffic():
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON"}), 400
 
     account_id = data.get('account_id')
     password = data.get('password')
-    total_bytes = data.get('total_bytes', 0)
+    try:
+        total_bytes = parse_nonnegative_int(data.get('total_bytes', 0), 'total_bytes')
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     db = get_db()
     if not account_id and password:
@@ -945,7 +1000,12 @@ def api_check_by_host():
         return jsonify({"error": "missing host/port"}), 400
 
     host = data['host']
-    port = int(data['port'])
+    try:
+        port = parse_nonnegative_int(data['port'], 'port')
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not 1 <= port <= 65535:
+        return jsonify({"error": "port必须在1-65535之间"}), 400
 
     result = _check_node_connect(host, port)
     db = get_db()
@@ -1171,11 +1231,12 @@ def public_subscribe(token):
     sub_name = 'SSRVPN.VIP'  # 默认名
     if rules:
         sub_name = _apply_rename(sub_name, rules)
+    header_sub_name = sanitize_header_value(sub_name, 'SSRVPN.VIP')
 
     # 公共响应头：profile-title 设置订阅名 + 流量信息
     resp_headers = {
-        'profile-title': f'"store-name={sub_name}"',
-        'Content-Disposition': f'attachment; filename="{sub_name}"',
+        'profile-title': f'"store-name={header_sub_name}"',
+        'Content-Disposition': f'attachment; filename="{header_sub_name}"',
     }
     if traffic_info:
         parts = []
