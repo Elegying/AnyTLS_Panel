@@ -49,7 +49,7 @@ limiter = Limiter(
 )
 
 # 固定 secret_key，存文件持久化，多 worker 共享
-_sk_file = os.path.join(os.path.dirname(__file__), '.secret_key')
+_sk_file = os.environ.get('ANYTLS_SECRET_KEY_FILE') or os.path.join(os.path.dirname(__file__), '.secret_key')
 if os.path.exists(_sk_file):
     with open(_sk_file, encoding='utf-8') as f:
         app.secret_key = f.read().strip()
@@ -57,6 +57,10 @@ else:
     app.secret_key = secrets.token_hex(32)
     with open(_sk_file, 'w', encoding='utf-8') as f:
         f.write(app.secret_key)
+try:
+    os.chmod(_sk_file, 0o600)
+except OSError:
+    pass
 
 # ─── 数据库 ──────────────────────────────────────────────
 
@@ -234,6 +238,10 @@ def init_db():
         pass  # 列已存在
 
     db.close()
+    try:
+        Path(app.config['DATABASE']).chmod(0o600)
+    except OSError:
+        pass
 
 # ─── 订阅解析 ──────────────────────────────────────────────
 

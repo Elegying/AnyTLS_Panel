@@ -100,6 +100,21 @@ proxies:
         weak_ok, _ = app.verify_password(row[1], "admin123")
         self.assertFalse(weak_ok)
 
+    def test_secret_key_and_database_are_private_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            secret_key_file = Path(tmp) / ".secret_key"
+            with mock.patch.dict(
+                os.environ,
+                {"ANYTLS_SECRET_KEY_FILE": str(secret_key_file)},
+                clear=False,
+            ):
+                app = load_app(database)
+
+            self.assertEqual(secret_key_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(database.stat().st_mode & 0o777, 0o600)
+            self.assertTrue(app.app.secret_key)
+
     def test_generated_subscription_url_uses_current_request_host(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
@@ -202,10 +217,18 @@ proxies:
         self.assertIn("ANYTLS_ADMIN_PASS", content)
         self.assertIn("ANYTLS_TRAFFIC_API_TOKEN_FILE", content)
         self.assertIn(".traffic_api_token", content)
+        self.assertIn("ANYTLS_SHOW_SECRETS", content)
+        self.assertIn("ANYTLS_ADMIN_PASSWORD_FILE", content)
         self.assertIn("generate_password", content)
         self.assertIn("generate_api_token", content)
         self.assertIn('systemctl restart "$SERVICE_NAME"', content)
         self.assertIn('cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"', content)
+        self.assertIn("mktemp -d /tmp/anytls-venv-check", content)
+        self.assertIn('python3 -m venv "$probe_dir/venv"', content)
+        self.assertIn('"$probe_dir/venv/bin/python" -m pip --version', content)
+        self.assertIn("! -name venv", content)
+        self.assertIn("--no-install-recommends", content)
+        self.assertNotIn("python3-pip", content)
         self.assertNotIn("默认账号:", content)
         self.assertNotIn("默认密码:", content)
 
