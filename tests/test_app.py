@@ -196,6 +196,162 @@ proxies:
             self.assertEqual(ok.status_code, 200)
             self.assertEqual(ok.get_json()["total_bytes"], 123)
 
+    def test_traffic_api_rejects_invalid_payload_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            token_file = Path(tmp) / ".traffic_api_token"
+            token_file.write_text("traffic-token\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "ANYTLS_DATABASE": str(database),
+                    "ANYTLS_TRAFFIC_API_TOKEN_FILE": str(token_file),
+                },
+                clear=False,
+            ):
+                app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                cursor = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, traffic_used_bytes) VALUES (?, ?, ?)",
+                    ("demo", "anytls://node-secret@example.com:443#demo", 100),
+                )
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        cursor.lastrowid,
+                        "demo-node",
+                        "example.com",
+                        443,
+                        "node-secret",
+                        "anytls://node-secret@example.com:443#demo",
+                    ),
+                )
+                db.commit()
+
+            headers = {"Authorization": "Bearer traffic-token"}
+            with app.app.test_client() as client:
+                negative = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json={"password": "node-secret", "bytes_used": -1},
+                )
+                malformed = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json=["not-object"],
+                )
+                fractional = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json={"password": "node-secret", "bytes_used": 1.5},
+                )
+                bad_total = client.post(
+                    "/api/traffic/set",
+                    headers=headers,
+                    json={"password": "node-secret", "total_bytes": -1},
+                )
+
+            self.assertEqual(negative.status_code, 400)
+            self.assertEqual(malformed.status_code, 400)
+            self.assertEqual(fractional.status_code, 400)
+            self.assertEqual(bad_total.status_code, 400)
+            with sqlite3.connect(database) as db:
+                used = db.execute("SELECT traffic_used_bytes FROM accounts").fetchone()[0]
+            self.assertEqual(used, 100)
+
+    def test_account_forms_reject_invalid_traffic_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, traffic_limit_gb) VALUES (?, ?, ?)",
+                    ("demo", "anytls://pw@example.com:443#demo", 250),
+                ).lastrowid
+                db.commit()
+
+            with app.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["logged_in"] = True
+                    session["username"] = "admin"
+
+                response = client.post(
+                    f"/accounts/{account_id}/edit",
+                    data={
+                        "subscribe_url": "anytls://pw@example.com:443#demo",
+                        "traffic_limit_gb": "not-a-number",
+                        "status": "active",
+                    },
+                )
+
+            self.assertEqual(response.status_code, 302)
+            with sqlite3.connect(database) as db:
+                limit = db.execute("SELECT traffic_limit_gb FROM accounts WHERE id=?", (account_id,)).fetchone()[0]
+            self.assertEqual(limit, 250)
+
+    def test_public_subscribe_sanitizes_header_filename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
+                    ("demo", "anytls://pw@example.com:443#demo", "token"),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "demo-node",
+                        "example.com",
+                        443,
+                        "pw",
+                        "anytls://pw@example.com:443#demo",
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)",
+                    ("SSRVPN.VIP", 'bad\r\nInjected: yes"name'),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                response = client.get("/sub/token")
+
+            self.assertEqual(response.status_code, 200)
+            disposition = response.headers["Content-Disposition"]
+            profile_title = response.headers["profile-title"]
+            self.assertNotIn("\r", disposition + profile_title)
+            self.assertNotIn("\n", disposition + profile_title)
+            self.assertIn('filename="bad Injected: yes name"', disposition)
+            self.assertNotIn('yes"name', disposition)
+
+    def test_check_by_host_rejects_invalid_port(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+
+            with app.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["logged_in"] = True
+                    session["username"] = "admin"
+
+                response = client.post(
+                    "/api/check-by-host",
+                    json={"host": "example.com", "port": 443.5},
+                )
+
+            self.assertEqual(response.status_code, 400)
+
     def test_account_detail_template_escapes_js_arguments(self):
         content = (REPO_ROOT / "templates" / "account_detail.html").read_text(encoding="utf-8")
 
