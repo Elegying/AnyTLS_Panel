@@ -61,6 +61,9 @@ proxies:
 
     def test_http_subscription_prefers_native_anytls_user_agent(self):
         class FakeResponse:
+            def __init__(self, body=b"anytls://pw@example.com:443#demo"):
+                self.body = body
+
             def __enter__(self):
                 return self
 
@@ -68,7 +71,7 @@ proxies:
                 return False
 
             def read(self):
-                return b"anytls://pw@example.com:443#demo"
+                return self.body
 
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
@@ -85,6 +88,55 @@ proxies:
         self.assertIn("SSRVPN", seen_user_agents[0])
         self.assertEqual(nodes[0]["protocol"], "anytls")
         self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
+
+    def test_http_subscription_selects_later_native_anytls_candidate(self):
+        class FakeResponse:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return self.body
+
+        clash_trojan_only = b"""
+proxies:
+  - name: compat
+    type: trojan
+    server: compat.example.com
+    port: 443
+    password: compat
+"""
+        shadowrocket_native = base64.b64encode(
+            b"anytls://native@native.example.com:443#native\n"
+            b"trojan://compat@compat.example.com:443#compat"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            seen_user_agents = []
+
+            def fake_urlopen(req, timeout=10):
+                ua = req.get_header("User-agent")
+                seen_user_agents.append(ua)
+                if "SSRVPN" in ua or "Clash.Meta" in ua:
+                    raise OSError("blocked")
+                if "ClashForAndroid" in ua:
+                    return FakeResponse(clash_trojan_only)
+                return FakeResponse(shadowrocket_native)
+
+            with mock.patch("urllib.request.urlopen", fake_urlopen):
+                nodes, traffic_info = app.parse_subscribe_url("https://sub.example/list")
+
+        self.assertEqual(traffic_info, {})
+        self.assertTrue(any("Shadowrocket" in ua for ua in seen_user_agents))
+        self.assertEqual(len(nodes), 2)
+        self.assertEqual([node["protocol"] for node in nodes], ["anytls", "anytls"])
+        self.assertTrue(all(node["raw_uri"].startswith("anytls://") for node in nodes))
 
     def test_initial_admin_credentials_can_be_set_from_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -362,6 +414,32 @@ proxies:
                 limit = db.execute("SELECT traffic_limit_gb FROM accounts WHERE id=?", (account_id,)).fetchone()[0]
             self.assertEqual(limit, 250)
 
+    def test_account_sync_stores_parsed_protocol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "trojan://pw@example.com:443?sni=example.com#demo"),
+                ).lastrowid
+                db.commit()
+
+            with app.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["logged_in"] = True
+                    session["username"] = "admin"
+
+                response = client.post(f"/accounts/{account_id}/sync")
+
+            self.assertEqual(response.status_code, 302)
+            with sqlite3.connect(database) as db:
+                protocol, raw_uri = db.execute("SELECT protocol, raw_uri FROM nodes").fetchone()
+            self.assertEqual(protocol, "trojan")
+            self.assertTrue(raw_uri.startswith("trojan://"))
+
     def test_public_subscribe_sanitizes_header_filename(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
@@ -434,6 +512,59 @@ proxies:
             self.assertIn("anytls://pw@example.com:443", decoded)
             self.assertIn("#renamed", decoded)
             self.assertNotIn("trojan://", decoded)
+
+    def test_public_subscribe_prefers_synced_db_nodes_over_live_upstream(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
+                    ("demo", "https://sub.example/list", "token"),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "demo-node",
+                        "db.example.com",
+                        443,
+                        "dbpw",
+                        "anytls://dbpw@db.example.com:443?sni=sni.example.com#demo",
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)",
+                    ("demo", "renamed"),
+                )
+                db.commit()
+
+            live_trojan_nodes = [
+                {
+                    "name": "upstream",
+                    "host": "upstream.example.com",
+                    "port": 443,
+                    "password": "compat",
+                    "protocol": "trojan",
+                    "raw_uri": "trojan://compat@upstream.example.com:443#upstream",
+                }
+            ]
+            with mock.patch.object(app, "parse_subscribe_url", return_value=(live_trojan_nodes, {})) as parse:
+                with app.app.test_client() as client:
+                    response = client.get(
+                        "/sub/token",
+                        headers={"User-Agent": "SSRVPN/2.4.0"},
+                    )
+
+            self.assertEqual(response.status_code, 200)
+            decoded = base64.b64decode(response.get_data(as_text=True)).decode()
+            self.assertIn("anytls://dbpw@db.example.com:443", decoded)
+            self.assertIn("#renamed", decoded)
+            self.assertNotIn("trojan://", decoded)
+            parse.assert_not_called()
 
     def test_public_subscribe_outputs_anytls_for_clash_clients(self):
         with tempfile.TemporaryDirectory() as tmp:

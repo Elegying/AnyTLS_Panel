@@ -252,7 +252,6 @@ def parse_subscribe_url(url):
     2. base64 编码的多行订阅
     3. HTTP(S) URL 返回的订阅内容 (Clash YAML / 纯文本)
     """
-    import yaml
     nodes = []
 
     # 情况1：直接是 anytls:// 链接
@@ -265,11 +264,13 @@ def parse_subscribe_url(url):
                     nodes.append(node)
         return nodes, {}
 
-    # 情况2：尝试作为 HTTP URL 拉取（用 Shadowrocket UA 以获取全部协议节点）
+    # 情况2：尝试作为 HTTP URL 拉取。不同上游会按 User-Agent 返回不同格式，
+    # 需要取样后选择最完整、AnyTLS 原生节点最多的结果。
     content = url.strip()
     traffic_info = {}
+    normalize_anytls_compat = False
     if content.startswith('http://') or content.startswith('https://'):
-        fetched = False
+        candidates = []
         for ua in [
             'SSRVPN/2.4.0',
             'Clash.Meta/1.18.0',
@@ -281,36 +282,94 @@ def parse_subscribe_url(url):
                 req = urllib.request.Request(content, headers={'User-Agent': ua})
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     raw = resp.read()
-                    text = raw.decode('utf-8', errors='ignore').strip()
-                    # 尝试 base64 解码（Shadowrocket 格式返回 base64）
-                    try:
-                        decoded = base64.b64decode(text).decode('utf-8', errors='ignore')
-                        if '://' in decoded:
-                            text = decoded
-                    except Exception:
-                        pass
-                    # 解析 STATUS 行（流量信息）
-                    for line in text.splitlines():
-                        if line.startswith('STATUS='):
-                            traffic_info = _parse_status_line(line)
-                            break
-                    content = text
-                    fetched = True
-                    break
+                    text = _decode_subscription_response(raw)
+                    parsed_nodes = _parse_subscription_content(text)
+                    if parsed_nodes:
+                        candidates.append((
+                            _subscription_candidate_score(parsed_nodes),
+                            text,
+                            _extract_subscription_traffic_info(text),
+                        ))
             except Exception:
                 continue
-        if not fetched:
+        if not candidates:
             raise ValueError("拉取订阅失败（所有 UA 均无法访问）")
+        _score, content, traffic_info = max(candidates, key=lambda item: item[0])
+        normalize_anytls_compat = _score[0] > 0
+
+    nodes = _parse_subscription_content(content)
+    if normalize_anytls_compat:
+        nodes = _normalize_anytls_compat_nodes(nodes)
+    if not nodes:
+        preview = content[:100].replace('\n', ' ').replace('\r', '')
+        raise ValueError(f"订阅中未找到可用节点 (内容前100字符: {preview})")
+    return nodes, traffic_info
+
+
+def _decode_subscription_response(raw):
+    """Decode a subscription HTTP response to text when it is base64-wrapped."""
+    text = raw.decode('utf-8', errors='ignore').strip()
+    try:
+        padded = text + '=' * (-len(text) % 4)
+        decoded = base64.b64decode(padded).decode('utf-8', errors='ignore').strip()
+        if '://' in decoded or 'proxies:' in decoded:
+            return decoded
+    except Exception:
+        pass
+    return text
+
+
+def _extract_subscription_traffic_info(content):
+    for line in content.splitlines():
+        if line.startswith('STATUS='):
+            return _parse_status_line(line)
+    return {}
+
+
+def _subscription_candidate_score(nodes):
+    anytls_count = 0
+    for node in nodes:
+        protocol = str(node.get('protocol', '')).lower().replace('-', '').replace('_', '')
+        raw_uri = node.get('raw_uri', '')
+        if protocol in ('anytls', 'anytls1') or raw_uri.startswith('anytls://'):
+            anytls_count += 1
+    return anytls_count, len(nodes)
+
+
+def _normalize_anytls_compat_nodes(nodes):
+    has_native_anytls = any(
+        str(n.get('protocol', '')).lower().replace('-', '').replace('_', '') in ('anytls', 'anytls1')
+        or n.get('raw_uri', '').startswith('anytls://')
+        for n in nodes
+    )
+    if not has_native_anytls:
+        return nodes
+
+    normalized = []
+    for node in nodes:
+        protocol = str(node.get('protocol', '')).lower().replace('-', '').replace('_', '')
+        raw_uri = node.get('raw_uri', '')
+        if protocol == 'trojan' and raw_uri.startswith('trojan://'):
+            node = dict(node)
+            node['protocol'] = 'anytls'
+            node['raw_uri'] = 'anytls://' + raw_uri[len('trojan://'):]
+        normalized.append(node)
+    return normalized
+
+
+def _parse_subscription_content(content):
+    nodes = []
 
     # 尝试作为 Clash YAML 解析（最高优先级）
     clash_nodes = _parse_clash_yaml(content)
     if clash_nodes:
-        return clash_nodes, traffic_info
+        return clash_nodes
 
     # 尝试 base64 解码后再解析
     try:
-        decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
-        if '://' in decoded:
+        padded = content + '=' * (-len(content) % 4)
+        decoded = base64.b64decode(padded).decode('utf-8', errors='ignore')
+        if '://' in decoded or 'proxies:' in decoded:
             content = decoded
     except Exception:
         pass
@@ -318,7 +377,7 @@ def parse_subscribe_url(url):
     # 再次尝试 Clash YAML（base64 解码后可能是 YAML）
     clash_nodes = _parse_clash_yaml(content)
     if clash_nodes:
-        return clash_nodes, traffic_info
+        return clash_nodes
 
     # 按行解析各种协议链接
     for line in content.splitlines():
@@ -327,7 +386,8 @@ def parse_subscribe_url(url):
             continue
         # 尝试 base64 解码单行
         try:
-            decoded_line = base64.b64decode(line).decode('utf-8', errors='ignore')
+            padded = line + '=' * (-len(line) % 4)
+            decoded_line = base64.b64decode(padded).decode('utf-8', errors='ignore')
             if '://' in decoded_line:
                 line = decoded_line
         except Exception:
@@ -340,10 +400,7 @@ def parse_subscribe_url(url):
                     nodes.append(node)
                 break
 
-    if not nodes:
-        preview = content[:100].replace('\n', ' ').replace('\r', '')
-        raise ValueError(f"订阅中未找到可用节点 (内容前100字符: {preview})")
-    return nodes, traffic_info
+    return nodes
 
 
 def _parse_status_line(line):
@@ -726,9 +783,17 @@ def account_add():
 
     for n in nodes:
         db.execute(
-            '''INSERT INTO nodes (account_id, name, host, port, password, raw_uri)
-               VALUES (?, ?, ?, ?, ?, ?)''',
-            (account_id, n['name'], n['host'], n['port'], n['password'], n.get('raw_uri', ''))
+            '''INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (
+                account_id,
+                n['name'],
+                n['host'],
+                n['port'],
+                n['password'],
+                n.get('raw_uri', ''),
+                n.get('protocol', 'anytls'),
+            )
         )
     db.commit()
 
@@ -824,9 +889,17 @@ def account_sync(account_id):
     db.execute('DELETE FROM nodes WHERE account_id=?', (account_id,))
     for n in nodes:
         db.execute(
-            '''INSERT INTO nodes (account_id, name, host, port, password, raw_uri)
-               VALUES (?, ?, ?, ?, ?, ?)''',
-            (account_id, n['name'], n['host'], n['port'], n['password'], n.get('raw_uri', ''))
+            '''INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (
+                account_id,
+                n['name'],
+                n['host'],
+                n['port'],
+                n['password'],
+                n.get('raw_uri', ''),
+                n.get('protocol', 'anytls'),
+            )
         )
     # 更新流量信息（白名单校验字段名，防止SQL注入）
     allowed_fields = {'node_count', 'traffic_used_bytes', 'traffic_limit_gb', 'notes'}
@@ -1102,9 +1175,17 @@ def api_sync_all():
             db.execute('DELETE FROM nodes WHERE account_id=?', (account['id'],))
             for n in nodes:
                 db.execute(
-                    '''INSERT INTO nodes (account_id, name, host, port, password, raw_uri)
-                       VALUES (?, ?, ?, ?, ?, ?)''',
-                    (account['id'], n['name'], n['host'], n['port'], n['password'], n.get('raw_uri', ''))
+                    '''INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    (
+                        account['id'],
+                        n['name'],
+                        n['host'],
+                        n['port'],
+                        n['password'],
+                        n.get('raw_uri', ''),
+                        n.get('protocol', 'anytls'),
+                    )
                 )
             # 更新流量信息（白名单校验字段名，防止SQL注入）
             field_clauses = ['node_count=?', 'last_synced_at=CURRENT_TIMESTAMP', 'updated_at=CURRENT_TIMESTAMP']
@@ -1201,10 +1282,39 @@ def _fetch_sub_cached(account_id, subscribe_url):
     return nodes, traffic_info
 
 
+def _row_get(row, key, default=None):
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return default
+
+
+def _account_traffic_info(account):
+    info = {}
+    used_bytes = _row_get(account, 'traffic_used_bytes', 0) or 0
+    total_gb = _row_get(account, 'traffic_limit_gb', 0) or 0
+    expire_date = _row_get(account, 'expire_date', '') or ''
+    if used_bytes:
+        info['download_bytes'] = int(used_bytes)
+    if total_gb:
+        info['total_gb'] = float(total_gb)
+    if expire_date:
+        info['expire_date'] = expire_date
+    return info
+
+
+def _nodes_from_db_rows(db_nodes):
+    return [
+        {'raw_uri': n['raw_uri'], 'name': n['name']}
+        for n in db_nodes
+        if n['raw_uri']
+    ]
+
+
 @app.route('/sub/<token>')
 @csrf.exempt
 def public_subscribe(token):
-    """公开订阅端点：拉取上游订阅（带缓存）→ 应用重命名规则 → 返回转换后的订阅"""
+    """公开订阅端点：优先读取本地同步节点 → 应用重命名规则 → 返回转换后的订阅"""
     if not token:
         return 'Invalid token', 404
 
@@ -1215,14 +1325,15 @@ def public_subscribe(token):
 
     rules = db.execute('SELECT old_text, new_text FROM rename_rules WHERE enabled=1 ORDER BY id').fetchall()
 
-    # 从上游拉取（5分钟缓存）
-    try:
-        nodes, traffic_info = _fetch_sub_cached(account['id'], account['subscribe_url'])
-    except Exception as e:
-        # 拉取失败时 fallback 到 DB
-        db_nodes = db.execute('SELECT * FROM nodes WHERE account_id=? ORDER BY id', (account['id'],)).fetchall()
-        nodes = [{'raw_uri': n['raw_uri'], 'name': n['name']} for n in db_nodes]
-        traffic_info = {}
+    db_nodes = db.execute('SELECT * FROM nodes WHERE account_id=? ORDER BY id', (account['id'],)).fetchall()
+    nodes = _nodes_from_db_rows(db_nodes)
+    traffic_info = _account_traffic_info(account)
+    if not nodes:
+        try:
+            nodes, traffic_info = _fetch_sub_cached(account['id'], account['subscribe_url'])
+        except Exception:
+            nodes = []
+            traffic_info = {}
 
     # 构建订阅配置名称（profile-title）
     sub_name = 'SSRVPN.VIP'  # 默认名
