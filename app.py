@@ -273,8 +273,8 @@ def parse_subscribe_url(url):
         for ua in [
             'SSRVPN/2.4.0',
             'Clash.Meta/1.18.0',
-            'ClashForAndroid/2.5.12',
             'Shadowrocket/2209 CFNetwork/1410.1 Darwin/22.6.0',
+            'ClashForAndroid/2.5.12',
         ]:
             try:
                 import urllib.request
@@ -284,11 +284,10 @@ def parse_subscribe_url(url):
                     text = _decode_subscription_response(raw)
                     parsed_nodes = _parse_subscription_content(text)
                     if parsed_nodes:
-                        candidates.append((
-                            _subscription_candidate_score(parsed_nodes),
-                            text,
-                            _extract_subscription_traffic_info(text),
-                        ))
+                        score = _subscription_candidate_score(parsed_nodes)
+                        candidates.append((score, text, _extract_subscription_traffic_info(text)))
+                        if score[0] > 0:
+                            break
             except Exception:
                 continue
         if not candidates:

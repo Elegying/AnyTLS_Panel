@@ -134,6 +134,7 @@ proxies:
 
         self.assertEqual(traffic_info, {})
         self.assertTrue(any("Shadowrocket" in ua for ua in seen_user_agents))
+        self.assertFalse(any("ClashForAndroid" in ua for ua in seen_user_agents))
         self.assertEqual(len(nodes), 2)
         self.assertEqual([node["protocol"] for node in nodes], ["anytls", "trojan"])
         self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
