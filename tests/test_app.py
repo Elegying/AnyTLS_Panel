@@ -89,7 +89,7 @@ proxies:
         self.assertEqual(nodes[0]["protocol"], "anytls")
         self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
 
-    def test_http_subscription_selects_later_native_anytls_candidate(self):
+    def test_http_subscription_selects_later_mixed_protocol_candidate(self):
         class FakeResponse:
             def __init__(self, body):
                 self.body = body
@@ -135,8 +135,9 @@ proxies:
         self.assertEqual(traffic_info, {})
         self.assertTrue(any("Shadowrocket" in ua for ua in seen_user_agents))
         self.assertEqual(len(nodes), 2)
-        self.assertEqual([node["protocol"] for node in nodes], ["anytls", "anytls"])
-        self.assertTrue(all(node["raw_uri"].startswith("anytls://") for node in nodes))
+        self.assertEqual([node["protocol"] for node in nodes], ["anytls", "trojan"])
+        self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
+        self.assertTrue(nodes[1]["raw_uri"].startswith("trojan://"))
 
     def test_initial_admin_credentials_can_be_set_from_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -510,7 +511,8 @@ proxies:
             self.assertEqual(response.status_code, 200)
             decoded = base64.b64decode(response.get_data(as_text=True)).decode()
             self.assertIn("anytls://pw@example.com:443", decoded)
-            self.assertIn("#renamed", decoded)
+            self.assertIn("#demo", decoded)
+            self.assertNotIn("#renamed", decoded)
             self.assertNotIn("trojan://", decoded)
 
     def test_public_subscribe_prefers_synced_db_nodes_over_live_upstream(self):
@@ -534,6 +536,19 @@ proxies:
                         443,
                         "dbpw",
                         "anytls://dbpw@db.example.com:443?sni=sni.example.com#demo",
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "trojan-node",
+                        "trojan.example.com",
+                        443,
+                        "trojanpw",
+                        "trojan://trojanpw@trojan.example.com:443?sni=trojan.example.com#demo-trojan",
+                        "trojan",
                     ),
                 )
                 db.execute(
@@ -562,8 +577,10 @@ proxies:
             self.assertEqual(response.status_code, 200)
             decoded = base64.b64decode(response.get_data(as_text=True)).decode()
             self.assertIn("anytls://dbpw@db.example.com:443", decoded)
-            self.assertIn("#renamed", decoded)
-            self.assertNotIn("trojan://", decoded)
+            self.assertIn("trojan://trojanpw@trojan.example.com:443", decoded)
+            self.assertIn("#demo", decoded)
+            self.assertIn("#demo-trojan", decoded)
+            self.assertNotIn("#renamed", decoded)
             parse.assert_not_called()
 
     def test_public_subscribe_outputs_anytls_for_clash_clients(self):
@@ -602,7 +619,7 @@ proxies:
             self.assertIn("client-fingerprint: chrome", content)
             self.assertIn("skip-cert-verify: true", content)
 
-    def test_public_subscribe_keeps_shadowrocket_trojan_compatibility(self):
+    def test_public_subscribe_does_not_convert_anytls_for_shadowrocket_clients(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
             app = load_app(database)
@@ -627,8 +644,10 @@ proxies:
 
             self.assertEqual(response.status_code, 200)
             decoded = base64.b64decode(response.get_data(as_text=True)).decode()
-            self.assertIn("trojan://pw@example.com:443", decoded)
-            self.assertIn("#renamed", decoded)
+            self.assertIn("anytls://pw@example.com:443", decoded)
+            self.assertIn("#demo", decoded)
+            self.assertNotIn("trojan://", decoded)
+            self.assertNotIn("#renamed", decoded)
 
     def test_check_by_host_rejects_invalid_port(self):
         with tempfile.TemporaryDirectory() as tmp:
