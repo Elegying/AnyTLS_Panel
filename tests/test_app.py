@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import json
 import os
@@ -57,6 +58,33 @@ proxies:
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0]["name"], "Good Trojan")
         self.assertEqual(nodes[0]["protocol"], "trojan")
+
+    def test_http_subscription_prefers_native_anytls_user_agent(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b"anytls://pw@example.com:443#demo"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            seen_user_agents = []
+
+            def fake_urlopen(req, timeout=10):
+                seen_user_agents.append(req.get_header("User-agent"))
+                return FakeResponse()
+
+            with mock.patch("urllib.request.urlopen", fake_urlopen):
+                nodes, traffic_info = app.parse_subscribe_url("https://sub.example/list")
+
+        self.assertEqual(traffic_info, {})
+        self.assertIn("SSRVPN", seen_user_agents[0])
+        self.assertEqual(nodes[0]["protocol"], "anytls")
+        self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
 
     def test_initial_admin_credentials_can_be_set_from_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -373,6 +401,103 @@ proxies:
             self.assertNotIn("\n", disposition + profile_title)
             self.assertIn('filename="bad Injected: yes name"', disposition)
             self.assertNotIn('yes"name', disposition)
+
+    def test_public_subscribe_preserves_anytls_for_ssrvpn_clients(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
+                    (
+                        "demo",
+                        "anytls://pw@example.com:443?sni=sni.example.com#demo",
+                        "token",
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)",
+                    ("demo", "renamed"),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                response = client.get(
+                    "/sub/token",
+                    headers={"User-Agent": "SSRVPN/2.4.0"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            decoded = base64.b64decode(response.get_data(as_text=True)).decode()
+            self.assertIn("anytls://pw@example.com:443", decoded)
+            self.assertIn("#renamed", decoded)
+            self.assertNotIn("trojan://", decoded)
+
+    def test_public_subscribe_outputs_anytls_for_clash_clients(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
+                    (
+                        "demo",
+                        "anytls://pw@example.com:443?sni=sni.example.com&allowInsecure=1&fp=chrome#demo",
+                        "token",
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)",
+                    ("demo", "renamed"),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                response = client.get(
+                    "/sub/token",
+                    headers={"User-Agent": "Clash.Meta/1.18.0"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            content = response.get_data(as_text=True)
+            self.assertIn("type: anytls", content)
+            self.assertIn("password: pw", content)
+            self.assertIn("sni: sni.example.com", content)
+            self.assertIn("udp: true", content)
+            self.assertIn("client-fingerprint: chrome", content)
+            self.assertIn("skip-cert-verify: true", content)
+
+    def test_public_subscribe_keeps_shadowrocket_trojan_compatibility(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
+                    ("demo", "anytls://pw@example.com:443#demo", "token"),
+                )
+                db.execute(
+                    "INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)",
+                    ("demo", "renamed"),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                response = client.get(
+                    "/sub/token",
+                    headers={"User-Agent": "Shadowrocket/2209"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            decoded = base64.b64decode(response.get_data(as_text=True)).decode()
+            self.assertIn("trojan://pw@example.com:443", decoded)
+            self.assertIn("#renamed", decoded)
 
     def test_check_by_host_rejects_invalid_port(self):
         with tempfile.TemporaryDirectory() as tmp:
