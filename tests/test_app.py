@@ -1,4 +1,5 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 import os
@@ -339,6 +340,49 @@ proxies:
             self.assertEqual(secret_key_file.stat().st_mode & 0o777, 0o600)
             self.assertEqual(database.stat().st_mode & 0o777, 0o600)
             self.assertTrue(app.app.secret_key)
+
+    def test_private_file_creation_is_atomic_across_threads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            secret_file = Path(tmp) / "shared-secret"
+
+            def create_value():
+                time.sleep(0.02)
+                return f"secret-{threading.get_ident()}"
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                values = list(executor.map(
+                    lambda _index: app._read_or_create_private_file(secret_file, create_value),
+                    range(8),
+                ))
+            file_value = secret_file.read_text(encoding="utf-8")
+            file_mode = secret_file.stat().st_mode & 0o777
+
+        self.assertEqual(len(set(values)), 1)
+        self.assertEqual(file_value, values[0])
+        self.assertEqual(file_mode, 0o600)
+
+    def test_concurrent_database_initialization_creates_one_admin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            with sqlite3.connect(database) as db:
+                db.execute("DELETE FROM admin_users")
+                db.commit()
+            barrier = threading.Barrier(4)
+
+            def synchronized_hash(_password):
+                barrier.wait(timeout=2)
+                return "test-hash"
+
+            with mock.patch.object(app, "hash_password", side_effect=synchronized_hash):
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    list(executor.map(lambda _index: app.init_db(), range(4)))
+
+            with sqlite3.connect(database) as db:
+                admin_count = db.execute("SELECT COUNT(*) FROM admin_users").fetchone()[0]
+
+        self.assertEqual(admin_count, 1)
 
     def test_secure_cookie_and_proxy_mode_are_configurable(self):
         with tempfile.TemporaryDirectory() as tmp:

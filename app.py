@@ -76,19 +76,40 @@ def add_security_headers(response):
         response.headers['Strict-Transport-Security'] = 'max-age=31536000'
     return response
 
+
+def _read_or_create_private_file(path, value_factory, trailing_newline=False):
+    path = Path(path)
+    try:
+        existing = path.read_text(encoding='utf-8').strip()
+        if existing:
+            return existing
+    except FileNotFoundError:
+        pass
+
+    value = value_factory()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        for _ in range(100):
+            existing = path.read_text(encoding='utf-8').strip()
+            if existing:
+                return existing
+            time.sleep(0.01)
+        raise OSError(f'private file remained empty: {path}')
+
+    with os.fdopen(fd, 'w', encoding='utf-8') as file_handle:
+        file_handle.write(value)
+        if trailing_newline:
+            file_handle.write('\n')
+        file_handle.flush()
+        os.fsync(file_handle.fileno())
+    return value
+
+
 # 固定 secret_key，存文件持久化，多 worker 共享
 _sk_file = os.environ.get('ANYTLS_SECRET_KEY_FILE') or os.path.join(os.path.dirname(__file__), '.secret_key')
-if os.path.exists(_sk_file):
-    with open(_sk_file, encoding='utf-8') as f:
-        app.secret_key = f.read().strip()
-else:
-    app.secret_key = secrets.token_hex(32)
-    with open(_sk_file, 'w', encoding='utf-8') as f:
-        f.write(app.secret_key)
-try:
-    os.chmod(_sk_file, 0o600)
-except OSError:
-    pass
+app.secret_key = _read_or_create_private_file(_sk_file, lambda: secrets.token_hex(32))
 
 # ─── 数据库 ──────────────────────────────────────────────
 
@@ -124,13 +145,11 @@ def get_initial_admin_credentials():
                 return admin_user, password, str(password_file)
 
         alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-        password = ''.join(secrets.choice(alphabet) for _ in range(18))
-        password_file.parent.mkdir(parents=True, exist_ok=True)
-        password_file.write_text(password + '\n', encoding='utf-8')
-        try:
-            password_file.chmod(0o600)
-        except OSError:
-            pass
+        password = _read_or_create_private_file(
+            password_file,
+            lambda: ''.join(secrets.choice(alphabet) for _ in range(18)),
+            trailing_newline=True,
+        )
         app.config['INITIAL_ADMIN_PASSWORD_FILE'] = str(password_file)
         return admin_user, password, str(password_file)
     except OSError:
@@ -256,11 +275,12 @@ def init_db():
         admin_user, admin_pass, _ = get_initial_admin_credentials()
         pw_hash = hash_password(admin_pass)
         db.execute(
-            'INSERT INTO admin_users (username, password_hash) VALUES (?, ?)',
+            'INSERT OR IGNORE INTO admin_users (username, password_hash) VALUES (?, ?)',
             (admin_user, pw_hash)
         )
-        db.commit()
+    db.commit()
 
+    db.execute('BEGIN IMMEDIATE')
     account_columns = {row[1] for row in db.execute('PRAGMA table_info(accounts)')}
     for column, declaration in (
         ('sub_token', 'TEXT DEFAULT ""'),
