@@ -1674,13 +1674,26 @@ def rename_rule_delete(rule_id):
 
 # ─── 初始化 & 启动 ─────────────────────────────────────
 
+
+def _development_server_options():
+    host = os.environ.get('HOST', '127.0.0.1')
+    port = int(os.environ.get('PORT', 8866))
+    debug = _env_flag('DEBUG')
+    is_loopback = host == 'localhost'
+    if not is_loopback:
+        try:
+            is_loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            is_loopback = False
+    if debug and not is_loopback:
+        raise RuntimeError('Flask debug mode may only bind to a loopback address')
+    return host, port, debug
+
+
 init_db()
 
 if __name__ == '__main__':
-    init_db()  # 兼容直接运行
-    port = int(os.environ.get('PORT', 8866))
-    host = os.environ.get('HOST', '0.0.0.0')
-    debug = os.environ.get('DEBUG', '0') == '1'
+    host, port, debug = _development_server_options()
     print(f"\n  AnyTLS Panel running at http://{host}:{port}")
     if app.config.get('INITIAL_ADMIN_PASSWORD_FILE'):
         print(f"  Initial admin user: admin")

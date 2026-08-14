@@ -38,20 +38,20 @@ class AnyTlsPanelTests(unittest.TestCase):
             data = script.read_bytes()
             self.assertNotIn(b"\r\n", data, msg=f"{script.name} uses CRLF line endings")
 
-    def test_traffic_collector_sums_multiple_iptables_matches(self):
+    def test_traffic_collector_counts_only_its_accounting_rules(self):
         script = REPO_ROOT / "traffic_collector.sh"
         probe = f"""
 iptables() {{
     if [ "$1" = "-L" ] && [ "$2" = "INPUT" ]; then
         printf '%s\\n' \
             '0 100 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443' \
-            '0 200 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443'
+            '0 200 tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443 /* anytls-panel-traffic-in-443 */'
         return 0
     fi
     if [ "$1" = "-L" ] && [ "$2" = "OUTPUT" ]; then
         printf '%s\\n' \
             '0 30 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp spt:443' \
-            '0 40 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp spt:443'
+            '0 40 tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp spt:443 /* anytls-panel-traffic-out-443 */'
         return 0
     fi
     return 0
@@ -63,7 +63,50 @@ get_traffic_bytes
 
         result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True)
 
-        self.assertEqual(result.stdout.strip(), "370")
+        self.assertEqual(result.stdout.strip(), "240")
+
+    def test_traffic_collector_adds_non_accepting_commented_rules(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        probe = f"""
+iptables() {{
+    if [ "$1" = "-C" ]; then return 1; fi
+    printf '%s\\n' "$*"
+}}
+source "{script}"
+ensure_iptables
+"""
+        result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True)
+
+        self.assertIn("-I INPUT", result.stdout)
+        self.assertIn("--comment anytls-panel-traffic-in-443", result.stdout)
+        self.assertIn("--comment anytls-panel-traffic-out-443", result.stdout)
+        self.assertNotIn("-j ACCEPT", result.stdout)
+
+    def test_traffic_collector_preserves_cumulative_total_across_counter_reset(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "traffic.state"
+            state.write_text("100 1000\n", encoding="utf-8")
+            probe = f"""
+TRAFFIC_STATE_FILE="{state}"
+source "{script}"
+ensure_iptables() {{ :; }}
+get_traffic_bytes() {{ printf '%s\\n' "$CURRENT_BYTES"; }}
+report_traffic() {{ printf 'reported=%s\\n' "$1"; }}
+CURRENT_BYTES=125
+main
+CURRENT_BYTES=20
+main
+printf 'state='
+cat "$TRAFFIC_STATE_FILE"
+"""
+            result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True)
+
+        self.assertEqual(result.stdout.splitlines(), [
+            "reported=1025",
+            "reported=1045",
+            "state=20 1045",
+        ])
 
     def test_clash_yaml_subscription_returns_nodes_and_traffic_tuple(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -326,6 +369,18 @@ proxies:
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertIn("max-age=", response.headers["Strict-Transport-Security"])
+
+    def test_debug_server_is_limited_to_loopback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            with mock.patch.dict(os.environ, {"DEBUG": "1", "HOST": "0.0.0.0"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "loopback"):
+                    app._development_server_options()
+            with mock.patch.dict(os.environ, {"DEBUG": "1", "HOST": "127.0.0.1"}, clear=False):
+                self.assertEqual(
+                    app._development_server_options(),
+                    ("127.0.0.1", 8866, True),
+                )
 
     def test_generated_subscription_url_uses_current_request_host(self):
         with tempfile.TemporaryDirectory() as tmp:
