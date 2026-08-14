@@ -1,14 +1,21 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import hmac
 import importlib.util
 import json
 import os
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import parse_qs, urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -36,20 +43,20 @@ class AnyTlsPanelTests(unittest.TestCase):
             data = script.read_bytes()
             self.assertNotIn(b"\r\n", data, msg=f"{script.name} uses CRLF line endings")
 
-    def test_traffic_collector_sums_multiple_iptables_matches(self):
+    def test_traffic_collector_counts_only_its_accounting_rules(self):
         script = REPO_ROOT / "traffic_collector.sh"
         probe = f"""
 iptables() {{
     if [ "$1" = "-L" ] && [ "$2" = "INPUT" ]; then
         printf '%s\\n' \
             '0 100 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443' \
-            '0 200 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443'
+            '0 200 tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443 /* anytls-panel-traffic-in-443 */'
         return 0
     fi
     if [ "$1" = "-L" ] && [ "$2" = "OUTPUT" ]; then
         printf '%s\\n' \
             '0 30 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp spt:443' \
-            '0 40 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp spt:443'
+            '0 40 tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp spt:443 /* anytls-panel-traffic-out-443 */'
         return 0
     fi
     return 0
@@ -61,7 +68,187 @@ get_traffic_bytes
 
         result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True)
 
-        self.assertEqual(result.stdout.strip(), "370")
+        self.assertEqual(result.stdout.strip(), "240")
+
+    def test_traffic_collector_adds_non_accepting_commented_rules(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        probe = f"""
+iptables() {{
+    if [ "$1" = "-C" ]; then return 1; fi
+    printf '%s\\n' "$*"
+}}
+source "{script}"
+ensure_iptables
+"""
+        result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True)
+
+        self.assertIn("-I INPUT", result.stdout)
+        self.assertIn("--comment anytls-panel-traffic-in-443", result.stdout)
+        self.assertIn("--comment anytls-panel-traffic-out-443", result.stdout)
+        self.assertNotIn("-j ACCEPT", result.stdout)
+
+    def test_traffic_collector_sends_raw_counter_for_server_side_idempotency(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        probe = f"""
+COLLECTOR_ID=collector-test-raw
+source "{script}"
+acquire_collector_lock() {{ :; }}
+ensure_iptables() {{ :; }}
+get_traffic_bytes() {{ printf '%s\\n' "$CURRENT_BYTES"; }}
+report_traffic() {{ printf 'reported=%s\\n' "$1"; }}
+CURRENT_BYTES=125
+main
+CURRENT_BYTES=20
+main
+"""
+        result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True)
+
+        self.assertEqual(result.stdout.splitlines(), [
+            "reported=125",
+            "reported=20",
+        ])
+
+    def test_traffic_collector_builds_valid_json_for_account_or_special_password(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        probe = f"""
+curl() {{
+    while (( $# )); do
+        if [[ "$1" == "-d" ]]; then printf '%s\\n' "$2"; return 0; fi
+        shift
+    done
+}}
+source "{script}"
+COLLECTOR_ID=collector-test-123
+ACCOUNT_ID=42
+report_traffic 25
+ACCOUNT_ID=
+PASSWORD='p@ss:/"word\\tail'
+report_traffic 30
+"""
+        result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True)
+        payloads = [json.loads(line) for line in result.stdout.splitlines()]
+
+        self.assertEqual(payloads[0], {
+            "collector_id": "collector-test-123",
+            "account_id": 42,
+            "counter_bytes": 25,
+        })
+        password = base64.b64decode(payloads[1]["password_b64"]).decode()
+        self.assertEqual(password, 'p@ss:/"word\\tail')
+        self.assertEqual(payloads[1]["collector_id"], "collector-test-123")
+        self.assertEqual(payloads[1]["counter_bytes"], 30)
+
+    def test_traffic_collector_does_not_report_failed_counter_read(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        probe = f"""
+COLLECTOR_ID=collector-test-failure
+source "{script}"
+acquire_collector_lock() {{ :; }}
+ensure_iptables() {{ :; }}
+iptables() {{ return 1; }}
+report_traffic() {{ printf 'reported=%s\\n' "$1"; }}
+main
+"""
+        result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("reported=", result.stdout)
+
+    def test_traffic_collector_does_not_report_when_rule_insert_fails(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        for failed_chain in ("INPUT", "OUTPUT"):
+            with self.subTest(failed_chain=failed_chain):
+                probe = f"""
+COLLECTOR_ID=collector-test-rule-failure
+FAILED_CHAIN={failed_chain}
+source "{script}"
+acquire_collector_lock() {{ :; }}
+iptables() {{
+    if [[ "$1" == "-C" ]]; then return 1; fi
+    if [[ "$1" == "-I" && "$2" == "$FAILED_CHAIN" ]]; then return 1; fi
+    return 0
+}}
+get_traffic_bytes() {{ printf '25\n'; }}
+report_traffic() {{ printf 'reported=%s\n' "$1"; }}
+main
+"""
+                result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("reported=", result.stdout)
+
+    def test_traffic_collector_requires_persisted_collector_id(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        probe = f"""
+COLLECTOR_ID=
+COLLECTOR_ID_FILE=/dev/null/collector.id
+source "{script}"
+acquire_collector_lock() {{ :; }}
+ensure_iptables() {{ :; }}
+get_traffic_bytes() {{ printf '25\n'; }}
+report_traffic() {{ printf 'reported=%s\n' "$1"; }}
+main
+"""
+        result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("reported=", result.stdout)
+
+    def test_traffic_collector_refuses_a_second_instance(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_file = Path(tmp) / "collector.lock"
+            probe = f"""
+COLLECTOR_ID=collector-test-locked
+COLLECTOR_LOCK_FILE="{lock_file}"
+source "{script}"
+flock() {{ return 1; }}
+validate_collector_path_parent() {{ :; }}
+ensure_iptables() {{ :; }}
+get_traffic_bytes() {{ printf '25\n'; }}
+report_traffic() {{ printf 'reported=%s\n' "$1"; }}
+main
+"""
+            result = subprocess.run(
+                ["bash", "-c", probe], capture_output=True, text=True
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already running", result.stderr)
+        self.assertNotIn("reported=", result.stdout)
+
+    def test_traffic_collector_rejects_user_writable_state_parent(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            unsafe_path = Path(tmp) / "collector.id"
+            probe = f"""
+source "{script}"
+validate_collector_path_parent "{unsafe_path}" COLLECTOR_ID_FILE
+"""
+            result = subprocess.run(
+                ["bash", "-c", probe], capture_output=True, text=True
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("root-owned", result.stderr)
+
+    def test_traffic_collector_default_lock_uses_secure_run_directory(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        probe = f"""
+source "{script}"
+[[ "$COLLECTOR_LOCK_FILE" == /run/anytls-panel-traffic.lock ]]
+dirname() {{ printf '/run\n'; }}
+realpath() {{ printf '/run\n'; }}
+stat() {{ printf '0 755\n'; }}
+validate_collector_path_parent "$COLLECTOR_LOCK_FILE" COLLECTOR_LOCK_FILE
+printf 'accepted\n'
+"""
+        result = subprocess.run(
+            ["bash", "-c", probe], capture_output=True, text=True
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "accepted")
 
     def test_clash_yaml_subscription_returns_nodes_and_traffic_tuple(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -87,30 +274,222 @@ proxies:
         self.assertEqual(nodes[0]["name"], "Good Trojan")
         self.assertEqual(nodes[0]["protocol"], "trojan")
 
+    def test_clash_yaml_null_ws_options_do_not_drop_later_nodes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            nodes = app._parse_clash_yaml(
+                """
+proxies:
+  - name: VMess without ws options
+    type: vmess
+    server: vmess.example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    network: ws
+    ws-opts:
+  - name: Later Trojan
+    type: trojan
+    server: trojan.example.com
+    port: 443
+    password: secret
+"""
+            )
+
+        self.assertEqual([node["name"] for node in nodes], [
+            "VMess without ws options",
+            "Later Trojan",
+        ])
+
+    def test_clash_yaml_round_trip_preserves_key_protocol_parameters(self):
+        content = r'''
+proxies:
+  - name: AnyTLS secure
+    type: anytls
+    server: any.example.com
+    port: 443
+    password: 'p@ss:/word'
+    sni: edge.any.example
+    skip-cert-verify: true
+    client-fingerprint: chrome
+  - name: Shadowsocks special password
+    type: ss
+    server: ss.example.com
+    port: 8443
+    cipher: chacha20-ietf-poly1305
+    password: 'p@ss:/"word'
+    plugin: v2ray-plugin
+    plugin-opts:
+      mode: websocket
+      tls: true
+      host: cdn.ss.example
+  - name: Shadowsocks 2022
+    type: ss
+    server: ss2022.example.com
+    port: 443
+    cipher: 2022-blake3-aes-256-gcm
+    password: 'key+/=value'
+  - name: VMess websocket
+    type: vmess
+    server: vmess.example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    alterId: 3
+    cipher: auto
+    network: ws
+    tls: true
+    servername: tls.vmess.example
+    skip-cert-verify: true
+    client-fingerprint: firefox
+    ws-opts:
+      path: /socket
+      headers:
+        Host: cdn.vmess.example
+  - name: VLESS websocket
+    type: vless
+    server: vless.example.com
+    port: 443
+    uuid: 22222222-2222-2222-2222-222222222222
+    flow: xtls-rprx-vision
+    network: ws
+    tls: true
+    servername: tls.vless.example
+    skip-cert-verify: true
+    client-fingerprint: safari
+    ws-opts:
+      path: /vless
+      headers:
+        Host: cdn.vless.example
+  - name: VLESS reality grpc
+    type: vless
+    server: reality.example.com
+    port: 443
+    uuid: 33333333-3333-3333-3333-333333333333
+    network: grpc
+    tls: true
+    servername: cover.example.com
+    client-fingerprint: chrome
+    grpc-opts:
+      grpc-service-name: tunnel
+    reality-opts:
+      public-key: reality-public-key
+      short-id: abcd1234
+  - name: Hysteria2 obfs
+    type: hysteria2
+    server: hy2.example.com
+    port: 443
+    password: hy2-secret
+    sni: cover.hy2.example
+    obfs: salamander
+    obfs-password: obfs-secret
+  - name: TUIC credentials
+    type: tuic
+    server: tuic.example.com
+    port: 443
+    uuid: 44444444-4444-4444-4444-444444444444
+    password: tuic-secret
+    sni: cover.tuic.example
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            nodes = app._parse_clash_yaml(content)
+            proxies = {
+                node["name"]: app._clash_proxy_from_uri(node["raw_uri"])
+                for node in nodes
+            }
+            raw_uris = {node["name"]: node["raw_uri"] for node in nodes}
+
+        anytls = proxies["AnyTLS secure"]
+        self.assertEqual(anytls["password"], "p@ss:/word")
+        self.assertEqual(anytls["sni"], "edge.any.example")
+        self.assertTrue(anytls["skip-cert-verify"])
+        self.assertEqual(anytls["client-fingerprint"], "chrome")
+        self.assertNotIn("idle-session-timeout", anytls)
+
+        shadowsocks = proxies["Shadowsocks special password"]
+        self.assertEqual(shadowsocks["type"], "ss")
+        self.assertEqual(shadowsocks["cipher"], "chacha20-ietf-poly1305")
+        self.assertEqual(shadowsocks["password"], 'p@ss:/"word')
+        self.assertEqual(shadowsocks["plugin"], "v2ray-plugin")
+        self.assertEqual(shadowsocks["plugin-opts"]["host"], "cdn.ss.example")
+        self.assertTrue(shadowsocks["plugin-opts"]["tls"])
+        ss_uri = urlparse(raw_uris["Shadowsocks special password"])
+        self.assertEqual(ss_uri.path, "/")
+        self.assertEqual(parse_qs(ss_uri.query), {
+            "plugin": [
+                "v2ray-plugin;mode=websocket;tls;host=cdn.ss.example"
+            ],
+        })
+
+        shadowsocks_2022 = proxies["Shadowsocks 2022"]
+        self.assertEqual(shadowsocks_2022["cipher"], "2022-blake3-aes-256-gcm")
+        self.assertEqual(shadowsocks_2022["password"], "key+/=value")
+        ss_2022_userinfo = urlparse(
+            raw_uris["Shadowsocks 2022"]
+        ).netloc.rpartition("@")[0]
+        self.assertEqual(
+            ss_2022_userinfo,
+            "2022-blake3-aes-256-gcm:key%2B%2F%3Dvalue",
+        )
+
+        vmess = proxies["VMess websocket"]
+        self.assertEqual(vmess["network"], "ws")
+        self.assertEqual(vmess["ws-opts"]["path"], "/socket")
+        self.assertEqual(vmess["ws-opts"]["headers"]["Host"], "cdn.vmess.example")
+        self.assertEqual(vmess["servername"], "tls.vmess.example")
+        self.assertTrue(vmess["skip-cert-verify"])
+        self.assertEqual(vmess["client-fingerprint"], "firefox")
+
+        vless = proxies["VLESS websocket"]
+        self.assertEqual(vless["network"], "ws")
+        self.assertEqual(vless["ws-opts"]["path"], "/vless")
+        self.assertEqual(vless["ws-opts"]["headers"]["Host"], "cdn.vless.example")
+        self.assertEqual(vless["servername"], "tls.vless.example")
+        self.assertEqual(vless["flow"], "xtls-rprx-vision")
+        self.assertTrue(vless["skip-cert-verify"])
+        self.assertEqual(vless["client-fingerprint"], "safari")
+
+        reality = proxies["VLESS reality grpc"]
+        self.assertEqual(reality["network"], "grpc")
+        self.assertEqual(reality["grpc-opts"]["grpc-service-name"], "tunnel")
+        self.assertEqual(reality["reality-opts"]["public-key"], "reality-public-key")
+        self.assertEqual(reality["reality-opts"]["short-id"], "abcd1234")
+
+        hysteria = proxies["Hysteria2 obfs"]
+        self.assertEqual(hysteria["obfs"], "salamander")
+        self.assertEqual(hysteria["obfs-password"], "obfs-secret")
+
+        tuic = proxies["TUIC credentials"]
+        self.assertEqual(tuic["uuid"], "44444444-4444-4444-4444-444444444444")
+        self.assertEqual(tuic["password"], "tuic-secret")
+
+    def test_invalid_vmess_alter_id_does_not_break_clash_conversion(self):
+        payload = base64.urlsafe_b64encode(json.dumps({
+            "v": "2",
+            "ps": "bad aid",
+            "add": "vmess.example.com",
+            "port": "443",
+            "id": "11111111-1111-1111-1111-111111111111",
+            "aid": "not-a-number",
+            "net": "tcp",
+        }).encode()).decode().rstrip("=")
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            proxy = app._clash_proxy_from_uri(f"vmess://{payload}")
+
+        self.assertEqual(proxy["alterId"], 0)
+
     def test_http_subscription_prefers_native_anytls_user_agent(self):
-        class FakeResponse:
-            def __init__(self, body=b"anytls://pw@example.com:443#demo"):
-                self.body = body
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return self.body
-
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
             seen_user_agents = []
 
-            def fake_urlopen(req, timeout=10):
-                seen_user_agents.append(req.get_header("User-agent"))
-                return FakeResponse()
+            def fake_read(_url, user_agent):
+                seen_user_agents.append(user_agent)
+                return b"anytls://pw@example.com:443#demo"
 
-            with mock.patch("urllib.request.urlopen", fake_urlopen):
-                nodes, traffic_info = app.parse_subscribe_url("https://sub.example/list")
+            with mock.patch.object(app, "_assert_public_subscription_url"):
+                with mock.patch.object(app, "_read_subscription_url", side_effect=fake_read):
+                    nodes, traffic_info = app.parse_subscribe_url("https://sub.example/list")
 
         self.assertEqual(traffic_info, {})
         self.assertIn("SSRVPN", seen_user_agents[0])
@@ -118,19 +497,6 @@ proxies:
         self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
 
     def test_http_subscription_selects_later_mixed_protocol_candidate(self):
-        class FakeResponse:
-            def __init__(self, body):
-                self.body = body
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return self.body
-
         clash_trojan_only = b"""
 proxies:
   - name: compat
@@ -148,17 +514,17 @@ proxies:
             app = load_app(Path(tmp) / "anytls.db")
             seen_user_agents = []
 
-            def fake_urlopen(req, timeout=10):
-                ua = req.get_header("User-agent")
-                seen_user_agents.append(ua)
-                if "SSRVPN" in ua or "Clash.Meta" in ua:
+            def fake_read(_url, user_agent):
+                seen_user_agents.append(user_agent)
+                if "SSRVPN" in user_agent or "Clash.Meta" in user_agent:
                     raise OSError("blocked")
-                if "ClashForAndroid" in ua:
-                    return FakeResponse(clash_trojan_only)
-                return FakeResponse(shadowrocket_native)
+                if "ClashForAndroid" in user_agent:
+                    return clash_trojan_only
+                return shadowrocket_native
 
-            with mock.patch("urllib.request.urlopen", fake_urlopen):
-                nodes, traffic_info = app.parse_subscribe_url("https://sub.example/list")
+            with mock.patch.object(app, "_assert_public_subscription_url"):
+                with mock.patch.object(app, "_read_subscription_url", side_effect=fake_read):
+                    nodes, traffic_info = app.parse_subscribe_url("https://sub.example/list")
 
         self.assertEqual(traffic_info, {})
         self.assertTrue(any("Shadowrocket" in ua for ua in seen_user_agents))
@@ -167,6 +533,67 @@ proxies:
         self.assertEqual([node["protocol"] for node in nodes], ["anytls", "trojan"])
         self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
         self.assertTrue(nodes[1]["raw_uri"].startswith("trojan://"))
+
+    def test_http_subscription_rejects_private_network_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            private_result = [
+                (2, 1, 6, "", ("127.0.0.1", 80)),
+            ]
+            with mock.patch("socket.getaddrinfo", return_value=private_result):
+                with mock.patch("urllib.request.urlopen", side_effect=AssertionError("network called")):
+                    with mock.patch("urllib.request.build_opener") as build_opener:
+                        with self.assertRaisesRegex(ValueError, "公网"):
+                            app.parse_subscribe_url("http://internal.example/sub")
+
+        build_opener.assert_not_called()
+
+    def test_http_subscription_limits_response_size(self):
+        class OversizedResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"x" * (2 * 1024 * 1024 + 1)
+
+            def geturl(self):
+                return "https://sub.example/list"
+
+        class FakeOpener:
+            def open(self, _request, timeout=10):
+                self.timeout = timeout
+                return OversizedResponse()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            public_result = [
+                (2, 1, 6, "", ("93.184.216.34", 443)),
+            ]
+            with mock.patch("socket.getaddrinfo", return_value=public_result):
+                with mock.patch("urllib.request.build_opener", return_value=FakeOpener()):
+                    with self.assertRaisesRegex(ValueError, "响应过大"):
+                        app._read_subscription_url("https://sub.example/list", "SSRVPN/2.4.0")
+
+    def test_http_subscription_rejects_redirects_to_private_networks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            request = mock.Mock(full_url="https://sub.example/list")
+            private_result = [
+                (2, 1, 6, "", ("169.254.169.254", 80)),
+            ]
+            with mock.patch("socket.getaddrinfo", return_value=private_result):
+                with self.assertRaisesRegex(ValueError, "公网"):
+                    app._SafeSubscriptionRedirectHandler().redirect_request(
+                        request,
+                        None,
+                        302,
+                        "Found",
+                        {},
+                        "http://metadata.example/latest",
+                    )
 
     def test_initial_admin_credentials_can_be_set_from_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -232,6 +659,91 @@ proxies:
             self.assertEqual(secret_key_file.stat().st_mode & 0o777, 0o600)
             self.assertEqual(database.stat().st_mode & 0o777, 0o600)
             self.assertTrue(app.app.secret_key)
+
+    def test_private_file_creation_is_atomic_across_threads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            secret_file = Path(tmp) / "shared-secret"
+
+            def create_value():
+                time.sleep(0.02)
+                return f"secret-{threading.get_ident()}"
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                values = list(executor.map(
+                    lambda _index: app._read_or_create_private_file(secret_file, create_value),
+                    range(8),
+                ))
+            file_value = secret_file.read_text(encoding="utf-8")
+            file_mode = secret_file.stat().st_mode & 0o777
+
+        self.assertEqual(len(set(values)), 1)
+        self.assertEqual(file_value, values[0])
+        self.assertEqual(file_mode, 0o600)
+
+    def test_concurrent_database_initialization_creates_one_admin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            with sqlite3.connect(database) as db:
+                db.execute("DELETE FROM admin_users")
+                db.commit()
+            barrier = threading.Barrier(4)
+
+            def synchronized_hash(_password):
+                barrier.wait(timeout=2)
+                return "test-hash"
+
+            with mock.patch.object(app, "hash_password", side_effect=synchronized_hash):
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    list(executor.map(lambda _index: app.init_db(), range(4)))
+
+            with sqlite3.connect(database) as db:
+                admin_count = db.execute("SELECT COUNT(*) FROM admin_users").fetchone()[0]
+
+        self.assertEqual(admin_count, 1)
+
+    def test_secure_cookie_and_proxy_mode_are_configurable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "ANYTLS_DATABASE": str(database),
+                    "ANYTLS_SESSION_COOKIE_SECURE": "1",
+                    "ANYTLS_TRUST_PROXY": "1",
+                    "ANYTLS_RATE_LIMIT_STORAGE_URI": "memory://",
+                },
+                clear=False,
+            ):
+                app = load_app(database)
+
+        self.assertTrue(app.app.config["SESSION_COOKIE_SECURE"])
+        self.assertEqual(app.limiter._storage_uri, "memory://")
+        self.assertEqual(type(app.app.wsgi_app).__name__, "ProxyFix")
+
+    def test_responses_include_baseline_security_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True)
+            with app.app.test_client() as client:
+                response = client.get("/login", base_url="https://panel.example")
+
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+        self.assertIn("max-age=", response.headers["Strict-Transport-Security"])
+
+    def test_debug_server_is_limited_to_loopback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            with mock.patch.dict(os.environ, {"DEBUG": "1", "HOST": "0.0.0.0"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "loopback"):
+                    app._development_server_options()
+            with mock.patch.dict(os.environ, {"DEBUG": "1", "HOST": "127.0.0.1"}, clear=False):
+                self.assertEqual(
+                    app._development_server_options(),
+                    ("127.0.0.1", 8866, True),
+                )
 
     def test_generated_subscription_url_uses_current_request_host(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -346,6 +858,61 @@ proxies:
             self.assertEqual(ok.status_code, 200)
             self.assertEqual(ok.get_json()["total_bytes"], 123)
 
+    def test_account_scoped_traffic_token_cannot_update_other_accounts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            token_file = Path(tmp) / ".traffic_api_token"
+            token_file.write_text("traffic-token\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "ANYTLS_DATABASE": str(database),
+                    "ANYTLS_TRAFFIC_API_TOKEN_FILE": str(token_file),
+                },
+                clear=False,
+            ):
+                app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_ids = [
+                    db.execute(
+                        "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                        (f"account-{index}", f"anytls://pw{index}@example.com:443"),
+                    ).lastrowid
+                    for index in range(2)
+                ]
+                db.commit()
+                scoped_token = app.generate_account_traffic_token(account_ids[0])
+
+            headers = {"Authorization": f"Bearer {scoped_token}"}
+            with app.app.test_client() as client:
+                own = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json={"account_id": account_ids[0], "bytes_used": 25},
+                )
+                other = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json={"account_id": account_ids[1], "bytes_used": 1000},
+                )
+                password_identity = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json={"password": "pw0", "bytes_used": 1000},
+                )
+
+            with sqlite3.connect(database) as db:
+                totals = [row[0] for row in db.execute(
+                    "SELECT traffic_used_bytes FROM accounts ORDER BY id"
+                )]
+
+        self.assertEqual(own.status_code, 200)
+        self.assertEqual(other.status_code, 403)
+        self.assertEqual(password_identity.status_code, 403)
+        self.assertEqual(totals, [25, 0])
+
     def test_traffic_api_rejects_invalid_payload_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
@@ -403,14 +970,216 @@ proxies:
                     headers=headers,
                     json={"password": "node-secret", "total_bytes": -1},
                 )
+                bad_account_id = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json={"account_id": True, "bytes_used": 1},
+                )
 
             self.assertEqual(negative.status_code, 400)
             self.assertEqual(malformed.status_code, 400)
             self.assertEqual(fractional.status_code, 400)
             self.assertEqual(bad_total.status_code, 400)
+            self.assertEqual(bad_account_id.status_code, 400)
             with sqlite3.connect(database) as db:
                 used = db.execute("SELECT traffic_used_bytes FROM accounts").fetchone()[0]
             self.assertEqual(used, 100)
+
+    def test_traffic_set_never_lowers_total_and_missing_account_is_404(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            token_file = Path(tmp) / ".traffic_api_token"
+            token_file.write_text("traffic-token\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "ANYTLS_DATABASE": str(database),
+                "ANYTLS_TRAFFIC_API_TOKEN_FILE": str(token_file),
+            }, clear=False):
+                app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, traffic_used_bytes) VALUES (?, ?, ?)",
+                    ("demo", "anytls://pw@example.com:443", 1000),
+                ).lastrowid
+                db.commit()
+
+            headers = {"Authorization": "Bearer traffic-token"}
+            with app.app.test_client() as client:
+                lower = client.post(
+                    "/api/traffic/set",
+                    headers=headers,
+                    json={"account_id": account_id, "total_bytes": 20},
+                )
+                missing = client.post(
+                    "/api/traffic/set",
+                    headers=headers,
+                    json={"account_id": 999999, "total_bytes": 20},
+                )
+
+            with sqlite3.connect(database) as db:
+                total = db.execute(
+                    "SELECT traffic_used_bytes FROM accounts WHERE id=?", (account_id,)
+                ).fetchone()[0]
+
+        self.assertEqual(lower.status_code, 200)
+        self.assertEqual(lower.get_json()["total_bytes"], 1000)
+        self.assertEqual(total, 1000)
+        self.assertEqual(missing.status_code, 404)
+
+    def test_traffic_password_must_identify_exactly_one_account(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            token_file = Path(tmp) / ".traffic_api_token"
+            token_file.write_text("traffic-token\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "ANYTLS_DATABASE": str(database),
+                "ANYTLS_TRAFFIC_API_TOKEN_FILE": str(token_file),
+            }, clear=False):
+                app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_ids = []
+                for index in range(2):
+                    account_id = db.execute(
+                        "INSERT INTO accounts (name, subscribe_url, traffic_used_bytes) VALUES (?, ?, ?)",
+                        (f"account-{index}", "anytls://same@example.com:443", 0),
+                    ).lastrowid
+                    account_ids.append(account_id)
+                    db.execute(
+                        "INSERT INTO nodes (account_id, name, host, port, password) VALUES (?, ?, ?, ?, ?)",
+                        (account_id, f"node-{index}", f"node-{index}.example", 443, "same"),
+                    )
+                db.commit()
+
+            headers = {"Authorization": "Bearer traffic-token"}
+            with app.app.test_client() as client:
+                ambiguous = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json={"password": "same", "bytes_used": 50},
+                )
+                explicit = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json={"account_id": account_ids[1], "bytes_used": 50},
+                )
+
+            with sqlite3.connect(database) as db:
+                totals = [row[0] for row in db.execute(
+                    "SELECT traffic_used_bytes FROM accounts ORDER BY id"
+                )]
+
+        self.assertEqual(ambiguous.status_code, 409)
+        self.assertIn("ambiguous", ambiguous.get_json()["error"])
+        self.assertEqual(explicit.status_code, 200)
+        self.assertEqual(totals, [0, 50])
+
+    def test_traffic_counter_is_idempotent_and_handles_resets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            token_file = Path(tmp) / ".traffic_api_token"
+            token_file.write_text("traffic-token\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "ANYTLS_DATABASE": str(database),
+                "ANYTLS_TRAFFIC_API_TOKEN_FILE": str(token_file),
+            }, clear=False):
+                app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, traffic_used_bytes) VALUES (?, ?, ?)",
+                    ("demo", "anytls://pw@example.com:443", 0),
+                ).lastrowid
+                db.commit()
+
+            headers = {"Authorization": "Bearer traffic-token"}
+            samples = [
+                ("collector-one", 100),
+                ("collector-one", 100),
+                ("collector-one", 120),
+                ("collector-one", 20),
+                ("collector-two", 10),
+            ]
+            responses = []
+            with app.app.test_client() as client:
+                for collector_id, counter_bytes in samples:
+                    responses.append(client.post(
+                        "/api/traffic/counter",
+                        headers=headers,
+                        json={
+                            "collector_id": collector_id,
+                            "account_id": account_id,
+                            "counter_bytes": counter_bytes,
+                        },
+                    ))
+
+            with sqlite3.connect(database) as db:
+                total = db.execute(
+                    "SELECT traffic_used_bytes FROM accounts WHERE id=?", (account_id,)
+                ).fetchone()[0]
+
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        self.assertEqual([response.get_json()["delta_bytes"] for response in responses], [
+            0, 0, 20, 20, 0,
+        ])
+        self.assertEqual(total, 40)
+
+    def test_traffic_report_increments_without_read_modify_write(self):
+        class FakeCursor:
+            rowcount = 1
+
+            def __init__(self, row=None):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+        class FakeDb:
+            def __init__(self):
+                self.total = 100
+
+            def execute(self, sql, params=()):
+                if sql.startswith("SELECT id, traffic_used_bytes"):
+                    raise AssertionError("traffic increment must not read the old total")
+                if sql.startswith("UPDATE accounts SET traffic_used_bytes=COALESCE"):
+                    self.total += params[0]
+                    return FakeCursor()
+                if sql.startswith("SELECT traffic_used_bytes FROM accounts"):
+                    return FakeCursor({"traffic_used_bytes": self.total})
+                if sql.startswith("INSERT INTO traffic_logs"):
+                    return FakeCursor()
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+            def commit(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            token_file = Path(tmp) / ".traffic_api_token"
+            token_file.write_text("traffic-token\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "ANYTLS_DATABASE": str(Path(tmp) / "anytls.db"),
+                    "ANYTLS_TRAFFIC_API_TOKEN_FILE": str(token_file),
+                },
+                clear=False,
+            ):
+                app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            fake_db = FakeDb()
+            with mock.patch.object(app, "get_db", return_value=fake_db):
+                with app.app.test_client() as client:
+                    response = client.post(
+                        "/api/traffic/report",
+                        headers={"Authorization": "Bearer traffic-token"},
+                        json={"account_id": 1, "bytes_used": 50},
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["results"][0]["total_bytes"], 150)
 
     def test_account_forms_reject_invalid_traffic_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -648,6 +1417,319 @@ proxies:
             self.assertIn("client-fingerprint: chrome", content)
             self.assertIn("skip-cert-verify: true", content)
 
+    def test_public_clash_subscription_preserves_protocol_parameters(self):
+        vmess_payload = base64.b64encode(json.dumps({
+            "v": "2",
+            "ps": "vmess-ws",
+            "add": "vmess.example.com",
+            "port": "443",
+            "id": "11111111-1111-1111-1111-111111111111",
+            "aid": "5",
+            "net": "ws",
+            "host": "cdn.example.com",
+            "path": "/socket",
+            "tls": "tls",
+            "sni": "sni.example.com",
+        }).encode()).decode()
+        ss_userinfo = base64.b64encode(b"chacha20-ietf-poly1305:ss-password").decode()
+        raw_uris = [
+            ("vmess-ws", f"vmess://{vmess_payload}", "vmess"),
+            ("ss-node", f"ss://{ss_userinfo}@ss.example.com:8388#ss-node", "shadowsocks"),
+            (
+                "trojan-node",
+                "trojan://secret@trojan.example.com:443?sni=edge.example.com&allowInsecure=1#trojan-node",
+                "trojan",
+            ),
+            (
+                "vless-node",
+                "vless://uuid@vless.example.com:443?security=tls&sni=vless-sni.example.com&flow=xtls-rprx-vision#vless-node",
+                "vless",
+            ),
+            (
+                "hy2-node",
+                "hysteria2://auth@hy2.example.com:443?sni=hy2-sni.example.com&insecure=1#hy2-node",
+                "hysteria2",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
+                    ("demo", "https://sub.example/list", "token"),
+                ).lastrowid
+                for name, raw_uri, protocol in raw_uris:
+                    parsed = app.parse_protocol_uri(
+                        raw_uri,
+                        "ss" if protocol == "shadowsocks" else protocol,
+                    )
+                    db.execute(
+                        "INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            account_id,
+                            name,
+                            parsed["host"],
+                            parsed["port"],
+                            parsed["password"],
+                            raw_uri,
+                            protocol,
+                        ),
+                    )
+                db.commit()
+
+            with app.app.test_client() as client:
+                response = client.get("/sub/token", headers={"User-Agent": "Clash.Meta/1.18.0"})
+
+        import yaml
+        proxies = {
+            proxy["name"]: proxy
+            for proxy in yaml.safe_load(response.get_data(as_text=True))["proxies"]
+        }
+        self.assertEqual(proxies["vmess-ws"]["alterId"], 5)
+        self.assertEqual(proxies["vmess-ws"]["network"], "ws")
+        self.assertEqual(proxies["vmess-ws"]["ws-opts"]["path"], "/socket")
+        self.assertEqual(proxies["vmess-ws"]["ws-opts"]["headers"]["Host"], "cdn.example.com")
+        self.assertTrue(proxies["vmess-ws"]["tls"])
+        self.assertEqual(proxies["ss-node"]["cipher"], "chacha20-ietf-poly1305")
+        self.assertEqual(proxies["trojan-node"]["sni"], "edge.example.com")
+        self.assertTrue(proxies["trojan-node"]["skip-cert-verify"])
+        self.assertEqual(proxies["vless-node"]["servername"], "vless-sni.example.com")
+        self.assertTrue(proxies["vless-node"]["tls"])
+        self.assertEqual(proxies["vless-node"]["flow"], "xtls-rprx-vision")
+        self.assertEqual(proxies["hy2-node"]["sni"], "hy2-sni.example.com")
+        self.assertTrue(proxies["hy2-node"]["skip-cert-verify"])
+
+    def test_init_db_migrates_traffic_metadata_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            with sqlite3.connect(database) as db:
+                db.execute(
+                    """CREATE TABLE accounts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        subscribe_url TEXT NOT NULL,
+                        traffic_limit_gb REAL DEFAULT 250,
+                        traffic_used_bytes INTEGER DEFAULT 0,
+                        status TEXT DEFAULT 'active',
+                        notes TEXT DEFAULT '',
+                        node_count INTEGER DEFAULT 0,
+                        last_synced_at TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        sub_token TEXT DEFAULT ''
+                    )"""
+                )
+            load_app(database)
+            with sqlite3.connect(database) as db:
+                columns = {row[1] for row in db.execute("PRAGMA table_info(accounts)")}
+                tables = {row[0] for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )}
+
+        self.assertTrue({
+            "traffic_upload_bytes",
+            "traffic_download_bytes",
+            "expire_date",
+        }.issubset(columns))
+        self.assertIn("traffic_collectors", tables)
+
+    def test_database_path_rejects_empty_or_directory_values(self):
+        original_mode = REPO_ROOT.stat().st_mode & 0o777
+        for configured in ("", str(REPO_ROOT)):
+            with self.subTest(configured=configured):
+                spec = importlib.util.spec_from_file_location(
+                    "anytls_panel_invalid_database",
+                    APP_PATH,
+                )
+                module = importlib.util.module_from_spec(spec)
+                with mock.patch.dict(
+                    os.environ,
+                    {"ANYTLS_DATABASE": configured},
+                    clear=False,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "regular file|non-empty"):
+                        spec.loader.exec_module(module)
+        self.assertEqual(REPO_ROOT.stat().st_mode & 0o777, original_mode)
+
+    def test_database_connections_enforce_foreign_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            with app.app.app_context():
+                enabled = app.get_db().execute("PRAGMA foreign_keys").fetchone()[0]
+
+        self.assertEqual(enabled, 1)
+
+    def test_account_sync_skips_account_deleted_during_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("deleted-during-sync", "https://sub.example/list"),
+                ).lastrowid
+                db.commit()
+
+            def delete_then_return(_url):
+                with sqlite3.connect(database) as other:
+                    other.execute("PRAGMA foreign_keys=ON")
+                    other.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+                    other.commit()
+                return ([{
+                    "name": "stale",
+                    "host": "stale.example.com",
+                    "port": 443,
+                    "password": "pw",
+                    "raw_uri": "anytls://pw@stale.example.com:443#stale",
+                    "protocol": "anytls",
+                }], {})
+
+            with mock.patch.object(app, "parse_subscribe_url", side_effect=delete_then_return):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                    response = client.post(f"/accounts/{account_id}/sync")
+
+            with sqlite3.connect(database) as db:
+                account_count = db.execute(
+                    "SELECT COUNT(*) FROM accounts WHERE id=?", (account_id,)
+                ).fetchone()[0]
+                orphan_count = db.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE account_id=?", (account_id,)
+                ).fetchone()[0]
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(account_count, 0)
+        self.assertEqual(orphan_count, 0)
+
+    def test_sync_all_skips_account_deleted_during_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("deleted-during-sync-all", "https://sub.example/list"),
+                ).lastrowid
+                db.commit()
+
+            def delete_then_return(_url):
+                with sqlite3.connect(database) as other:
+                    other.execute("PRAGMA foreign_keys=ON")
+                    other.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+                    other.commit()
+                return ([], {})
+
+            with mock.patch.object(app, "parse_subscribe_url", side_effect=delete_then_return):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                    response = client.post("/api/sync-all")
+
+            with sqlite3.connect(database) as db:
+                orphan_count = db.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE account_id=?", (account_id,)
+                ).fetchone()[0]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["results"][0]["status"], "skipped")
+        self.assertEqual(orphan_count, 0)
+
+    def test_public_subscription_uses_persisted_traffic_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts ("
+                    "name, subscribe_url, sub_token, traffic_limit_gb, traffic_used_bytes, "
+                    "traffic_upload_bytes, traffic_download_bytes, expire_date"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "demo",
+                        "anytls://pw@example.com:443#demo",
+                        "token",
+                        10,
+                        300,
+                        100,
+                        200,
+                        "2030-01-02",
+                    ),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (account_id, "demo", "example.com", 443, "pw", "anytls://pw@example.com:443#demo"),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                response = client.get("/sub/token")
+
+        userinfo = response.headers["Subscription-Userinfo"]
+        self.assertIn("upload=100", userinfo)
+        self.assertIn("download=200", userinfo)
+        self.assertIn("total=10737418240", userinfo)
+        self.assertIn("expire=", userinfo)
+
+    def test_account_sync_persists_traffic_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, traffic_used_bytes) "
+                    "VALUES (?, ?, ?)",
+                    ("demo", "https://sub.example/list", 500),
+                ).lastrowid
+                db.commit()
+
+            node = {
+                "name": "demo",
+                "host": "example.com",
+                "port": 443,
+                "password": "pw",
+                "raw_uri": "anytls://pw@example.com:443#demo",
+                "protocol": "anytls",
+            }
+            traffic = {
+                "used_bytes": 300,
+                "upload_bytes": 100,
+                "download_bytes": 200,
+                "total_gb": 10,
+                "expire_date": "2030-01-02",
+            }
+            with mock.patch.object(app, "parse_subscribe_url", return_value=([node], traffic)):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                        session["username"] = "admin"
+                    response = client.post(f"/accounts/{account_id}/sync")
+
+            with sqlite3.connect(database) as db:
+                metadata = db.execute(
+                    "SELECT traffic_used_bytes, traffic_upload_bytes, "
+                    "traffic_download_bytes, traffic_limit_gb, expire_date "
+                    "FROM accounts WHERE id=?",
+                    (account_id,),
+                ).fetchone()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(metadata, (500, 100, 200, 10, "2030-01-02"))
+
     def test_public_subscribe_does_not_convert_anytls_for_shadowrocket_clients(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
@@ -749,6 +1831,143 @@ proxies:
                 ).fetchone()
             self.assertEqual((is_online, latency_ms), (1, 123))
 
+    def test_check_all_nodes_runs_network_probes_concurrently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "anytls://pw@example.com:443#demo"),
+                ).lastrowid
+                for index in range(4):
+                    db.execute(
+                        "INSERT INTO nodes (account_id, name, host, port, password) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (account_id, f"node-{index}", f"node-{index}.example", 443, "pw"),
+                    )
+                db.commit()
+
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+
+            def slow_check(_host, _port):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.03)
+                with lock:
+                    active -= 1
+                return {"online": True, "status": "online", "msg": "ok", "latency": 1}
+
+            with mock.patch.object(app, "_check_node_connect", side_effect=slow_check):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                    response = client.post(f"/api/accounts/{account_id}/check-all")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(max_active, 1)
+
+    def test_sync_all_fetches_subscriptions_concurrently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                for index in range(4):
+                    db.execute(
+                        "INSERT INTO accounts (name, subscribe_url, traffic_used_bytes) "
+                        "VALUES (?, ?, ?)",
+                        (
+                            f"account-{index}",
+                            f"https://sub-{index}.example/list",
+                            500,
+                        ),
+                    )
+                db.commit()
+
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+
+            def slow_parse(url):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.03)
+                with lock:
+                    active -= 1
+                host = url.split("//", 1)[1].split("/", 1)[0]
+                return ([{
+                    "name": host,
+                    "host": host,
+                    "port": 443,
+                    "password": "pw",
+                    "raw_uri": f"anytls://pw@{host}:443#{host}",
+                    "protocol": "anytls",
+                }], {"used_bytes": 20})
+
+            with mock.patch.object(app, "parse_subscribe_url", side_effect=slow_parse):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                    response = client.post("/api/sync-all")
+            with sqlite3.connect(database) as db:
+                used_values = [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT traffic_used_bytes FROM accounts ORDER BY id"
+                    )
+                ]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(max_active, 1)
+        self.assertTrue(all(item["status"] == "ok" for item in response.get_json()["results"]))
+        self.assertEqual(used_values, [500, 500, 500, 500])
+
+    def test_nodes_monitor_uses_latest_status_for_duplicate_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_ids = []
+                for index in range(2):
+                    account_ids.append(db.execute(
+                        "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                        (f"account-{index}", f"anytls://pw{index}@shared.example:443"),
+                    ).lastrowid)
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, is_online, last_checked_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (account_ids[0], "older-status", "shared.example", 443, "pw0", 0, "2026-01-01 00:00:00"),
+                )
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, is_online, last_checked_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (account_ids[1], "latest-status", "shared.example", 443, "pw1", 1, "2026-02-01 00:00:00"),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["logged_in"] = True
+                response = client.get("/nodes/monitor")
+
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("latest-status", html)
+        self.assertNotIn("older-status", html)
+        self.assertIn("2 个账号", html)
+
     def test_check_by_host_rejects_invalid_port(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
@@ -767,6 +1986,23 @@ proxies:
 
             self.assertEqual(response.status_code, 400)
 
+    def test_node_probe_uses_address_family_agnostic_connection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            raw_socket = mock.Mock()
+            tls_socket = mock.Mock()
+            tls_context = mock.Mock()
+            tls_context.wrap_socket.return_value = tls_socket
+            with mock.patch.object(app.socket, "create_connection", return_value=raw_socket) as connect:
+                with mock.patch("ssl.create_default_context", return_value=tls_context):
+                    result = app._check_node_connect("2001:db8::1", 443)
+
+        connect.assert_called_once_with(("2001:db8::1", 443), timeout=8)
+        tls_context.wrap_socket.assert_called_once_with(
+            raw_socket, server_hostname="2001:db8::1"
+        )
+        self.assertTrue(result["online"])
+
     def test_account_detail_template_escapes_js_arguments(self):
         content = (REPO_ROOT / "templates" / "account_detail.html").read_text(encoding="utf-8")
 
@@ -774,6 +2010,17 @@ proxies:
         self.assertIn("togglePw({{ n.id }}, {{ n.password|tojson }})", content)
         self.assertNotIn("copyText('{{ n.password }}')", content)
         self.assertNotIn("togglePw({{ n.id }}, '{{ n.password }}')", content)
+        self.assertNotIn("value=\"' + data.url", content)
+        self.assertIn("shareUrl.value = data.url", content)
+
+    def test_monitor_template_does_not_embed_host_in_javascript(self):
+        content = (REPO_ROOT / "templates" / "monitor.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-host="{{ n.host }}"', content)
+        self.assertIn("checkOne(this.dataset.host, Number(this.dataset.port))", content)
+        self.assertNotIn("checkOne('{{ n.host }}'", content)
+        self.assertIn("row.querySelector('button[data-host][data-port]')", content)
+        self.assertNotIn("hostPort.textContent.split(':')", content)
 
     def test_logged_in_fetch_calls_send_csrf_header(self):
         base = (REPO_ROOT / "templates" / "base.html").read_text(encoding="utf-8")
@@ -807,10 +2054,17 @@ proxies:
         self.assertIn("generate_api_token", content)
         self.assertIn('systemctl restart "$SERVICE_NAME"', content)
         self.assertIn('cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"', content)
+        self.assertIn('"$SCRIPT_DIR/security_utils.py"', content)
+        self.assertIn('"$SCRIPT_DIR/traffic_token.py"', content)
+        self.assertIn("sys.version_info >= (3, 10)", content)
+        self.assertIn("Python 3.10 or newer is required", content)
         self.assertIn("mktemp -d /tmp/anytls-venv-check", content)
         self.assertIn('python3 -m venv "$probe_dir/venv"', content)
         self.assertIn('"$probe_dir/venv/bin/python" -m pip --version', content)
-        self.assertIn("! -name venv", content)
+        self.assertNotIn("! -name venv", content)
+        self.assertIn("! -name data", content)
+        self.assertIn("refusing to reuse a pre-existing virtual environment", content)
+        self.assertIn('systemctl stop "$SERVICE_NAME"', content)
         self.assertIn("--no-install-recommends", content)
         self.assertIn("APT_UPDATED=0", content)
         self.assertIn("RPM_UPDATED=0", content)
@@ -825,11 +2079,309 @@ proxies:
         self.assertNotIn("默认账号:", content)
         self.assertNotIn("默认密码:", content)
 
+    def test_account_traffic_token_cli_works_outside_project_directory(self):
+        helper = REPO_ROOT / "traffic_token.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            token_file = Path(tmp) / ".traffic_api_token"
+            master_token = 'master-token-with-"quotes"-and-\\slashes'
+            token_file.write_text(master_token + "\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["ANYTLS_TRAFFIC_API_TOKEN_FILE"] = str(token_file)
+
+            result = subprocess.run(
+                [sys.executable, str(helper), "17"],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            signature = base64.urlsafe_b64encode(
+                hmac.new(
+                    master_token.encode(),
+                    b"account:17",
+                    hashlib.sha256,
+                ).digest()
+            ).decode().rstrip("=")
+            self.assertEqual(result.stdout.strip(), f"atp1.17.{signature}")
+
+    def test_deploy_rejects_dangerous_or_token_overlapping_directories(self):
+        script = REPO_ROOT / "deploy.sh"
+        for panel_dir in (
+            "/",
+            "/opt",
+            "/var",
+            "/opt/../root",
+            "/var/lib",
+            "/usr/local",
+            "/home/jared",
+            "/tmp/anytls-panel",
+            "/private/tmp/anytls-panel",
+        ):
+            with self.subTest(panel_dir=panel_dir):
+                env = os.environ.copy()
+                env["ANYTLS_PANEL_DIR"] = panel_dir
+                result = subprocess.run(
+                    ["bash", "-c", f'source "{script}"; validate_panel_dir'],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ANYTLS_PANEL_DIR", result.stderr)
+
+        env = os.environ.copy()
+        env.update({
+            "ANYTLS_PANEL_DIR": "/opt/anytls-panel-test",
+            "ANYTLS_TRAFFIC_API_TOKEN_FILE": "/opt/anytls-panel-test/custom-token",
+        })
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{script}"; validate_secret_paths',
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/etc/anytls-panel/<name>", result.stderr)
+
+        env["ANYTLS_TRAFFIC_API_TOKEN_FILE"] = "/opt/anytls-panel-test"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{script}"; validate_secret_paths',
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/etc/anytls-panel/<name>", result.stderr)
+
+        for variable_name in (
+            "ANYTLS_TRAFFIC_API_TOKEN_FILE",
+            "ANYTLS_ADMIN_PASSWORD_FILE",
+            "ANYTLS_SECRET_KEY_FILE",
+        ):
+            with self.subTest(variable_name=variable_name):
+                env = os.environ.copy()
+                env.update({
+                    "ANYTLS_PANEL_DIR": "/opt/anytls-panel-test",
+                    variable_name: "/tmp/attacker-controlled/secret",
+                })
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        f'source "{script}"; validate_secret_paths',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(variable_name, result.stderr)
+
+        env = os.environ.copy()
+        env["ANYTLS_PANEL_DIR"] = "/opt/anytls-panel-test"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{script}"; '
+                "stat() { printf '0 755\\n'; }; validate_panel_dir",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            actual_parent = Path(tmp) / "actual"
+            linked_parent = Path(tmp) / "linked"
+            actual_parent.mkdir()
+            linked_parent.symlink_to(actual_parent, target_is_directory=True)
+            secret_path = linked_parent / "token"
+            env = os.environ.copy()
+            env["SECRET_PATH"] = str(secret_path)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'validate_secret_file_path "$SECRET_PATH" "$SECRET_PATH" TEST_SECRET',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("parent must not be a symlink", result.stderr)
+
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            panel_dir = Path(tmp) / "panel"
+            panel_dir.mkdir()
+            protected_target = Path(tmp) / "protected"
+            protected_target.write_text("unchanged", encoding="utf-8")
+            (panel_dir / ".anytls-panel-install").symlink_to(protected_target)
+            env = os.environ.copy()
+            env["TEST_PANEL_DIR"] = str(panel_dir)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; PANEL_DIR="$TEST_PANEL_DIR"; '
+                    'validate_install_target',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("untrusted installation marker", result.stderr)
+            self.assertEqual(protected_target.read_text(encoding="utf-8"), "unchanged")
+
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            panel_dir = Path(tmp) / "foreign-data"
+            panel_dir.mkdir()
+            (panel_dir / "important.txt").write_text("keep", encoding="utf-8")
+            env = os.environ.copy()
+            env["ANYTLS_PANEL_DIR"] = str(panel_dir)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; validate_install_target',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("non-empty unmarked directory", result.stderr)
+            self.assertTrue((panel_dir / "important.txt").is_file())
+
+    def test_deploy_defaults_to_loopback_and_marks_managed_directory(self):
+        content = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
+
+        self.assertIn('BIND_HOST="${ANYTLS_BIND_HOST:-127.0.0.1}"', content)
+        self.assertIn(
+            'SESSION_COOKIE_SECURE="${ANYTLS_SESSION_COOKIE_SECURE:-1}"',
+            content,
+        )
+        self.assertIn("anytls-panel-managed-v1", content)
+        self.assertIn('chown root:root "$PANEL_DIR/.anytls-panel-install"', content)
+        self.assertIn("publish it only through an HTTPS reverse proxy", content)
+
+    def test_deploy_migrates_legacy_state_into_isolated_data_directory(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            panel_dir = Path(tmp)
+            legacy_db = panel_dir / "anytls.db"
+            with sqlite3.connect(legacy_db) as db:
+                db.execute("CREATE TABLE proof (value TEXT NOT NULL)")
+                db.execute("INSERT INTO proof (value) VALUES ('preserved')")
+            (panel_dir / ".secret_key").write_text("legacy-secret", encoding="utf-8")
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_DATA_DIR": str(panel_dir / "data"),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; PANEL_DIR="$TEST_PANEL_DIR"; '
+                    'DATA_DIR="$TEST_DATA_DIR"; '
+                    'SERVICE_USER="$(id -un)"; SERVICE_GROUP="$(id -gn)"; '
+                    'runuser() { shift 2; [[ "$1" == "--" ]] && shift; "$@"; }; '
+                    'prepare_state_directory',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            with sqlite3.connect(panel_dir / "data" / "anytls.db") as db:
+                preserved = db.execute("SELECT value FROM proof").fetchone()[0]
+                integrity = db.execute("PRAGMA quick_check").fetchone()[0]
+            self.assertEqual(preserved, "preserved")
+            self.assertEqual(integrity, "ok")
+            self.assertEqual(
+                (panel_dir / "data" / ".secret_key").read_text(encoding="utf-8"),
+                "legacy-secret",
+            )
+            self.assertTrue((panel_dir / ".anytls-panel-install").is_file())
+
+    def test_deploy_rejects_symlinked_data_marker(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            panel_dir = Path(tmp)
+            data_dir = panel_dir / "data"
+            data_dir.mkdir()
+            protected_target = panel_dir / "protected"
+            protected_target.write_text("unchanged", encoding="utf-8")
+            (data_dir / ".anytls-panel-data").symlink_to(protected_target)
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_DATA_DIR": str(data_dir),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; PANEL_DIR="$TEST_PANEL_DIR"; '
+                    'DATA_DIR="$TEST_DATA_DIR"; '
+                    'SERVICE_USER="$(id -un)"; SERVICE_GROUP="$(id -gn)"; '
+                    'prepare_state_directory',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("data marker must be a regular non-symlink", result.stderr)
+            self.assertEqual(protected_target.read_text(encoding="utf-8"), "unchanged")
+
     def test_start_script_does_not_advertise_static_default_password(self):
         content = (REPO_ROOT / "start.sh").read_text(encoding="utf-8")
 
         self.assertNotIn("admin123", content)
         self.assertIn(".initial_admin_password", content)
+
+    def test_production_service_uses_non_root_threaded_worker(self):
+        deploy = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
+        service = (REPO_ROOT / "anytls-panel.service").read_text(encoding="utf-8")
+        start = (REPO_ROOT / "start.sh").read_text(encoding="utf-8")
+
+        for content in (deploy, service, start):
+            self.assertIn("--workers 1 --threads 4", content)
+            self.assertNotIn("-w 2", content)
+        self.assertIn('SERVICE_USER="${ANYTLS_SERVICE_USER:-anytls-panel}"', deploy)
+        self.assertIn("service user must not be root", deploy)
+        self.assertIn("User=anytls-panel", service)
+        self.assertNotIn("User=root", deploy + service)
+        self.assertIn("NoNewPrivileges=true", deploy)
+        self.assertIn("NoNewPrivileges=true", service)
+        self.assertIn("ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS", deploy)
+        self.assertIn("ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=0", service)
+        self.assertIn("--bind 127.0.0.1:8866", service)
+        self.assertIn("ANYTLS_SESSION_COOKIE_SECURE=1", service)
+        self.assertIn("ReadWritePaths=/opt/anytls-panel/data", service)
+        self.assertIn("ReadWritePaths=${DATA_DIR}", deploy)
+        self.assertIn('chown -R "root:$SERVICE_GROUP" "$PANEL_DIR"', deploy)
+        self.assertNotIn('chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PANEL_DIR"', deploy)
+        self.assertIn('runuser -u "$SERVICE_USER" -- env', deploy)
+        self.assertIn('HOST=${HOST:-127.0.0.1}', start)
 
     def test_uninstall_script_requires_explicit_confirmation(self):
         content = (REPO_ROOT / "uninstall.sh").read_text(encoding="utf-8")
@@ -837,6 +2389,108 @@ proxies:
         self.assertIn("--yes", content)
         self.assertIn("refusing to uninstall without --yes", content)
         self.assertIn("ANYTLS_SERVICE_NAME", content)
+        self.assertIn("refusing to manage an unmarked directory", content)
+
+    def test_deploy_and_uninstall_reject_foreign_systemd_units(self):
+        for script_name in ("deploy.sh", "uninstall.sh"):
+            with self.subTest(script=script_name), tempfile.TemporaryDirectory() as tmp:
+                unit_dir = Path(tmp) / "systemd"
+                unit_dir.mkdir()
+                (unit_dir / "foreign.service").write_text(
+                    "[Service]\n"
+                    "WorkingDirectory=/opt/other-app\n"
+                    "ExecStart=/opt/other-app/bin/server\n",
+                    encoding="utf-8",
+                )
+                script = REPO_ROOT / script_name
+                env = os.environ.copy()
+                env["TEST_UNIT_DIR"] = str(unit_dir)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        f'source "{script}"; '
+                        'PANEL_DIR=/opt/anytls-panel-test; '
+                        'SERVICE_NAME=foreign; SYSTEMD_UNIT_DIR="$TEST_UNIT_DIR"; '
+                        'validate_service_target; echo "service change allowed"',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("does not belong", result.stderr)
+                self.assertNotIn("service change allowed", result.stdout)
+
+    def test_deploy_and_uninstall_reject_vendor_systemd_units(self):
+        for script_name in ("deploy.sh", "uninstall.sh"):
+            with self.subTest(script=script_name), tempfile.TemporaryDirectory() as tmp:
+                script = REPO_ROOT / script_name
+                env = os.environ.copy()
+                env["TEST_UNIT_DIR"] = tmp
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        f'source "{script}"; '
+                        'systemctl() { printf "/usr/lib/systemd/system/ssh.service\\n"; }; '
+                        'PANEL_DIR=/opt/anytls-panel-test; '
+                        'SERVICE_NAME=ssh; SYSTEMD_UNIT_DIR="$TEST_UNIT_DIR"; '
+                        'validate_service_target; echo "service change allowed"',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("another systemd unit", result.stderr)
+                self.assertNotIn("service change allowed", result.stdout)
+
+    def test_uninstall_keep_data_still_requires_trusted_marker(self):
+        script = REPO_ROOT / "uninstall.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["TEST_PANEL_DIR"] = tmp
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; PANEL_DIR="$TEST_PANEL_DIR"; '
+                    'KEEP_DATA=1; validate_install_marker; echo "disabling service"',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unmarked directory", result.stderr)
+        self.assertNotIn("disabling service", result.stdout)
+
+    def test_uninstall_rejects_dangerous_panel_directory_before_service_changes(self):
+        script = REPO_ROOT / "uninstall.sh"
+        for panel_dir in (
+            "/",
+            "/var/lib",
+            "/usr/local",
+            "/home/jared",
+            "/tmp/anytls-panel",
+        ):
+            with self.subTest(panel_dir=panel_dir):
+                env = os.environ.copy()
+                env["ANYTLS_PANEL_DIR"] = panel_dir
+                result = subprocess.run(
+                    ["bash", str(script), "--yes"],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ANYTLS_PANEL_DIR", result.stderr)
+                self.assertNotIn("disabling service", result.stdout)
 
 
 if __name__ == "__main__":

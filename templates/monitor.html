@@ -32,7 +32,12 @@
         {% for n in nodes %}
         <tr>
             <td data-label="#" class="hide-mobile" style="color:var(--text2)">{{ loop.index }}</td>
-            <td data-label="节点"><strong>{{ n.name }}</strong></td>
+            <td data-label="节点">
+                <strong>{{ n.name }}</strong>
+                {% if n.account_count > 1 %}
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">关联 {{ n.account_count }} 个账号</div>
+                {% endif %}
+            </td>
             <td data-label="协议"><span class="badge badge-blue">{{ n.protocol or 'anytls' }}</span></td>
             <td data-label="地址" class="hide-mobile">
                 <code style="background:var(--bg);padding:2px 8px;border-radius:4px;font-size:13px">{{ n.host }}:{{ n.port }}</code>
@@ -61,7 +66,9 @@
             </td>
             <td data-label="检测时间" class="hide-mobile" style="font-size:12px;color:var(--text2)">{{ n.last_checked_at or '-' }}</td>
             <td data-label="操作">
-                <button class="btn btn-sm btn-ghost" onclick="checkOne('{{ n.host }}', {{ n.port }})">检测</button>
+                <button class="btn btn-sm btn-ghost"
+                        data-host="{{ n.host }}" data-port="{{ n.port }}"
+                        onclick="checkOne(this.dataset.host, Number(this.dataset.port))">检测</button>
             </td>
         </tr>
         {% endfor %}
@@ -135,9 +142,10 @@ async function checkAll() {
     let total = 0, online = 0, offline = 0;
 
     for (const row of rows) {
-        const hostPort = row.querySelector('code');
-        if (!hostPort) continue;
-        const [host, port] = hostPort.textContent.split(':');
+        const action = row.querySelector('button[data-host][data-port]');
+        if (!action) continue;
+        const host = action.dataset.host;
+        const port = Number(action.dataset.port);
         const statusEl = document.getElementById('status-' + host + '-' + port);
         const latEl = document.getElementById('latency-' + host + '-' + port);
         if (!statusEl) continue;

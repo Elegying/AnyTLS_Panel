@@ -5,13 +5,28 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=anytls-panel
+Group=anytls-panel
 WorkingDirectory=/opt/anytls-panel
-ExecStart=/opt/anytls-panel/venv/bin/gunicorn -w 2 -b 0.0.0.0:8866 --timeout 60 app:app
+ExecStart=/opt/anytls-panel/venv/bin/gunicorn --workers 1 --threads 4 --no-control-socket --bind 127.0.0.1:8866 --timeout 120 app:app
 Restart=always
 RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/anytls-panel/data
 Environment=PYTHONUNBUFFERED=1
-Environment=ANYTLS_TRAFFIC_API_TOKEN_FILE=/opt/anytls-panel/.traffic_api_token
+Environment=ANYTLS_DATABASE=/opt/anytls-panel/data/anytls.db
+Environment=ANYTLS_SECRET_KEY_FILE=/opt/anytls-panel/data/.secret_key
+Environment=ANYTLS_TRAFFIC_API_TOKEN_FILE=/opt/anytls-panel/data/.traffic_api_token
+Environment=ANYTLS_SESSION_COOKIE_SECURE=1
+Environment=ANYTLS_TRUST_PROXY=1
+Environment=ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=0
 
 [Install]
 WantedBy=multi-user.target
