@@ -775,6 +775,13 @@ proxies:
         self.assertNotIn("copyText('{{ n.password }}')", content)
         self.assertNotIn("togglePw({{ n.id }}, '{{ n.password }}')", content)
 
+    def test_monitor_template_does_not_embed_host_in_javascript(self):
+        content = (REPO_ROOT / "templates" / "monitor.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-host="{{ n.host }}"', content)
+        self.assertIn("checkOne(this.dataset.host, Number(this.dataset.port))", content)
+        self.assertNotIn("checkOne('{{ n.host }}'", content)
+
     def test_logged_in_fetch_calls_send_csrf_header(self):
         base = (REPO_ROOT / "templates" / "base.html").read_text(encoding="utf-8")
         dashboard = (REPO_ROOT / "templates" / "dashboard.html").read_text(encoding="utf-8")
@@ -807,6 +814,9 @@ proxies:
         self.assertIn("generate_api_token", content)
         self.assertIn('systemctl restart "$SERVICE_NAME"', content)
         self.assertIn('cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"', content)
+        self.assertIn('"$SCRIPT_DIR/security_utils.py"', content)
+        self.assertIn("sys.version_info >= (3, 10)", content)
+        self.assertIn("Python 3.10 or newer is required", content)
         self.assertIn("mktemp -d /tmp/anytls-venv-check", content)
         self.assertIn('python3 -m venv "$probe_dir/venv"', content)
         self.assertIn('"$probe_dir/venv/bin/python" -m pip --version', content)

@@ -81,6 +81,10 @@ ensure_runtime() {
         install_packages "${missing[@]}"
     fi
 
+    if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+        fail "Python 3.10 or newer is required"
+    fi
+
     local probe_dir
     probe_dir="$(mktemp -d /tmp/anytls-venv-check.XXXXXX)"
     if ! python3 -m venv "$probe_dir/venv" >/dev/null 2>&1 || ! "$probe_dir/venv/bin/python" -m pip --version >/dev/null 2>&1; then
@@ -110,7 +114,8 @@ sync_project_files() {
             ! -name .traffic_api_token \
             ! -name venv \
             -exec rm -rf {} +
-        cp "$SCRIPT_DIR/app.py" "$SCRIPT_DIR/requirements.txt" "$PANEL_DIR/"
+        cp "$SCRIPT_DIR/app.py" "$SCRIPT_DIR/security_utils.py" \
+            "$SCRIPT_DIR/requirements.txt" "$PANEL_DIR/"
         if [[ -f "$SCRIPT_DIR/uninstall.sh" ]]; then
             cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"
             chmod +x "$PANEL_DIR/uninstall.sh" 2>/dev/null || true

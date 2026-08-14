@@ -61,7 +61,9 @@
             </td>
             <td data-label="检测时间" class="hide-mobile" style="font-size:12px;color:var(--text2)">{{ n.last_checked_at or '-' }}</td>
             <td data-label="操作">
-                <button class="btn btn-sm btn-ghost" onclick="checkOne('{{ n.host }}', {{ n.port }})">检测</button>
+                <button class="btn btn-sm btn-ghost"
+                        data-host="{{ n.host }}" data-port="{{ n.port }}"
+                        onclick="checkOne(this.dataset.host, Number(this.dataset.port))">检测</button>
             </td>
         </tr>
         {% endfor %}
