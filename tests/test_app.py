@@ -88,29 +88,17 @@ proxies:
         self.assertEqual(nodes[0]["protocol"], "trojan")
 
     def test_http_subscription_prefers_native_anytls_user_agent(self):
-        class FakeResponse:
-            def __init__(self, body=b"anytls://pw@example.com:443#demo"):
-                self.body = body
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return self.body
-
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
             seen_user_agents = []
 
-            def fake_urlopen(req, timeout=10):
-                seen_user_agents.append(req.get_header("User-agent"))
-                return FakeResponse()
+            def fake_read(_url, user_agent):
+                seen_user_agents.append(user_agent)
+                return b"anytls://pw@example.com:443#demo"
 
-            with mock.patch("urllib.request.urlopen", fake_urlopen):
-                nodes, traffic_info = app.parse_subscribe_url("https://sub.example/list")
+            with mock.patch.object(app, "_assert_public_subscription_url"):
+                with mock.patch.object(app, "_read_subscription_url", side_effect=fake_read):
+                    nodes, traffic_info = app.parse_subscribe_url("https://sub.example/list")
 
         self.assertEqual(traffic_info, {})
         self.assertIn("SSRVPN", seen_user_agents[0])
@@ -118,19 +106,6 @@ proxies:
         self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
 
     def test_http_subscription_selects_later_mixed_protocol_candidate(self):
-        class FakeResponse:
-            def __init__(self, body):
-                self.body = body
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return self.body
-
         clash_trojan_only = b"""
 proxies:
   - name: compat
@@ -148,17 +123,17 @@ proxies:
             app = load_app(Path(tmp) / "anytls.db")
             seen_user_agents = []
 
-            def fake_urlopen(req, timeout=10):
-                ua = req.get_header("User-agent")
-                seen_user_agents.append(ua)
-                if "SSRVPN" in ua or "Clash.Meta" in ua:
+            def fake_read(_url, user_agent):
+                seen_user_agents.append(user_agent)
+                if "SSRVPN" in user_agent or "Clash.Meta" in user_agent:
                     raise OSError("blocked")
-                if "ClashForAndroid" in ua:
-                    return FakeResponse(clash_trojan_only)
-                return FakeResponse(shadowrocket_native)
+                if "ClashForAndroid" in user_agent:
+                    return clash_trojan_only
+                return shadowrocket_native
 
-            with mock.patch("urllib.request.urlopen", fake_urlopen):
-                nodes, traffic_info = app.parse_subscribe_url("https://sub.example/list")
+            with mock.patch.object(app, "_assert_public_subscription_url"):
+                with mock.patch.object(app, "_read_subscription_url", side_effect=fake_read):
+                    nodes, traffic_info = app.parse_subscribe_url("https://sub.example/list")
 
         self.assertEqual(traffic_info, {})
         self.assertTrue(any("Shadowrocket" in ua for ua in seen_user_agents))
@@ -167,6 +142,67 @@ proxies:
         self.assertEqual([node["protocol"] for node in nodes], ["anytls", "trojan"])
         self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
         self.assertTrue(nodes[1]["raw_uri"].startswith("trojan://"))
+
+    def test_http_subscription_rejects_private_network_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            private_result = [
+                (2, 1, 6, "", ("127.0.0.1", 80)),
+            ]
+            with mock.patch("socket.getaddrinfo", return_value=private_result):
+                with mock.patch("urllib.request.urlopen", side_effect=AssertionError("network called")):
+                    with mock.patch("urllib.request.build_opener") as build_opener:
+                        with self.assertRaisesRegex(ValueError, "公网"):
+                            app.parse_subscribe_url("http://internal.example/sub")
+
+        build_opener.assert_not_called()
+
+    def test_http_subscription_limits_response_size(self):
+        class OversizedResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"x" * (2 * 1024 * 1024 + 1)
+
+            def geturl(self):
+                return "https://sub.example/list"
+
+        class FakeOpener:
+            def open(self, _request, timeout=10):
+                self.timeout = timeout
+                return OversizedResponse()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            public_result = [
+                (2, 1, 6, "", ("93.184.216.34", 443)),
+            ]
+            with mock.patch("socket.getaddrinfo", return_value=public_result):
+                with mock.patch("urllib.request.build_opener", return_value=FakeOpener()):
+                    with self.assertRaisesRegex(ValueError, "响应过大"):
+                        app._read_subscription_url("https://sub.example/list", "SSRVPN/2.4.0")
+
+    def test_http_subscription_rejects_redirects_to_private_networks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            request = mock.Mock(full_url="https://sub.example/list")
+            private_result = [
+                (2, 1, 6, "", ("169.254.169.254", 80)),
+            ]
+            with mock.patch("socket.getaddrinfo", return_value=private_result):
+                with self.assertRaisesRegex(ValueError, "公网"):
+                    app._SafeSubscriptionRedirectHandler().redirect_request(
+                        request,
+                        None,
+                        302,
+                        "Found",
+                        {},
+                        "http://metadata.example/latest",
+                    )
 
     def test_initial_admin_credentials_can_be_set_from_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -411,6 +447,60 @@ proxies:
             with sqlite3.connect(database) as db:
                 used = db.execute("SELECT traffic_used_bytes FROM accounts").fetchone()[0]
             self.assertEqual(used, 100)
+
+    def test_traffic_report_increments_without_read_modify_write(self):
+        class FakeCursor:
+            rowcount = 1
+
+            def __init__(self, row=None):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+        class FakeDb:
+            def __init__(self):
+                self.total = 100
+
+            def execute(self, sql, params=()):
+                if sql.startswith("SELECT id, traffic_used_bytes"):
+                    raise AssertionError("traffic increment must not read the old total")
+                if sql.startswith("UPDATE accounts SET traffic_used_bytes=COALESCE"):
+                    self.total += params[0]
+                    return FakeCursor()
+                if sql.startswith("SELECT traffic_used_bytes FROM accounts"):
+                    return FakeCursor({"traffic_used_bytes": self.total})
+                if sql.startswith("INSERT INTO traffic_logs"):
+                    return FakeCursor()
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+            def commit(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            token_file = Path(tmp) / ".traffic_api_token"
+            token_file.write_text("traffic-token\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "ANYTLS_DATABASE": str(Path(tmp) / "anytls.db"),
+                    "ANYTLS_TRAFFIC_API_TOKEN_FILE": str(token_file),
+                },
+                clear=False,
+            ):
+                app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            fake_db = FakeDb()
+            with mock.patch.object(app, "get_db", return_value=fake_db):
+                with app.app.test_client() as client:
+                    response = client.post(
+                        "/api/traffic/report",
+                        headers={"Authorization": "Bearer traffic-token"},
+                        json={"account_id": 1, "bytes_used": 50},
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["results"][0]["total_bytes"], 150)
 
     def test_account_forms_reject_invalid_traffic_limit(self):
         with tempfile.TemporaryDirectory() as tmp:

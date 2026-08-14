@@ -11,9 +11,12 @@ import time
 import sys
 import hmac
 import math
+import ipaddress
+import socket
+import urllib.request
 from datetime import datetime
 from functools import wraps
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urljoin, urlparse, parse_qs, unquote
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -246,6 +249,58 @@ def init_db():
 
 # ─── 订阅解析 ──────────────────────────────────────────────
 
+_MAX_SUBSCRIPTION_BYTES = 2 * 1024 * 1024
+
+
+def _assert_public_subscription_url(raw_url):
+    try:
+        parsed = urlparse(raw_url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            raise ValueError
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    except (TypeError, ValueError):
+        raise ValueError("订阅地址必须是有效的 HTTP(S) URL") from None
+
+    if os.environ.get('ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS', '0') == '1':
+        return raw_url
+
+    try:
+        addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("订阅地址无法解析") from exc
+    if not addresses:
+        raise ValueError("订阅地址无法解析")
+
+    for address in addresses:
+        ip_text = address[4][0].split('%', 1)[0]
+        try:
+            ip = ipaddress.ip_address(ip_text)
+        except ValueError as exc:
+            raise ValueError("订阅地址解析结果无效") from exc
+        if not ip.is_global:
+            raise ValueError("订阅地址必须指向公网 IP")
+    return raw_url
+
+
+class _SafeSubscriptionRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _assert_public_subscription_url(urljoin(req.full_url, newurl))
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _read_subscription_url(url, user_agent):
+    _assert_public_subscription_url(url)
+    opener = urllib.request.build_opener(_SafeSubscriptionRedirectHandler())
+    req = urllib.request.Request(url, headers={'User-Agent': user_agent})
+    with opener.open(req, timeout=10) as resp:
+        final_url = getattr(resp, 'geturl', lambda: url)()
+        _assert_public_subscription_url(final_url)
+        raw = resp.read(_MAX_SUBSCRIPTION_BYTES + 1)
+    if len(raw) > _MAX_SUBSCRIPTION_BYTES:
+        raise ValueError("订阅响应过大（最大 2 MiB）")
+    return raw
+
+
 def parse_subscribe_url(url):
     """解析订阅链接，返回节点列表。支持:
     1. anytls://password@host:port?params#name  (单链接)
@@ -269,6 +324,7 @@ def parse_subscribe_url(url):
     content = url.strip()
     traffic_info = {}
     if content.startswith('http://') or content.startswith('https://'):
+        _assert_public_subscription_url(content)
         candidates = []
         for ua in [
             'SSRVPN/2.4.0',
@@ -277,17 +333,16 @@ def parse_subscribe_url(url):
             'ClashForAndroid/2.5.12',
         ]:
             try:
-                import urllib.request
-                req = urllib.request.Request(content, headers={'User-Agent': ua})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    raw = resp.read()
-                    text = _decode_subscription_response(raw)
-                    parsed_nodes = _parse_subscription_content(text)
-                    if parsed_nodes:
-                        score = _subscription_candidate_score(parsed_nodes)
-                        candidates.append((score, text, _extract_subscription_traffic_info(text)))
-                        if score[0] > 0:
-                            break
+                raw = _read_subscription_url(content, ua)
+                text = _decode_subscription_response(raw)
+                parsed_nodes = _parse_subscription_content(text)
+                if parsed_nodes:
+                    score = _subscription_candidate_score(parsed_nodes)
+                    candidates.append((score, text, _extract_subscription_traffic_info(text)))
+                    if score[0] > 0:
+                        break
+            except ValueError:
+                raise
             except Exception:
                 continue
         if not candidates:
@@ -970,16 +1025,19 @@ def api_report_traffic():
             results.append({"status": "error", "msg": "account not found"})
             continue
 
-        account = db.execute('SELECT id, traffic_used_bytes FROM accounts WHERE id=?', (account_id,)).fetchone()
-        if not account:
+        cursor = db.execute(
+            'UPDATE accounts SET traffic_used_bytes=COALESCE(traffic_used_bytes, 0) + ?, '
+            'updated_at=CURRENT_TIMESTAMP WHERE id=?',
+            (bytes_used, account_id)
+        )
+        if cursor.rowcount == 0:
             results.append({"status": "error", "msg": "account not found"})
             continue
-
-        new_total = (account['traffic_used_bytes'] or 0) + bytes_used
-        db.execute(
-            'UPDATE accounts SET traffic_used_bytes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
-            (new_total, account_id)
-        )
+        account = db.execute(
+            'SELECT traffic_used_bytes FROM accounts WHERE id=?',
+            (account_id,)
+        ).fetchone()
+        new_total = account['traffic_used_bytes']
         db.execute(
             'INSERT INTO traffic_logs (account_id, bytes_used) VALUES (?, ?)',
             (account_id, bytes_used)
