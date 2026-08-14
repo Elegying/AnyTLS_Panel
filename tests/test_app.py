@@ -6,6 +6,8 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1096,6 +1098,130 @@ proxies:
                     (node_id,),
                 ).fetchone()
             self.assertEqual((is_online, latency_ms), (1, 123))
+
+    def test_check_all_nodes_runs_network_probes_concurrently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "anytls://pw@example.com:443#demo"),
+                ).lastrowid
+                for index in range(4):
+                    db.execute(
+                        "INSERT INTO nodes (account_id, name, host, port, password) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (account_id, f"node-{index}", f"node-{index}.example", 443, "pw"),
+                    )
+                db.commit()
+
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+
+            def slow_check(_host, _port):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.03)
+                with lock:
+                    active -= 1
+                return {"online": True, "status": "online", "msg": "ok", "latency": 1}
+
+            with mock.patch.object(app, "_check_node_connect", side_effect=slow_check):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                    response = client.post(f"/api/accounts/{account_id}/check-all")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(max_active, 1)
+
+    def test_sync_all_fetches_subscriptions_concurrently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                for index in range(4):
+                    db.execute(
+                        "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                        (f"account-{index}", f"https://sub-{index}.example/list"),
+                    )
+                db.commit()
+
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+
+            def slow_parse(url):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.03)
+                with lock:
+                    active -= 1
+                host = url.split("//", 1)[1].split("/", 1)[0]
+                return ([{
+                    "name": host,
+                    "host": host,
+                    "port": 443,
+                    "password": "pw",
+                    "raw_uri": f"anytls://pw@{host}:443#{host}",
+                    "protocol": "anytls",
+                }], {})
+
+            with mock.patch.object(app, "parse_subscribe_url", side_effect=slow_parse):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                    response = client.post("/api/sync-all")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(max_active, 1)
+        self.assertTrue(all(item["status"] == "ok" for item in response.get_json()["results"]))
+
+    def test_nodes_monitor_uses_latest_status_for_duplicate_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_ids = []
+                for index in range(2):
+                    account_ids.append(db.execute(
+                        "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                        (f"account-{index}", f"anytls://pw{index}@shared.example:443"),
+                    ).lastrowid)
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, is_online, last_checked_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (account_ids[0], "older-status", "shared.example", 443, "pw0", 0, "2026-01-01 00:00:00"),
+                )
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, is_online, last_checked_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (account_ids[1], "latest-status", "shared.example", 443, "pw1", 1, "2026-02-01 00:00:00"),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["logged_in"] = True
+                response = client.get("/nodes/monitor")
+
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("latest-status", html)
+        self.assertNotIn("older-status", html)
+        self.assertIn("2 个账号", html)
 
     def test_check_by_host_rejects_invalid_port(self):
         with tempfile.TemporaryDirectory() as tmp:

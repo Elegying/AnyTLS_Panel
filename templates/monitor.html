@@ -32,7 +32,12 @@
         {% for n in nodes %}
         <tr>
             <td data-label="#" class="hide-mobile" style="color:var(--text2)">{{ loop.index }}</td>
-            <td data-label="节点"><strong>{{ n.name }}</strong></td>
+            <td data-label="节点">
+                <strong>{{ n.name }}</strong>
+                {% if n.account_count > 1 %}
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">关联 {{ n.account_count }} 个账号</div>
+                {% endif %}
+            </td>
             <td data-label="协议"><span class="badge badge-blue">{{ n.protocol or 'anytls' }}</span></td>
             <td data-label="地址" class="hide-mobile">
                 <code style="background:var(--bg);padding:2px 8px;border-radius:4px;font-size:13px">{{ n.host }}:{{ n.port }}</code>

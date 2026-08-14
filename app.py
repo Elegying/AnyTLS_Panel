@@ -14,6 +14,7 @@ import math
 import ipaddress
 import socket
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import wraps
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
@@ -1017,12 +1018,26 @@ def nodes_monitor():
     db = get_db()
     # 按 host:port 去重，取每个唯一节点的最新状态
     nodes = db.execute('''
-        SELECT n.host, n.port, n.name, n.is_online, n.last_checked_at,
-               n.protocol, n.raw_uri, n.password, n.latency_ms,
-               COUNT(DISTINCT n.account_id) as account_count
-        FROM nodes n
-        GROUP BY n.host, n.port
-        ORDER BY n.host, n.port
+        WITH ranked AS (
+            SELECT n.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY n.host, n.port
+                       ORDER BY (n.last_checked_at IS NOT NULL) DESC,
+                                n.last_checked_at DESC, n.id DESC
+                   ) AS row_number
+            FROM nodes n
+        ), account_counts AS (
+            SELECT host, port, COUNT(DISTINCT account_id) AS account_count
+            FROM nodes
+            GROUP BY host, port
+        )
+        SELECT r.host, r.port, r.name, r.is_online, r.last_checked_at,
+               r.protocol, r.raw_uri, r.password, r.latency_ms,
+               c.account_count
+        FROM ranked r
+        JOIN account_counts c ON c.host = r.host AND c.port = r.port
+        WHERE r.row_number = 1
+        ORDER BY r.host, r.port
     ''').fetchall()
     return render_template('monitor.html', nodes=nodes)
 
@@ -1202,11 +1217,20 @@ def api_check_node(node_id):
 @login_required
 def api_check_all_nodes(account_id):
     db = get_db()
-    nodes = db.execute('SELECT * FROM nodes WHERE account_id=?', (account_id,)).fetchall()
-    results = []
-    for node in nodes:
+    nodes = [dict(node) for node in db.execute(
+        'SELECT * FROM nodes WHERE account_id=?', (account_id,)
+    ).fetchall()]
+
+    def check(node):
         try:
-            r = _check_node_connect(node['host'], node['port'])
+            return node, _check_node_connect(node['host'], node['port']), None
+        except Exception as e:
+            return node, None, str(e)
+
+    results = []
+    checks = _bounded_parallel_map(check, nodes, max_workers=32)
+    for node, r, error in checks:
+        if error is None:
             latency = r.get('latency', -1)
             db.execute(
                 'UPDATE nodes SET is_online=?, last_checked_at=CURRENT_TIMESTAMP, latency_ms=? WHERE id=?',
@@ -1219,10 +1243,18 @@ def api_check_all_nodes(account_id):
                 "msg": r['msg'],
                 "latency": latency,
             })
-        except Exception as e:
-            results.append({"node_id": node['id'], "name": node['name'], "online": False, "msg": str(e), "latency": -1})
+        else:
+            results.append({"node_id": node['id'], "name": node['name'], "online": False, "msg": error, "latency": -1})
     db.commit()
     return jsonify({"results": results})
+
+
+def _bounded_parallel_map(function, items, max_workers=8):
+    """Run blocking network work concurrently while keeping DB writes in the caller."""
+    if not items:
+        return []
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as executor:
+        return list(executor.map(function, items))
 
 def _check_node_connect(host, port, timeout=8):
     """通过 TLS CONNECT 检测节点可用性，返回延迟"""
@@ -1262,11 +1294,21 @@ def _check_node_connect(host, port, timeout=8):
 def api_sync_all():
     """一键同步所有账号的订阅"""
     db = get_db()
-    accounts = db.execute("SELECT * FROM accounts WHERE status='active' ORDER BY id").fetchall()
-    results = []
-    for account in accounts:
+    accounts = [dict(account) for account in db.execute(
+        "SELECT * FROM accounts WHERE status='active' ORDER BY id"
+    ).fetchall()]
+
+    def fetch(account):
         try:
             nodes, traffic_info = parse_subscribe_url(account['subscribe_url'])
+            return account, nodes, traffic_info, None
+        except Exception as e:
+            return account, None, None, str(e)
+
+    results = []
+    fetched_accounts = _bounded_parallel_map(fetch, accounts)
+    for account, nodes, traffic_info, error in fetched_accounts:
+        if error is None:
             db.execute('DELETE FROM nodes WHERE account_id=?', (account['id'],))
             for n in nodes:
                 db.execute(
@@ -1291,8 +1333,8 @@ def api_sync_all():
             update_sql = f"UPDATE accounts SET {', '.join(field_clauses)} WHERE id=?"
             db.execute(update_sql, update_params)
             results.append({"id": account['id'], "name": account['name'], "status": "ok", "nodes": len(nodes)})
-        except Exception as e:
-            results.append({"id": account['id'], "name": account['name'], "status": "error", "msg": str(e)})
+        else:
+            results.append({"id": account['id'], "name": account['name'], "status": "error", "msg": error})
     db.commit()
     return jsonify({"results": results})
 
