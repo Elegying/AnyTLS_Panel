@@ -142,9 +142,10 @@ async function checkAll() {
     let total = 0, online = 0, offline = 0;
 
     for (const row of rows) {
-        const hostPort = row.querySelector('code');
-        if (!hostPort) continue;
-        const [host, port] = hostPort.textContent.split(':');
+        const action = row.querySelector('button[data-host][data-port]');
+        if (!action) continue;
+        const host = action.dataset.host;
+        const port = Number(action.dataset.port);
         const statusEl = document.getElementById('status-' + host + '-' + port);
         const latEl = document.getElementById('latency-' + host + '-' + port);
         if (!statusEl) continue;

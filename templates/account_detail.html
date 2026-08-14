@@ -221,10 +221,12 @@ async function regenerateToken() {
                 '<div class="form-group">' +
                 '<label>分享链接（可直接导入 Shadowrocket / Clash）</label>' +
                 '<div style="display:flex;gap:8px;align-items:center">' +
-                '<input id="shareUrl" value="' + data.url + '" readonly style="font-family:monospace;font-size:12px">' +
+                '<input id="shareUrl" readonly style="font-family:monospace;font-size:12px">' +
                 '<button class="btn btn-primary" onclick="copyText(document.getElementById(\'shareUrl\').value)" style="white-space:nowrap">📋 复制</button>' +
                 '</div></div>' +
                 '<div style="margin-top:8px"><button class="btn btn-sm btn-ghost" onclick="regenerateToken()">🔄 重新生成</button></div>';
+            const shareUrl = document.getElementById('shareUrl');
+            shareUrl.value = data.url;
         }
     } catch(e) {
         alert('生成失败: ' + e);

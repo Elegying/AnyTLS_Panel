@@ -25,8 +25,10 @@
 ### 方式一：在线部署
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
 ```
+
+部署默认只监听 `127.0.0.1`，并启用 Secure Session Cookie；完成 HTTPS 反向代理后再从浏览器登录。不要把 Gunicorn 的明文 HTTP 端口直接开放到公网。
 
 ### 方式二：克隆部署
 
@@ -78,7 +80,8 @@ HTTP(S) 订阅默认拒绝回环、内网、链路本地和保留地址，并会
 | 接口 | 方法 | 说明 |
 |------|------|------|
 | `/api/traffic/report` | POST | 上报流量 |
-| `/api/traffic/set` | POST | 设置流量绝对值 |
+| `/api/traffic/counter` | POST | 幂等上报采集器累计计数 |
+| `/api/traffic/set` | POST | 单调设置流量绝对值（不会降低已有总量） |
 | `/api/accounts` | GET | 获取所有账号 |
 | `/api/accounts/<id>/nodes` | GET | 获取账号下所有节点 |
 | `/api/check-by-host` | POST | 按地址检测节点 |
@@ -90,22 +93,51 @@ HTTP(S) 订阅默认拒绝回环、内网、链路本地和保留地址，并会
 ### 流量上报示例
 
 ```bash
-# 按账号 ID 上报
+# 面板管理员使用主 Token 按账号 ID 上报（不要把主 Token 分发到节点）
 curl -X POST http://面板地址:8866/api/traffic/report \
   -H "Authorization: Bearer YOUR_TRAFFIC_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"account_id": 1, "bytes_used": 1073741824}'
 
-# 按密码定位账号
+# 主 Token 兼容按密码定位账号
 curl -X POST http://面板地址:8866/api/traffic/report \
   -H "Authorization: Bearer YOUR_TRAFFIC_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"password": "xxx", "bytes_used": 1073741824}'
 ```
 
-流量上报接口使用独立 API token 鉴权。部署脚本会生成并保存到面板目录的 `.traffic_api_token`，也可以通过环境变量 `ANYTLS_TRAFFIC_API_TOKEN` 或 `ANYTLS_TRAFFIC_API_TOKEN_FILE` 指定。
+流量上报接口使用 Bearer token 鉴权。部署脚本生成的 `data/.traffic_api_token` 是可操作全部账号的主 Token，只应留在面板服务器，不能复制到节点。自定义 `ANYTLS_TRAFFIC_API_TOKEN_FILE` 时只允许使用 `/etc/anytls-panel/<文件名>`，并要求目录由 root 所有且不可组/全局写。
 
-随机生成的初始管理员密码会保存到 `.initial_admin_password`；部署输出默认隐藏密码和流量 API token。如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
+为节点生成只绑定单个账号的采集 Token（将 `1` 替换为账号 ID）：
+
+```bash
+sudo -u anytls-panel /opt/anytls-panel/venv/bin/python \
+  /opt/anytls-panel/traffic_token.py 1
+```
+
+该命令不依赖当前工作目录，也不会启动面板或执行数据库迁移。若部署时把主 Token 文件自定义到 `/etc/anytls-panel/<文件名>`，追加 `--token-file /etc/anytls-panel/<文件名>`。
+
+账号级 Token 必须与 JSON 中同一个 `account_id` 一起使用；它不能按密码定位，也不能修改其他账号。轮换面板主 Token 会同时使所有账号级 Token 失效。
+
+节点上的 `traffic_collector.sh` 使用 `/api/traffic/counter`：每个采集器持久化独立 ID，服务端按原始计数差值幂等入账，网络重试不会重复计费，iptables 计数重置也能继续累计。节点必须配置明确的 `ACCOUNT_ID` 和对应的账号级 Token。仅用密码定位是主 Token 的兼容模式；如果同一密码属于多个账号，接口会返回 409 而不会静默错账。
+
+采集器最小配置示例：
+
+```bash
+PANEL_URL="https://panel.example.com" \
+ACCOUNT_ID="1" \
+API_TOKEN="YOUR_ACCOUNT_SCOPED_TOKEN" \
+ANYTLS_PORT="443" \
+bash traffic_collector.sh
+```
+
+默认采集器 ID 保存在 `/var/lib/anytls-panel-traffic.id`。该文件必须跨更新持久保留，并且每个节点/采集实例使用不同文件；可用 `COLLECTOR_ID_FILE` 自定义。首次接入只登记当前计数为基线，不会把旧版已入账流量重复计算，从下一次采样开始累计差值。
+
+采集脚本依赖 util-linux 的 `flock`，并默认使用 `/run/anytls-panel-traffic.lock` 防止 cron 与手工执行并发造成重复规则或重复计费；可用 `COLLECTOR_LOCK_FILE` 自定义锁文件。自定义 `COLLECTOR_ID_FILE` 或 `COLLECTOR_LOCK_FILE` 必须使用绝对路径，父目录需预先创建，并保证整条目录链由 root 所有且不可组/全局写；不要放在 `/tmp` 或普通用户目录。
+
+当前 iptables 方案只统计 IPv4 的整个 `ANYTLS_PORT`，不能统计 IPv6，也不能区分同端口内的不同 AnyTLS 用户。因此一个采集实例只适用于“一个 IPv4 独占端口对应一个面板账号”，同一端口也只能运行一个 collector。双栈/纯 IPv6或共享端口场景必须改用 AnyTLS/进程提供的用户级指标，不能用此脚本做账号级计费。
+
+随机生成的初始管理员密码会保存到 `data/.initial_admin_password`；部署输出默认隐藏密码和流量 API token。如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
 
 ## 🛠️ 管理命令
 
@@ -132,6 +164,8 @@ journalctl -u anytls-panel -n 50 # 最近50条
 ```
 AnyTLS_Panel/
 ├── app.py                  # 主程序（Flask 应用）
+├── security_utils.py       # 密码哈希与兼容校验
+├── traffic_token.py        # 账号级流量 Token 生成器
 ├── templates/              # HTML 模板
 │   ├── base.html          # 基础布局
 │   ├── login.html         # 登录页
@@ -149,17 +183,16 @@ AnyTLS_Panel/
 
 ## 🔒 安全特性
 
-- ✅ CSRF 保护（所有 POST 表单验证 Token）
+- ✅ 浏览器管理 POST 接口验证 CSRF Token；流量 API 使用独立 Bearer Token
 - ✅ 登录速率限制（5次/分钟，防暴力破解）
-- ✅ API 接口豁免 CSRF（供外部脚本调用）
-- ✅ 流量上报 API 需要 Bearer token，避免匿名写入流量数据
+- ✅ 流量上报 API 支持账号级 Bearer token，节点不能跨账号写入
 - ✅ Session HttpOnly + SameSite=Lax
 - ✅ 生产进程使用专用低权限用户和 systemd 沙箱
 - ✅ 密码使用带随机盐的 PBKDF2-SHA256，并兼容旧 SHA256 哈希自动升级
 - ✅ Secret Key 原子持久化，避免并发启动产生不同会话密钥
-- ✅ 订阅拉取阻断 SSRF、限制重定向和响应体大小
+- ✅ 订阅拉取拒绝常规内网/回环目标，并限制重定向和响应体大小
 
-生产环境必须在面板前配置 HTTPS 反向代理。部署时将 Gunicorn 仅绑定到本机，并显式信任这一层代理：
+生产环境必须在面板前配置 HTTPS 反向代理。部署默认已将 Gunicorn 绑定到本机并启用 Secure Cookie；仍需显式信任这一层代理：
 
 ```bash
 ANYTLS_BIND_HOST=127.0.0.1 \

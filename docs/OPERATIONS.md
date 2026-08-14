@@ -46,11 +46,15 @@ bash deploy.sh
 ```
 
 首次安装时脚本会初始化管理员账号；如果数据库已存在，会保留原有账号。
-未通过 `ANYTLS_ADMIN_PASS` 指定密码时，随机初始密码会保存到面板目录的 `.initial_admin_password`，文件仅 root 可读。部署输出默认隐藏密码和流量 API token；如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
+未通过 `ANYTLS_ADMIN_PASS` 指定密码时，随机初始密码会保存到面板 `data/.initial_admin_password`，文件仅 root 可读。部署输出默认隐藏密码和流量 API token；如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
+
+部署目录必须是 `/opt/<专用名称>` 或 `/srv/<专用名称>`，且父目录由 root 所有并不可组/全局写。脚本会拒绝符号链接路径以及没有 AnyTLS 安装标记的非空目录；卸载时也会在停止服务前验证同一标记。代码和每次重建的 venv 由 root 所有且服务只读，数据库、WAL 和运行密钥位于服务可写的 `data/` 子目录。旧版根目录状态会在停服后通过 SQLite backup/安全复制迁入 `data/`。
+
+自定义 `ANYTLS_TRAFFIC_API_TOKEN_FILE`、`ANYTLS_ADMIN_PASSWORD_FILE` 或 `ANYTLS_SECRET_KEY_FILE` 时，只允许 `/etc/anytls-panel/<文件名>`；父目录必须由 root 所有、不可组/全局写且整条目标路径不得经过符号链接。更新时继续传入同一路径。
 
 ## 生产 HTTPS
 
-不要把管理面板的明文 HTTP 端口直接暴露到公网。推荐让 Caddy、Nginx 或其他 TLS 反向代理监听公网 443，Gunicorn 只监听本机：
+不要把管理面板的明文 HTTP 端口直接暴露到公网。部署默认使用 `127.0.0.1` 和 Secure Cookie；推荐让 Caddy、Nginx 或其他 TLS 反向代理监听公网 443，并显式启用代理信任：
 
 ```bash
 ANYTLS_BIND_HOST="127.0.0.1" \
@@ -74,6 +78,21 @@ panel.example.com {
 
 HTTP(S) 订阅默认禁止访问内网、回环、链路本地和保留地址。确需拉取可信内网订阅时，可在隔离环境中设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1` 后重新部署；不要在可导入不可信订阅的面板上开启。
 
+## 节点流量采集
+
+面板 `data/.traffic_api_token` 是具有全部账号流量写权限的主 Token，不能分发到节点。为账号 ID `1` 生成账号级 Token：
+
+```bash
+sudo -u anytls-panel /opt/anytls-panel/venv/bin/python \
+  /opt/anytls-panel/traffic_token.py 1
+```
+
+该命令可从任意工作目录执行，且不会启动面板或迁移数据库。自定义主 Token 文件时追加 `--token-file /etc/anytls-panel/<文件名>`。
+
+在节点配置 `ACCOUNT_ID=1`、上述账号级 `API_TOKEN`、`ANYTLS_PORT` 和 HTTPS 面板地址。`COLLECTOR_ID_FILE` 必须持久化且每个节点/采集实例唯一；首次样本只建立基线，不回算历史。
+
+脚本依赖 util-linux 的 `flock`，默认通过 `/run/anytls-panel-traffic.lock` 保证单实例执行；可用 `COLLECTOR_LOCK_FILE` 自定义。自定义 ID/锁文件必须是绝对路径，父目录需预先创建，且整条目录链由 root 所有、不可组/全局写；禁止放在 `/tmp` 或普通用户目录。当前 iptables 计数仅覆盖 IPv4，并且按端口而不是 AnyTLS 用户区分。每个被采集的 IPv4 端口必须只对应一个面板账号，且同一端口只能运行一个 collector。双栈/纯 IPv6或共享端口需要用户级指标，不能使用 `traffic_collector.sh` 做账号计费。
+
 ## 部署后验证
 
 ```bash
@@ -90,10 +109,15 @@ curl -I http://127.0.0.1:8866/login
 
 ```bash
 backup_dir="/root/anytls-panel-backup-$(date +%Y%m%d-%H%M%S)"
+staging_dir="$(mktemp -d /var/tmp/anytls-panel-backup.XXXXXX)"
+trap 'rm -rf -- "$staging_dir"' EXIT
+chown anytls-panel:anytls-panel "$staging_dir"
+chmod 700 "$staging_dir"
 install -d -m 700 "$backup_dir"
-cp -a /opt/anytls-panel/.secret_key /opt/anytls-panel/.traffic_api_token "$backup_dir/"
-/opt/anytls-panel/venv/bin/python - \
-  /opt/anytls-panel/anytls.db "$backup_dir/anytls.db" <<'PY'
+cp -a /opt/anytls-panel/data/.secret_key \
+  /opt/anytls-panel/data/.traffic_api_token "$backup_dir/"
+runuser -u anytls-panel -- /opt/anytls-panel/venv/bin/python - \
+  /opt/anytls-panel/data/anytls.db "$staging_dir/anytls.db" <<'PY'
 import sqlite3
 import sys
 
@@ -104,6 +128,9 @@ if result != 'ok':
     raise SystemExit(f'database quick_check failed: {result}')
 print('database quick_check: ok')
 PY
+install -m 600 "$staging_dir/anytls.db" "$backup_dir/anytls.db"
+rm -rf -- "$staging_dir"
+trap - EXIT
 ```
 
 重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库：
@@ -112,7 +139,7 @@ PY
 bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
 ```
 
-如果使用自定义目录或服务名，更新时需要继续传入相同环境变量。
+如果使用自定义目录、服务名或 `/etc/anytls-panel/` 下的密钥文件，更新时需要继续传入相同环境变量。
 
 回滚时重新部署上一个已验证标签，再检查数据库完整性、服务日志、登录和订阅输出：
 
@@ -148,9 +175,10 @@ bash /opt/anytls-panel/uninstall.sh --yes
 ```bash
 python3 -m pip install -r requirements.txt
 python3 -m unittest discover -s tests -q
-python3 -m py_compile app.py
-flake8 app.py security_utils.py tests --select=E9,F63,F7,F82
+python3 -m py_compile app.py security_utils.py traffic_token.py
+flake8 app.py security_utils.py traffic_token.py tests --select=E9,F63,F7,F82
 bash -n deploy.sh start.sh traffic_collector.sh uninstall.sh
+shellcheck -x deploy.sh start.sh traffic_collector.sh uninstall.sh
 python3 -m pip_audit -r requirements.txt
 ```
 
