@@ -10,6 +10,7 @@ SERVICE_USER="${ANYTLS_SERVICE_USER:-anytls-panel}"
 BIND_HOST="${ANYTLS_BIND_HOST:-0.0.0.0}"
 SESSION_COOKIE_SECURE="${ANYTLS_SESSION_COOKIE_SECURE:-0}"
 TRUST_PROXY="${ANYTLS_TRUST_PROXY:-0}"
+ALLOW_PRIVATE_SUBSCRIPTIONS="${ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS:-0}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
 REPO_REF="${ANYTLS_REPO_REF:-main}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
@@ -39,6 +40,11 @@ fi
 if ! [[ "$BIND_HOST" =~ ^[0-9a-fA-F:.]+$ ]]; then
     fail "invalid bind host: $BIND_HOST"
 fi
+for flag_value in "$SESSION_COOKIE_SECURE" "$TRUST_PROXY" "$ALLOW_PRIVATE_SUBSCRIPTIONS"; do
+    if ! [[ "$flag_value" =~ ^[01]$ ]]; then
+        fail "security flags must be 0 or 1"
+    fi
+done
 
 install_packages() {
     if command -v apt-get >/dev/null 2>&1; then
@@ -308,6 +314,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=ANYTLS_TRAFFIC_API_TOKEN_FILE=${TRAFFIC_API_TOKEN_FILE}
 Environment=ANYTLS_SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE}
 Environment=ANYTLS_TRUST_PROXY=${TRUST_PROXY}
+Environment=ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=${ALLOW_PRIVATE_SUBSCRIPTIONS}
 
 [Install]
 WantedBy=multi-user.target

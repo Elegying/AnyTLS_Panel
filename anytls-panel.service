@@ -24,6 +24,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=ANYTLS_TRAFFIC_API_TOKEN_FILE=/opt/anytls-panel/.traffic_api_token
 Environment=ANYTLS_SESSION_COOKIE_SECURE=0
 Environment=ANYTLS_TRUST_PROXY=0
+Environment=ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=0
 
 [Install]
 WantedBy=multi-user.target

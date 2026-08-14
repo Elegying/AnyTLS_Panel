@@ -1427,6 +1427,8 @@ proxies:
         self.assertNotIn("User=root", deploy + service)
         self.assertIn("NoNewPrivileges=true", deploy)
         self.assertIn("NoNewPrivileges=true", service)
+        self.assertIn("ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS", deploy)
+        self.assertIn("ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=0", service)
 
     def test_uninstall_script_requires_explicit_confirmation(self):
         content = (REPO_ROOT / "uninstall.sh").read_text(encoding="utf-8")

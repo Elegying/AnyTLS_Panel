@@ -71,6 +71,8 @@ bash deploy.sh 9090
 - 仪表盘点击「一键同步全部」更新所有账号
 - 或进入账号详情点击「同步订阅」更新单个账号
 
+HTTP(S) 订阅默认拒绝回环、内网、链路本地和保留地址，并会逐次校验重定向目标；响应上限为 2 MiB。只有确实需要从可信内网订阅源导入时，才应在隔离网络中设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。
+
 ## 🔌 API 接口
 
 | 接口 | 方法 | 说明 |
@@ -152,13 +154,26 @@ AnyTLS_Panel/
 - ✅ API 接口豁免 CSRF（供外部脚本调用）
 - ✅ 流量上报 API 需要 Bearer token，避免匿名写入流量数据
 - ✅ Session HttpOnly + SameSite=Lax
-- ✅ 密码 SHA256 哈希存储
-- ✅ Secret Key 持久化（多 Worker 共享）
+- ✅ 生产进程使用专用低权限用户和 systemd 沙箱
+- ✅ 密码使用带随机盐的 PBKDF2-SHA256，并兼容旧 SHA256 哈希自动升级
+- ✅ Secret Key 原子持久化，避免并发启动产生不同会话密钥
+- ✅ 订阅拉取阻断 SSRF、限制重定向和响应体大小
+
+生产环境必须在面板前配置 HTTPS 反向代理。部署时将 Gunicorn 仅绑定到本机，并显式信任这一层代理：
+
+```bash
+ANYTLS_BIND_HOST=127.0.0.1 \
+ANYTLS_SESSION_COOKIE_SECURE=1 \
+ANYTLS_TRUST_PROXY=1 \
+bash deploy.sh
+```
+
+不要在面板直接暴露公网时开启 `ANYTLS_TRUST_PROXY`。完整的 HTTPS、备份、更新和回滚步骤见[运维手册](docs/OPERATIONS.md)。
 
 ## 📋 环境要求
 
-- Python 3.8+
-- Linux（推荐 Ubuntu 20.04+）
+- Python 3.10+
+- 带 systemd 的 Linux（发行版仓库需能提供 Python 3.10+）
 - 512MB+ 内存
 
 ## 📄 开源协议
