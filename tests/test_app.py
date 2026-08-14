@@ -2140,7 +2140,7 @@ proxies:
             [
                 "bash",
                 "-c",
-                f'source "{script}"; validate_panel_dir; validate_secret_paths',
+                f'source "{script}"; validate_secret_paths',
             ],
             capture_output=True,
             text=True,
@@ -2154,7 +2154,7 @@ proxies:
             [
                 "bash",
                 "-c",
-                f'source "{script}"; validate_panel_dir; validate_secret_paths',
+                f'source "{script}"; validate_secret_paths',
             ],
             capture_output=True,
             text=True,
@@ -2178,7 +2178,7 @@ proxies:
                     [
                         "bash",
                         "-c",
-                        f'source "{script}"; validate_panel_dir; validate_secret_paths',
+                        f'source "{script}"; validate_secret_paths',
                     ],
                     capture_output=True,
                     text=True,
@@ -2186,6 +2186,21 @@ proxies:
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(variable_name, result.stderr)
+
+        env = os.environ.copy()
+        env["ANYTLS_PANEL_DIR"] = "/opt/anytls-panel-test"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{script}"; '
+                "stat() { printf '0 755\\n'; }; validate_panel_dir",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
 
         with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
             actual_parent = Path(tmp) / "actual"
