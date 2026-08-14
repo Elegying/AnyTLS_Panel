@@ -6,6 +6,10 @@ set -Eeuo pipefail
 PANEL_DIR="${ANYTLS_PANEL_DIR:-/opt/anytls-panel}"
 PORT="${1:-${ANYTLS_PANEL_PORT:-8866}}"
 SERVICE_NAME="${ANYTLS_SERVICE_NAME:-anytls-panel}"
+SERVICE_USER="${ANYTLS_SERVICE_USER:-anytls-panel}"
+BIND_HOST="${ANYTLS_BIND_HOST:-0.0.0.0}"
+SESSION_COOKIE_SECURE="${ANYTLS_SESSION_COOKIE_SECURE:-0}"
+TRUST_PROXY="${ANYTLS_TRUST_PROXY:-0}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
 REPO_REF="${ANYTLS_REPO_REF:-main}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
@@ -28,6 +32,12 @@ fi
 
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
     fail "invalid port: $PORT"
+fi
+if ! [[ "$SERVICE_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    fail "invalid service user: $SERVICE_USER"
+fi
+if ! [[ "$BIND_HOST" =~ ^[0-9a-fA-F:.]+$ ]]; then
+    fail "invalid bind host: $BIND_HOST"
 fi
 
 install_packages() {
@@ -57,6 +67,23 @@ install_packages() {
     fi
 
     fail "no supported package manager found; please use Ubuntu/Debian or CentOS/RHEL"
+}
+
+ensure_service_user() {
+    if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+        if ! command -v useradd >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+                install_packages passwd
+            else
+                install_packages shadow-utils
+            fi
+        fi
+        local nologin_shell
+        nologin_shell="$(command -v nologin || printf '/usr/sbin/nologin')"
+        useradd --system --user-group --home-dir "$PANEL_DIR" \
+            --shell "$nologin_shell" "$SERVICE_USER"
+    fi
+    SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
 }
 
 python_venv_packages() {
@@ -239,6 +266,19 @@ PY
     fi
 }
 
+secure_panel_permissions() {
+    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PANEL_DIR"
+    chmod 750 "$PANEL_DIR"
+    if [[ -f "$TRAFFIC_API_TOKEN_FILE" ]]; then
+        chown "root:$SERVICE_GROUP" "$TRAFFIC_API_TOKEN_FILE"
+        chmod 640 "$TRAFFIC_API_TOKEN_FILE"
+    fi
+    if [[ -f "$ADMIN_PASSWORD_FILE" ]]; then
+        chown root:root "$ADMIN_PASSWORD_FILE"
+        chmod 600 "$ADMIN_PASSWORD_FILE"
+    fi
+}
+
 write_service() {
     log "writing systemd service"
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
@@ -249,13 +289,25 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=${SERVICE_USER}
+Group=${SERVICE_GROUP}
 WorkingDirectory=${PANEL_DIR}
-ExecStart=${PANEL_DIR}/venv/bin/gunicorn -w 2 -b 0.0.0.0:${PORT} --timeout 60 app:app
+ExecStart=${PANEL_DIR}/venv/bin/gunicorn --workers 1 --threads 4 --bind ${BIND_HOST}:${PORT} --timeout 120 app:app
 Restart=always
 RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=${PANEL_DIR}
 Environment=PYTHONUNBUFFERED=1
 Environment=ANYTLS_TRAFFIC_API_TOKEN_FILE=${TRAFFIC_API_TOKEN_FILE}
+Environment=ANYTLS_SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE}
+Environment=ANYTLS_TRUST_PROXY=${TRUST_PROXY}
 
 [Install]
 WantedBy=multi-user.target
@@ -304,11 +356,13 @@ print_summary() {
 
 ensure_runtime
 sync_project_files
+ensure_service_user
 prepare_admin_credentials
 persist_generated_admin_password
 prepare_traffic_api_token
 install_python_deps
 initialize_database
+secure_panel_permissions
 write_service
 start_service
 print_summary

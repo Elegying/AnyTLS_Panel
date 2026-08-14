@@ -28,8 +28,17 @@ from flask import (
 from flask_wtf.csrf import CSRFProtect
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from security_utils import hash_password, verify_password
+
+
+def _env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+
 
 app = Flask(__name__)
 app.config['DATABASE'] = os.environ.get(
@@ -38,8 +47,12 @@ app.config['DATABASE'] = os.environ.get(
 )
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = _env_flag('ANYTLS_SESSION_COOKIE_SECURE')
 app.config['PERMANENT_SESSION_LIFETIME'] = 86400  # 24小时
 app.config['WTF_CSRF_TIME_LIMIT'] = 3600  # CSRF token 1小时有效
+
+if _env_flag('ANYTLS_TRUST_PROXY'):
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # CSRF 保护
 csrf = CSRFProtect(app)
@@ -49,8 +62,18 @@ limiter = Limiter(
     get_remote_address,
     app=app,
     default_limits=["200 per minute"],
-    storage_uri="memory://",
+    storage_uri=os.environ.get('ANYTLS_RATE_LIMIT_STORAGE_URI', 'memory://'),
 )
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'same-origin'
+    if request.is_secure:
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000'
+    return response
 
 # 固定 secret_key，存文件持久化，多 worker 共享
 _sk_file = os.environ.get('ANYTLS_SECRET_KEY_FILE') or os.path.join(os.path.dirname(__file__), '.secret_key')

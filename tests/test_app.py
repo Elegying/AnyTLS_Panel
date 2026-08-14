@@ -295,6 +295,36 @@ proxies:
             self.assertEqual(database.stat().st_mode & 0o777, 0o600)
             self.assertTrue(app.app.secret_key)
 
+    def test_secure_cookie_and_proxy_mode_are_configurable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "ANYTLS_DATABASE": str(database),
+                    "ANYTLS_SESSION_COOKIE_SECURE": "1",
+                    "ANYTLS_TRUST_PROXY": "1",
+                    "ANYTLS_RATE_LIMIT_STORAGE_URI": "memory://",
+                },
+                clear=False,
+            ):
+                app = load_app(database)
+
+        self.assertTrue(app.app.config["SESSION_COOKIE_SECURE"])
+        self.assertEqual(app.limiter._storage_uri, "memory://")
+        self.assertEqual(type(app.app.wsgi_app).__name__, "ProxyFix")
+
+    def test_responses_include_baseline_security_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True)
+            with app.app.test_client() as client:
+                response = client.get("/login", base_url="https://panel.example")
+
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+        self.assertIn("max-age=", response.headers["Strict-Transport-Security"])
+
     def test_generated_subscription_url_uses_current_request_host(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
@@ -1158,6 +1188,20 @@ proxies:
 
         self.assertNotIn("admin123", content)
         self.assertIn(".initial_admin_password", content)
+
+    def test_production_service_uses_non_root_threaded_worker(self):
+        deploy = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
+        service = (REPO_ROOT / "anytls-panel.service").read_text(encoding="utf-8")
+        start = (REPO_ROOT / "start.sh").read_text(encoding="utf-8")
+
+        for content in (deploy, service, start):
+            self.assertIn("--workers 1 --threads 4", content)
+            self.assertNotIn("-w 2", content)
+        self.assertIn('SERVICE_USER="${ANYTLS_SERVICE_USER:-anytls-panel}"', deploy)
+        self.assertIn("User=anytls-panel", service)
+        self.assertNotIn("User=root", deploy + service)
+        self.assertIn("NoNewPrivileges=true", deploy)
+        self.assertIn("NoNewPrivileges=true", service)
 
     def test_uninstall_script_requires_explicit_confirmation(self):
         content = (REPO_ROOT / "uninstall.sh").read_text(encoding="utf-8")
