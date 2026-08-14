@@ -87,6 +87,32 @@ proxies:
         self.assertEqual(nodes[0]["name"], "Good Trojan")
         self.assertEqual(nodes[0]["protocol"], "trojan")
 
+    def test_clash_yaml_null_ws_options_do_not_drop_later_nodes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            nodes = app._parse_clash_yaml(
+                """
+proxies:
+  - name: VMess without ws options
+    type: vmess
+    server: vmess.example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    network: ws
+    ws-opts:
+  - name: Later Trojan
+    type: trojan
+    server: trojan.example.com
+    port: 443
+    password: secret
+"""
+            )
+
+        self.assertEqual([node["name"] for node in nodes], [
+            "VMess without ws options",
+            "Later Trojan",
+        ])
+
     def test_http_subscription_prefers_native_anytls_user_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
@@ -737,6 +763,208 @@ proxies:
             self.assertIn("udp: true", content)
             self.assertIn("client-fingerprint: chrome", content)
             self.assertIn("skip-cert-verify: true", content)
+
+    def test_public_clash_subscription_preserves_protocol_parameters(self):
+        vmess_payload = base64.b64encode(json.dumps({
+            "v": "2",
+            "ps": "vmess-ws",
+            "add": "vmess.example.com",
+            "port": "443",
+            "id": "11111111-1111-1111-1111-111111111111",
+            "aid": "5",
+            "net": "ws",
+            "host": "cdn.example.com",
+            "path": "/socket",
+            "tls": "tls",
+            "sni": "sni.example.com",
+        }).encode()).decode()
+        ss_userinfo = base64.b64encode(b"chacha20-ietf-poly1305:ss-password").decode()
+        raw_uris = [
+            ("vmess-ws", f"vmess://{vmess_payload}", "vmess"),
+            ("ss-node", f"ss://{ss_userinfo}@ss.example.com:8388#ss-node", "shadowsocks"),
+            (
+                "trojan-node",
+                "trojan://secret@trojan.example.com:443?sni=edge.example.com&allowInsecure=1#trojan-node",
+                "trojan",
+            ),
+            (
+                "vless-node",
+                "vless://uuid@vless.example.com:443?security=tls&sni=vless-sni.example.com&flow=xtls-rprx-vision#vless-node",
+                "vless",
+            ),
+            (
+                "hy2-node",
+                "hysteria2://auth@hy2.example.com:443?sni=hy2-sni.example.com&insecure=1#hy2-node",
+                "hysteria2",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
+                    ("demo", "https://sub.example/list", "token"),
+                ).lastrowid
+                for name, raw_uri, protocol in raw_uris:
+                    parsed = app.parse_protocol_uri(
+                        raw_uri,
+                        "ss" if protocol == "shadowsocks" else protocol,
+                    )
+                    db.execute(
+                        "INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            account_id,
+                            name,
+                            parsed["host"],
+                            parsed["port"],
+                            parsed["password"],
+                            raw_uri,
+                            protocol,
+                        ),
+                    )
+                db.commit()
+
+            with app.app.test_client() as client:
+                response = client.get("/sub/token", headers={"User-Agent": "Clash.Meta/1.18.0"})
+
+        import yaml
+        proxies = {
+            proxy["name"]: proxy
+            for proxy in yaml.safe_load(response.get_data(as_text=True))["proxies"]
+        }
+        self.assertEqual(proxies["vmess-ws"]["alterId"], 5)
+        self.assertEqual(proxies["vmess-ws"]["network"], "ws")
+        self.assertEqual(proxies["vmess-ws"]["ws-opts"]["path"], "/socket")
+        self.assertEqual(proxies["vmess-ws"]["ws-opts"]["headers"]["Host"], "cdn.example.com")
+        self.assertTrue(proxies["vmess-ws"]["tls"])
+        self.assertEqual(proxies["ss-node"]["cipher"], "chacha20-ietf-poly1305")
+        self.assertEqual(proxies["trojan-node"]["sni"], "edge.example.com")
+        self.assertTrue(proxies["trojan-node"]["skip-cert-verify"])
+        self.assertEqual(proxies["vless-node"]["sni"], "vless-sni.example.com")
+        self.assertTrue(proxies["vless-node"]["tls"])
+        self.assertEqual(proxies["vless-node"]["flow"], "xtls-rprx-vision")
+        self.assertEqual(proxies["hy2-node"]["sni"], "hy2-sni.example.com")
+        self.assertTrue(proxies["hy2-node"]["skip-cert-verify"])
+
+    def test_init_db_migrates_traffic_metadata_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            with sqlite3.connect(database) as db:
+                db.execute(
+                    """CREATE TABLE accounts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        subscribe_url TEXT NOT NULL,
+                        traffic_limit_gb REAL DEFAULT 250,
+                        traffic_used_bytes INTEGER DEFAULT 0,
+                        status TEXT DEFAULT 'active',
+                        notes TEXT DEFAULT '',
+                        node_count INTEGER DEFAULT 0,
+                        last_synced_at TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        sub_token TEXT DEFAULT ''
+                    )"""
+                )
+            load_app(database)
+            with sqlite3.connect(database) as db:
+                columns = {row[1] for row in db.execute("PRAGMA table_info(accounts)")}
+
+        self.assertTrue({
+            "traffic_upload_bytes",
+            "traffic_download_bytes",
+            "expire_date",
+        }.issubset(columns))
+
+    def test_public_subscription_uses_persisted_traffic_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts ("
+                    "name, subscribe_url, sub_token, traffic_limit_gb, traffic_used_bytes, "
+                    "traffic_upload_bytes, traffic_download_bytes, expire_date"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "demo",
+                        "anytls://pw@example.com:443#demo",
+                        "token",
+                        10,
+                        300,
+                        100,
+                        200,
+                        "2030-01-02",
+                    ),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (account_id, "demo", "example.com", 443, "pw", "anytls://pw@example.com:443#demo"),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                response = client.get("/sub/token")
+
+        userinfo = response.headers["Subscription-Userinfo"]
+        self.assertIn("upload=100", userinfo)
+        self.assertIn("download=200", userinfo)
+        self.assertIn("total=10737418240", userinfo)
+        self.assertIn("expire=", userinfo)
+
+    def test_account_sync_persists_traffic_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "https://sub.example/list"),
+                ).lastrowid
+                db.commit()
+
+            node = {
+                "name": "demo",
+                "host": "example.com",
+                "port": 443,
+                "password": "pw",
+                "raw_uri": "anytls://pw@example.com:443#demo",
+                "protocol": "anytls",
+            }
+            traffic = {
+                "used_bytes": 300,
+                "upload_bytes": 100,
+                "download_bytes": 200,
+                "total_gb": 10,
+                "expire_date": "2030-01-02",
+            }
+            with mock.patch.object(app, "parse_subscribe_url", return_value=([node], traffic)):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                        session["username"] = "admin"
+                    response = client.post(f"/accounts/{account_id}/sync")
+
+            with sqlite3.connect(database) as db:
+                metadata = db.execute(
+                    "SELECT traffic_used_bytes, traffic_upload_bytes, "
+                    "traffic_download_bytes, traffic_limit_gb, expire_date "
+                    "FROM accounts WHERE id=?",
+                    (account_id,),
+                ).fetchone()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(metadata, (300, 100, 200, 10, "2030-01-02"))
 
     def test_public_subscribe_does_not_convert_anytls_for_shadowrocket_clients(self):
         with tempfile.TemporaryDirectory() as tmp:

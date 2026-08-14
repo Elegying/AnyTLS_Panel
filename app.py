@@ -172,6 +172,9 @@ def init_db():
             subscribe_url TEXT NOT NULL,
             traffic_limit_gb REAL DEFAULT 250,
             traffic_used_bytes INTEGER DEFAULT 0,
+            traffic_upload_bytes INTEGER DEFAULT 0,
+            traffic_download_bytes INTEGER DEFAULT 0,
+            expire_date TEXT DEFAULT '',
             status TEXT DEFAULT 'active',
             notes TEXT DEFAULT '',
             node_count INTEGER DEFAULT 0,
@@ -234,12 +237,16 @@ def init_db():
         )
         db.commit()
 
-    # 迁移：添加 sub_token 列
-    try:
-        db.execute('ALTER TABLE accounts ADD COLUMN sub_token TEXT DEFAULT ""')
-        db.commit()
-    except sqlite3.OperationalError:
-        pass  # 列已存在
+    account_columns = {row[1] for row in db.execute('PRAGMA table_info(accounts)')}
+    for column, declaration in (
+        ('sub_token', 'TEXT DEFAULT ""'),
+        ('traffic_upload_bytes', 'INTEGER DEFAULT 0'),
+        ('traffic_download_bytes', 'INTEGER DEFAULT 0'),
+        ('expire_date', 'TEXT DEFAULT ""'),
+    ):
+        if column not in account_columns:
+            db.execute(f'ALTER TABLE accounts ADD COLUMN {column} {declaration}')
+    db.commit()
 
     db.close()
     try:
@@ -505,11 +512,13 @@ def _parse_clash_yaml(content):
                     uri = f"trojan://{password}@{host}:{port}?sni={sni}&allowInsecure={skip_cert}#{name}"
                 elif ptype == 'vmess':
                     import base64 as b64
+                    ws_opts = p.get('ws-opts') if isinstance(p.get('ws-opts'), dict) else {}
+                    headers = ws_opts.get('headers') if isinstance(ws_opts.get('headers'), dict) else {}
                     vmess_obj = {"v": "2", "ps": name, "add": host, "port": str(port),
                                  "id": password, "aid": str(p.get('alterId', 0)),
                                  "net": p.get('network', 'tcp'), "type": "none",
-                                 "host": p.get('ws-opts', {}).get('headers', {}).get('Host', ''),
-                                 "path": p.get('ws-opts', {}).get('path', ''),
+                                 "host": headers.get('Host', ''),
+                                 "path": ws_opts.get('path', ''),
                                  "tls": "tls" if p.get('tls') else "none"}
                     uri = "vmess://" + b64.b64encode(json.dumps(vmess_obj).encode()).decode()
                 elif ptype == 'vless':
@@ -562,7 +571,8 @@ def parse_protocol_uri(uri, protocol='anytls'):
             import base64 as b64
             try:
                 payload = uri.split('://', 1)[1]
-                data = json.loads(b64.b64decode(payload).decode())
+                payload += '=' * (-len(payload) % 4)
+                data = json.loads(b64.urlsafe_b64decode(payload).decode())
                 return {
                     'name': data.get('ps', data.get('add', 'unknown')),
                     'host': data.get('add', ''),
@@ -570,6 +580,7 @@ def parse_protocol_uri(uri, protocol='anytls'):
                     'password': data.get('id', ''),
                     'raw_uri': uri,
                     'protocol': 'vmess',
+                    'extra': data,
                 }
             except Exception:
                 return None
@@ -598,6 +609,7 @@ def parse_protocol_uri(uri, protocol='anytls'):
                         'password': password,
                         'raw_uri': uri,
                         'protocol': 'shadowsocks',
+                        'extra': {'cipher': method},
                     }
             except Exception:
                 return None
@@ -622,6 +634,7 @@ def parse_protocol_uri(uri, protocol='anytls'):
             'password': unquote(password),
             'raw_uri': uri,
             'protocol': protocol,
+            'extra': params,
         }
     except Exception:
         return None
@@ -666,6 +679,22 @@ def parse_nonnegative_int(value, field_name):
     if parsed < 0:
         raise ValueError(f"{field_name}不能为负数")
     return parsed
+
+
+def _traffic_update_fields(traffic_info):
+    fields = []
+    values = []
+    for source, column in (
+        ('used_bytes', 'traffic_used_bytes'),
+        ('upload_bytes', 'traffic_upload_bytes'),
+        ('download_bytes', 'traffic_download_bytes'),
+        ('total_gb', 'traffic_limit_gb'),
+        ('expire_date', 'expire_date'),
+    ):
+        if source in traffic_info:
+            fields.append(f'{column}=?')
+            values.append(traffic_info[source])
+    return fields, values
 
 
 def sanitize_header_value(value, default="subscription"):
@@ -799,9 +828,21 @@ def account_add():
 
     db = get_db()
     cursor = db.execute(
-        '''INSERT INTO accounts (name, subscribe_url, traffic_limit_gb, notes, node_count, last_synced_at, traffic_used_bytes)
-           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)''',
-        (name, subscribe_url, traffic_limit, notes, len(nodes), traffic_info.get('used_bytes', 0))
+        '''INSERT INTO accounts (
+               name, subscribe_url, traffic_limit_gb, notes, node_count, last_synced_at,
+               traffic_used_bytes, traffic_upload_bytes, traffic_download_bytes, expire_date
+           ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)''',
+        (
+            name,
+            subscribe_url,
+            traffic_limit,
+            notes,
+            len(nodes),
+            traffic_info.get('used_bytes', 0),
+            traffic_info.get('upload_bytes', 0),
+            traffic_info.get('download_bytes', 0),
+            traffic_info.get('expire_date', ''),
+        )
     )
     account_id = cursor.lastrowid
 
@@ -930,19 +971,11 @@ def account_sync(account_id):
                 n.get('protocol', 'anytls'),
             )
         )
-    # 更新流量信息（白名单校验字段名，防止SQL注入）
-    allowed_fields = {'node_count', 'traffic_used_bytes', 'traffic_limit_gb', 'notes'}
     field_clauses = ['node_count=?', 'last_synced_at=CURRENT_TIMESTAMP', 'updated_at=CURRENT_TIMESTAMP']
     update_params = [len(nodes)]
-    if traffic_info.get('used_bytes'):
-        field_clauses.append('traffic_used_bytes=?')
-        update_params.append(traffic_info['used_bytes'])
-    if traffic_info.get('total_gb'):
-        field_clauses.append('traffic_limit_gb=?')
-        update_params.append(traffic_info['total_gb'])
-    if traffic_info.get('expire_date'):
-        field_clauses.append('notes=?')
-        update_params.append(f"到期: {traffic_info['expire_date']}")
+    traffic_fields, traffic_values = _traffic_update_fields(traffic_info)
+    field_clauses.extend(traffic_fields)
+    update_params.extend(traffic_values)
     update_params.append(account_id)
     update_sql = f"UPDATE accounts SET {', '.join(field_clauses)} WHERE id=?"
     db.execute(update_sql, update_params)
@@ -1226,18 +1259,11 @@ def api_sync_all():
                         n.get('protocol', 'anytls'),
                     )
                 )
-            # 更新流量信息（白名单校验字段名，防止SQL注入）
             field_clauses = ['node_count=?', 'last_synced_at=CURRENT_TIMESTAMP', 'updated_at=CURRENT_TIMESTAMP']
             update_params = [len(nodes)]
-            if traffic_info.get('used_bytes'):
-                field_clauses.append('traffic_used_bytes=?')
-                update_params.append(traffic_info['used_bytes'])
-            if traffic_info.get('total_gb'):
-                field_clauses.append('traffic_limit_gb=?')
-                update_params.append(traffic_info['total_gb'])
-            if traffic_info.get('expire_date'):
-                field_clauses.append('notes=?')
-                update_params.append(f"到期: {traffic_info['expire_date']}")
+            traffic_fields, traffic_values = _traffic_update_fields(traffic_info)
+            field_clauses.extend(traffic_fields)
+            update_params.extend(traffic_values)
             update_params.append(account['id'])
             update_sql = f"UPDATE accounts SET {', '.join(field_clauses)} WHERE id=?"
             db.execute(update_sql, update_params)
@@ -1331,9 +1357,15 @@ def _row_get(row, key, default=None):
 def _account_traffic_info(account):
     info = {}
     used_bytes = _row_get(account, 'traffic_used_bytes', 0) or 0
+    upload_bytes = _row_get(account, 'traffic_upload_bytes', 0) or 0
+    download_bytes = _row_get(account, 'traffic_download_bytes', 0) or 0
     total_gb = _row_get(account, 'traffic_limit_gb', 0) or 0
     expire_date = _row_get(account, 'expire_date', '') or ''
-    if used_bytes:
+    if upload_bytes:
+        info['upload_bytes'] = int(upload_bytes)
+    if download_bytes:
+        info['download_bytes'] = int(download_bytes)
+    elif used_bytes and not upload_bytes:
         info['download_bytes'] = int(used_bytes)
     if total_gb:
         info['total_gb'] = float(total_gb)
@@ -1348,6 +1380,99 @@ def _nodes_from_db_rows(db_nodes):
         for n in db_nodes
         if n['raw_uri']
     ]
+
+
+def _query_value(params, *names, default=''):
+    for name in names:
+        values = params.get(name)
+        if values:
+            return values[0]
+    return default
+
+
+def _is_true(value):
+    return str(value).lower() in ('1', 'true', 'yes')
+
+
+def _clash_proxy_from_uri(uri):
+    scheme = uri.split('://', 1)[0].lower()
+    protocol = 'ss' if scheme == 'ss' else scheme
+    node = parse_protocol_uri(uri, protocol)
+    if not node:
+        return None
+
+    proxy = {'name': node['name'], 'server': node['host'], 'port': node['port']}
+    params = parse_qs(urlparse(uri).query)
+    p = node['protocol']
+    if p in ('anytls', 'anytls1'):
+        allow_insecure = _query_value(
+            params,
+            'allowInsecure',
+            'allow-insecure',
+            'insecure',
+            default='0',
+        )
+        proxy.update({
+            'type': 'anytls',
+            'password': node['password'],
+            'udp': True,
+            'sni': _query_value(params, 'sni', default=node['host']) or node['host'],
+            'skip-cert-verify': _is_true(allow_insecure),
+        })
+        fingerprint = _query_value(params, 'fp')
+        if fingerprint:
+            proxy['client-fingerprint'] = fingerprint
+    elif p == 'vmess':
+        extra = node.get('extra', {})
+        proxy.update({
+            'type': 'vmess',
+            'uuid': node['password'],
+            'alterId': int(extra.get('aid', 0) or 0),
+            'cipher': extra.get('scy', 'auto') or 'auto',
+        })
+        network = extra.get('net', 'tcp') or 'tcp'
+        if network != 'tcp':
+            proxy['network'] = network
+        if str(extra.get('tls', '')).lower() in ('tls', '1', 'true'):
+            proxy['tls'] = True
+        if extra.get('sni'):
+            proxy['servername'] = extra['sni']
+        if network == 'ws':
+            ws_opts = {'path': extra.get('path', '') or '/'}
+            if extra.get('host'):
+                ws_opts['headers'] = {'Host': extra['host']}
+            proxy['ws-opts'] = ws_opts
+    elif p == 'shadowsocks':
+        proxy.update({
+            'type': 'ss',
+            'cipher': node.get('extra', {}).get('cipher', 'aes-256-gcm'),
+            'password': node['password'],
+        })
+    else:
+        proxy['type'] = 'hysteria2' if p in ('hysteria2', 'hy2') else p
+        credential_field = 'uuid' if p == 'vless' else 'password'
+        proxy[credential_field] = node['password']
+        sni = _query_value(params, 'sni', 'peer', default=node['host']) or node['host']
+        if p in ('trojan', 'vless', 'hysteria2', 'hy2', 'tuic'):
+            proxy['sni'] = sni
+        allow_insecure = _query_value(
+            params,
+            'allowInsecure',
+            'allow-insecure',
+            'insecure',
+            default='0',
+        )
+        if p in ('trojan', 'vless', 'hysteria2', 'hy2', 'tuic'):
+            proxy['skip-cert-verify'] = _is_true(allow_insecure)
+        if p == 'vless' and _query_value(params, 'security') in ('tls', 'reality'):
+            proxy['tls'] = True
+        flow = _query_value(params, 'flow')
+        if p == 'vless' and flow:
+            proxy['flow'] = flow
+        network = _query_value(params, 'type', 'network')
+        if network:
+            proxy['network'] = network
+    return proxy
 
 
 @app.route('/sub/<token>')
@@ -1412,56 +1537,7 @@ def public_subscribe(token):
 
     if 'Clash' in ua or 'clash' in ua:
         # 返回 Clash YAML
-        proxies = []
-        for line in lines:
-            node = None
-            for scheme in ('anytls://', 'trojan://', 'vmess://', 'vless://', 'hysteria2://', 'hy2://', 'ss://'):
-                if line.startswith(scheme):
-                    node = parse_protocol_uri(line, scheme.rstrip(':/'))
-                    break
-            if not node:
-                continue
-            p = node['protocol']
-            proxy = {'name': node['name'], 'server': node['host'], 'port': node['port']}
-            if p in ('anytls', 'anytls1'):
-                params = parse_qs(urlparse(line).query)
-                allow_insecure = params.get(
-                    'allowInsecure',
-                    params.get('allow-insecure', params.get('insecure', ['0'])),
-                )[0]
-                proxy['type'] = 'anytls'
-                proxy['password'] = node['password']
-                proxy['udp'] = True
-                proxy['sni'] = params.get('sni', [node['host']])[0] or node['host']
-                fingerprint = params.get('fp', [''])[0]
-                if fingerprint:
-                    proxy['client-fingerprint'] = fingerprint
-                proxy['skip-cert-verify'] = str(allow_insecure).lower() in ('1', 'true', 'yes')
-            elif p == 'trojan':
-                proxy['type'] = 'trojan'
-                proxy['password'] = node['password']
-                proxy['sni'] = node['host']
-            elif p == 'vmess':
-                proxy['type'] = 'vmess'
-                proxy['uuid'] = node['password']
-                proxy['alterId'] = 0
-                proxy['cipher'] = 'auto'
-            elif p in ('hysteria2', 'hy2'):
-                proxy['type'] = 'hysteria2'
-                proxy['password'] = node['password']
-                proxy['sni'] = node['host']
-            elif p == 'vless':
-                proxy['type'] = 'vless'
-                proxy['uuid'] = node['password']
-                proxy['sni'] = node['host']
-            elif p == 'shadowsocks':
-                proxy['type'] = 'ss'
-                proxy['cipher'] = 'aes-256-gcm'
-                proxy['password'] = node['password']
-            else:
-                proxy['type'] = p
-                proxy['password'] = node['password']
-            proxies.append(proxy)
+        proxies = [proxy for line in lines if (proxy := _clash_proxy_from_uri(line))]
 
         import yaml
         clash_config = {'proxies': proxies}
