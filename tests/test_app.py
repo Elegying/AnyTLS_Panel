@@ -3531,6 +3531,7 @@ proxies:
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
+        self.assertIn("stevedore==5.8.0", dev_input)
 
     def test_deploy_rejects_symlinked_data_marker(self):
         script = REPO_ROOT / "deploy.sh"
