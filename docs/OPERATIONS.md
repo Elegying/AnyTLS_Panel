@@ -13,6 +13,8 @@
 
 部署脚本会先校验 `python3` 版本和 venv/pip 可用性，不满足要求时会在修改系统前失败退出。旧版发行版即使包管理器受支持，也可能因默认 Python 版本过低而不适用。
 
+Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希的 `requirements.txt`。部署在停服前下载、校验并试装全部依赖，切换阶段不再访问 PyPI。
+
 ## 部署
 
 在线部署：
@@ -69,6 +71,7 @@ bash deploy.sh
 3. 写入 `/etc/caddy/anytls-panel.d/<服务名>.caddy`，并安全地导入现有 Caddyfile。
 4. 指定 Let’s Encrypt ACME 接口签发证书，自动将 HTTP 跳转至 HTTPS。
 5. 等待 `https://<域名>/login` 通过真实证书校验后才报告部署成功。
+6. 为面板和 Caddy 配置异常自动拉起，并安装每分钟运行一次的本机端到端健康检查 timer。
 
 生成的站点配置等价于：
 
@@ -141,13 +144,21 @@ rm -rf -- "$staging_dir"
 trap - EXIT
 ```
 
-重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库：
+重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库。脚本先完成源码暂存、带哈希依赖下载和独立数据库初始化测试，再停止服务进行短切换；切换后任一步失败都会自动恢复旧代码、数据库、systemd 和 Caddy 配置：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
 ```
 
 更新时会再次询问面板域名，已有数据库不会再次询问或覆盖管理员凭据。自动化更新可设置 `ANYTLS_PANEL_DOMAIN`。如果使用自定义目录、服务名或 `/etc/anytls-panel/` 下的密钥文件，更新时需要继续传入相同环境变量。
+
+部署成功后可检查保活状态：
+
+```bash
+systemctl is-active anytls-panel caddy anytls-panel-healthcheck.timer
+systemctl list-timers anytls-panel-healthcheck.timer --all
+journalctl -u anytls-panel-healthcheck.service -n 30 --no-pager
+```
 
 回滚时重新部署上一个已验证标签，再检查数据库完整性、服务日志、登录和订阅输出：
 

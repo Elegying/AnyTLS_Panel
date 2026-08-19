@@ -30,6 +30,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/d
 
 首次部署会依次提示输入面板管理员用户名、隐藏输入并确认密码，以及面板域名。请先把域名的 A/AAAA 记录指向服务器，并在云安全组/防火墙放行 TCP 80 和 443。脚本会安装 Caddy、从 Let’s Encrypt 自动签发证书、启用 HTTP→HTTPS 跳转，并由 Caddy 在后台自动续签。
 
+部署会先在独立暂存目录下载锁定依赖、创建测试环境并完成应用初始化验证，之后才短暂停止线上服务进行切换。切换、数据库迁移、Caddy 或健康检查失败时会自动恢复旧代码、数据库和系统配置。不要直接修改 `requirements.txt`；调整依赖时更新 `requirements.in` 并重新生成带哈希的锁文件。
+
 无人值守部署可预先设置 `ANYTLS_ADMIN_USER`、`ANYTLS_ADMIN_PASS` 和 `ANYTLS_PANEL_DOMAIN`；已有数据库更新时保留原管理员账号，只需输入域名。
 
 ### 方式二：克隆部署
@@ -192,6 +194,9 @@ AnyTLS_Panel/
 - ✅ 密码使用带随机盐的 PBKDF2-SHA256，并兼容旧 SHA256 哈希自动升级
 - ✅ Secret Key 原子持久化，避免并发启动产生不同会话密钥
 - ✅ 订阅拉取拒绝常规内网/回环目标，并限制重定向和响应体大小
+- ✅ 订阅连接固定到已验证的公网 IP，阻断 DNS 重绑定到内网地址
+- ✅ systemd 自动拉起面板与 Caddy，每分钟执行本机 HTTP/HTTPS 健康检查
+- ✅ 更新前预构建依赖并验证应用，切换失败自动恢复上一版本和数据库
 
 生产部署会自动把 Gunicorn 绑定到 `127.0.0.1`，并写入独立的 Caddy 站点片段 `/etc/caddy/anytls-panel.d/anytls-panel.caddy`。Caddy 使用 Let’s Encrypt ACME 接口签发受信任证书并自动续签；这里不会使用自签证书。
 

@@ -29,6 +29,25 @@ CADDYFILE="$CADDY_CONFIG_DIR/Caddyfile"
 CADDY_INSTALLED_NOW=0
 CADDYFILE_PREEXISTED=0
 [[ -e "$CADDYFILE" || -L "$CADDYFILE" ]] && CADDYFILE_PREEXISTED=1
+STAGE_DIR=""
+RELEASE_SOURCE=""
+WHEELHOUSE=""
+ROLLBACK_DIR=""
+CUTOVER_STARTED=0
+ROLLBACK_FINISHED=0
+DEPLOY_SUCCEEDED=0
+OLD_PANEL_ACTIVE=0
+OLD_CADDY_ACTIVE=0
+OLD_HEALTH_TIMER_ACTIVE=0
+OLD_INSTALL_PRESENT=0
+CODE_BACKED_UP=0
+DATABASE_BACKED_UP=0
+DATABASE_STATE_CAPTURED=0
+CONFIG_BACKED_UP=0
+HEALTHCHECK_SCRIPT=""
+HEALTHCHECK_SERVICE=""
+HEALTHCHECK_TIMER=""
+CADDY_RESTART_DROPIN=""
 
 log() {
     printf '[anytls-panel] %s\n' "$*"
@@ -36,8 +55,34 @@ log() {
 
 fail() {
     printf '[anytls-panel] ERROR: %s\n' "$*" >&2
+    if [[ "${CUTOVER_STARTED:-0}" -eq 1 && "${ROLLBACK_FINISHED:-0}" -eq 0 ]] && \
+       declare -F rollback_deployment >/dev/null 2>&1; then
+        rollback_deployment || true
+    fi
     exit 1
 }
+
+cleanup_deploy_artifacts() {
+    if [[ -n "${STAGE_DIR:-}" && -d "$STAGE_DIR" ]]; then
+        rm -rf -- "$STAGE_DIR"
+    fi
+    if [[ "${DEPLOY_SUCCEEDED:-0}" -eq 1 && -n "${ROLLBACK_DIR:-}" && \
+          -d "$ROLLBACK_DIR" ]]; then
+        rm -rf -- "$ROLLBACK_DIR"
+    fi
+}
+
+handle_deploy_error() {
+    local status="$1"
+    trap - ERR
+    if [[ "${CUTOVER_STARTED:-0}" -eq 1 && "${ROLLBACK_FINISHED:-0}" -eq 0 ]]; then
+        rollback_deployment || true
+    fi
+    exit "$status"
+}
+
+trap 'handle_deploy_error $?' ERR
+trap cleanup_deploy_artifacts EXIT
 
 require_interactive_terminal() {
     if [[ ! -r /dev/tty || ! -w /dev/tty ]]; then
@@ -268,6 +313,10 @@ validate_configuration() {
     if [[ "$SESSION_COOKIE_SECURE" != "1" || "$TRUST_PROXY" != "1" ]]; then
         fail "automatic HTTPS requires secure cookies and trusted proxy handling"
     fi
+    HEALTHCHECK_SCRIPT="/usr/local/sbin/${SERVICE_NAME}-healthcheck"
+    HEALTHCHECK_SERVICE="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-healthcheck.service"
+    HEALTHCHECK_TIMER="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-healthcheck.timer"
+    CADDY_RESTART_DROPIN="${SYSTEMD_UNIT_DIR}/caddy.service.d/${SERVICE_NAME}-restart.conf"
 }
 
 install_packages() {
@@ -333,7 +382,7 @@ ensure_runtime() {
     local cmd_pkg cmd pkg
     for cmd_pkg in \
         "python3:python3" "git:git" "curl:curl" \
-        "systemctl:systemd" "runuser:util-linux"; do
+        "systemctl:systemd" "runuser:util-linux" "flock:util-linux"; do
         cmd="${cmd_pkg%%:*}"
         pkg="${cmd_pkg##*:}"
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$pkg")
@@ -392,6 +441,160 @@ stop_service_for_update() {
             fail "existing service did not stop cleanly"
         fi
     fi
+}
+
+backup_optional_file() {
+    local source_path="$1"
+    local backup_name="$2"
+    if [[ -e "$source_path" || -L "$source_path" ]]; then
+        cp -a -- "$source_path" "$ROLLBACK_DIR/$backup_name"
+    else
+        : > "$ROLLBACK_DIR/$backup_name.absent"
+    fi
+}
+
+restore_optional_file() {
+    local target_path="$1"
+    local backup_name="$2"
+    if [[ -f "$ROLLBACK_DIR/$backup_name.absent" ]]; then
+        rm -f -- "$target_path"
+    elif [[ -e "$ROLLBACK_DIR/$backup_name" || -L "$ROLLBACK_DIR/$backup_name" ]]; then
+        install -d -m 755 "${target_path%/*}"
+        cp -a -- "$ROLLBACK_DIR/$backup_name" "$target_path"
+    fi
+}
+
+backup_configuration_for_rollback() {
+    local site_file="$CADDY_SITES_DIR/${SERVICE_NAME}.caddy"
+    backup_optional_file "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service" panel.service
+    backup_optional_file "$CADDYFILE" Caddyfile
+    backup_optional_file "$site_file" caddy-site
+    backup_optional_file "$HEALTHCHECK_SCRIPT" healthcheck-script
+    backup_optional_file "$HEALTHCHECK_SERVICE" healthcheck.service
+    backup_optional_file "$HEALTHCHECK_TIMER" healthcheck.timer
+    backup_optional_file "$CADDY_RESTART_DROPIN" caddy-restart.conf
+    backup_optional_file "$SECRET_KEY_FILE" secret-key
+    backup_optional_file "$TRAFFIC_API_TOKEN_FILE" traffic-api-token
+    backup_optional_file "$ADMIN_PASSWORD_FILE" admin-password
+    backup_optional_file "$DATA_DIR/.anytls-panel-data" data-marker
+    CONFIG_BACKED_UP=1
+}
+
+backup_database_for_rollback() {
+    local database_file="$DATA_DIR/anytls.db"
+    if [[ ! -f "$database_file" ]]; then
+        DATABASE_STATE_CAPTURED=1
+        return
+    fi
+    python3 - "$database_file" "$ROLLBACK_DIR/anytls.db" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1], timeout=30) as source, \
+     sqlite3.connect(sys.argv[2], timeout=30) as target:
+    source.backup(target)
+    if target.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+        raise SystemExit('rollback database quick_check failed')
+PY
+    chmod 600 "$ROLLBACK_DIR/anytls.db"
+    DATABASE_BACKED_UP=1
+    DATABASE_STATE_CAPTURED=1
+}
+
+backup_current_release() {
+    install -d -m 700 "$ROLLBACK_DIR/code"
+    # Mark the backup active before moving anything so a mid-loop failure
+    # restores even a partially moved release.
+    CODE_BACKED_UP=1
+    if [[ -d "$PANEL_DIR" ]]; then
+        while IFS= read -r -d '' entry; do
+            mv -- "$entry" "$ROLLBACK_DIR/code/"
+        done < <(find "$PANEL_DIR" -mindepth 1 -maxdepth 1 ! -name data -print0)
+    fi
+}
+
+begin_cutover() {
+    ROLLBACK_DIR="$(mktemp -d "${PANEL_DIR%/*}/.${SERVICE_NAME}-rollback.XXXXXX")"
+    chmod 700 "$ROLLBACK_DIR"
+    if [[ -f "$PANEL_DIR/.anytls-panel-install" && ! -L "$PANEL_DIR/.anytls-panel-install" ]] && \
+       [[ "$(< "$PANEL_DIR/.anytls-panel-install")" == "anytls-panel-managed-v1" ]]; then
+        OLD_INSTALL_PRESENT=1
+    fi
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        OLD_PANEL_ACTIVE=1
+    fi
+    if systemctl is-active --quiet caddy; then
+        OLD_CADDY_ACTIVE=1
+    fi
+    if systemctl is-active --quiet "${SERVICE_NAME}-healthcheck.timer"; then
+        OLD_HEALTH_TIMER_ACTIVE=1
+    fi
+    backup_configuration_for_rollback
+    CUTOVER_STARTED=1
+
+    systemctl stop "${SERVICE_NAME}-healthcheck.timer" >/dev/null 2>&1 || true
+    systemctl stop "${SERVICE_NAME}-healthcheck.service" >/dev/null 2>&1 || true
+    stop_service_for_update
+    prepare_state_directory
+    backup_database_for_rollback
+    backup_current_release
+}
+
+rollback_deployment() {
+    [[ "${ROLLBACK_FINISHED:-0}" -eq 0 ]] || return 0
+    ROLLBACK_FINISHED=1
+    printf '[anytls-panel] deployment failed; restoring the previous release\n' >&2
+
+    systemctl stop "${SERVICE_NAME}-healthcheck.timer" >/dev/null 2>&1 || true
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+
+    if [[ "$CODE_BACKED_UP" -eq 1 && -d "$PANEL_DIR" ]]; then
+        find "$PANEL_DIR" -mindepth 1 -maxdepth 1 ! -name data \
+            -exec rm -rf -- {} +
+        if [[ -d "$ROLLBACK_DIR/code" ]]; then
+            while IFS= read -r -d '' entry; do
+                mv -- "$entry" "$PANEL_DIR/"
+            done < <(find "$ROLLBACK_DIR/code" -mindepth 1 -maxdepth 1 -print0)
+        fi
+    fi
+    if [[ "$OLD_INSTALL_PRESENT" -eq 0 ]]; then
+        rm -f -- "$PANEL_DIR/.anytls-panel-install"
+    fi
+
+    if [[ "$DATABASE_STATE_CAPTURED" -eq 1 ]]; then
+        rm -f -- "$DATA_DIR/anytls.db" "$DATA_DIR/anytls.db-wal" "$DATA_DIR/anytls.db-shm"
+        if [[ "$DATABASE_BACKED_UP" -eq 1 ]]; then
+            cp -a -- "$ROLLBACK_DIR/anytls.db" "$DATA_DIR/anytls.db"
+            chown "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIR/anytls.db" || true
+            chmod 600 "$DATA_DIR/anytls.db" || true
+        fi
+    fi
+
+    if [[ "$CONFIG_BACKED_UP" -eq 1 ]]; then
+        restore_optional_file "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service" panel.service
+        restore_optional_file "$CADDYFILE" Caddyfile
+        restore_optional_file "$CADDY_SITES_DIR/${SERVICE_NAME}.caddy" caddy-site
+        restore_optional_file "$HEALTHCHECK_SCRIPT" healthcheck-script
+        restore_optional_file "$HEALTHCHECK_SERVICE" healthcheck.service
+        restore_optional_file "$HEALTHCHECK_TIMER" healthcheck.timer
+        restore_optional_file "$CADDY_RESTART_DROPIN" caddy-restart.conf
+        restore_optional_file "$SECRET_KEY_FILE" secret-key
+        restore_optional_file "$TRAFFIC_API_TOKEN_FILE" traffic-api-token
+        restore_optional_file "$ADMIN_PASSWORD_FILE" admin-password
+        restore_optional_file "$DATA_DIR/.anytls-panel-data" data-marker
+    fi
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if [[ "$OLD_PANEL_ACTIVE" -eq 1 ]]; then
+        systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ "$OLD_CADDY_ACTIVE" -eq 1 ]]; then
+        systemctl reload-or-restart caddy >/dev/null 2>&1 || true
+    fi
+    if [[ "$OLD_HEALTH_TIMER_ACTIVE" -eq 1 ]]; then
+        systemctl enable --now "${SERVICE_NAME}-healthcheck.timer" >/dev/null 2>&1 || true
+    fi
+    CUTOVER_STARTED=0
 }
 
 prepare_state_directory() {
@@ -465,54 +668,41 @@ prepare_external_secret_directories() {
     validate_secret_paths
 }
 
-sync_project_files() {
-    # Revalidate immediately before any cleanup; the root-owned parent prevents
-    # unprivileged replacement of the target directory between both checks.
+prepare_release_source() {
     validate_panel_dir
     validate_install_target
-    mkdir -p "$PANEL_DIR"
+    STAGE_DIR="$(mktemp -d "${PANEL_DIR%/*}/.${SERVICE_NAME}-stage.XXXXXX")"
+    chmod 700 "$STAGE_DIR"
+    RELEASE_SOURCE="$STAGE_DIR/source"
+    install -d -m 755 "$RELEASE_SOURCE"
 
     if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/app.py" ]]; then
-        log "copying local project files to $PANEL_DIR"
-        find "$PANEL_DIR" -mindepth 1 -maxdepth 1 \
-            ! -name data \
-            -exec rm -rf {} +
-        cp "$SCRIPT_DIR/app.py" "$SCRIPT_DIR/security_utils.py" \
-            "$SCRIPT_DIR/traffic_token.py" \
-            "$SCRIPT_DIR/requirements.txt" "$PANEL_DIR/"
-        if [[ -f "$SCRIPT_DIR/uninstall.sh" ]]; then
-            cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"
-            chmod +x "$PANEL_DIR/uninstall.sh" 2>/dev/null || true
+        log "staging local project files before touching the active release"
+        find "$SCRIPT_DIR" -mindepth 1 -maxdepth 1 \
+            ! -name .git ! -name .venv ! -name venv ! -name data \
+            ! -name .anytls-panel-install ! -name .anytls-panel-data \
+            -exec cp -a -t "$RELEASE_SOURCE" -- {} +
+    else
+        log "fetching project from $REPO_URL ($REPO_REF) before stopping the service"
+        local clone_dir="$STAGE_DIR/clone"
+        git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$clone_dir" -q
+        local source_dir="$clone_dir"
+        if [[ -n "$REPO_SUBDIR" ]]; then
+            source_dir="$clone_dir/$REPO_SUBDIR"
         fi
-        mkdir -p "$PANEL_DIR/templates" "$PANEL_DIR/static"
-        cp "$SCRIPT_DIR"/templates/*.html "$PANEL_DIR/templates/"
-        if compgen -G "$SCRIPT_DIR/static/*" >/dev/null; then
-            cp -R "$SCRIPT_DIR"/static/. "$PANEL_DIR/static/"
-        fi
-        printf '%s\n' 'anytls-panel-managed-v1' > "$PANEL_DIR/.anytls-panel-install"
-        return
+        [[ -d "$source_dir" ]] || fail "project source directory not found: $source_dir"
+        find "$source_dir" -mindepth 1 -maxdepth 1 \
+            ! -name .git ! -name .venv ! -name venv ! -name data \
+            ! -name .anytls-panel-install ! -name .anytls-panel-data \
+            -exec cp -a -t "$RELEASE_SOURCE" -- {} +
     fi
 
-    log "fetching project from $REPO_URL ($REPO_REF)"
-
-    local tmp_dir
-    local source_dir
-    tmp_dir="$(mktemp -d /tmp/anytls-panel.XXXXXX)"
-    git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$tmp_dir" -q
-    source_dir="$tmp_dir"
-    if [[ -n "$REPO_SUBDIR" ]]; then
-        source_dir="$tmp_dir/$REPO_SUBDIR"
-    fi
-    if [[ ! -f "$source_dir/app.py" ]]; then
-        rm -rf "$tmp_dir"
-        fail "project files not found: $source_dir"
-    fi
-    find "$PANEL_DIR" -mindepth 1 -maxdepth 1 \
-        ! -name data \
-        -exec rm -rf {} +
-    cp -R "$source_dir"/. "$PANEL_DIR"/
-    printf '%s\n' 'anytls-panel-managed-v1' > "$PANEL_DIR/.anytls-panel-install"
-    rm -rf "$tmp_dir"
+    for required_file in app.py security_utils.py traffic_token.py requirements.txt; do
+        [[ -f "$RELEASE_SOURCE/$required_file" ]] || \
+            fail "staged project is missing $required_file"
+    done
+    [[ -f "$RELEASE_SOURCE/templates/base.html" ]] || \
+        fail "staged project templates are incomplete"
 }
 
 generate_api_token() {
@@ -600,17 +790,55 @@ prepare_traffic_api_token() {
     chmod 600 "$TRAFFIC_API_TOKEN_FILE" 2>/dev/null || true
 }
 
-install_python_deps() {
-    cd "$PANEL_DIR"
-    if [[ -e venv || -L venv ]]; then
-        fail "refusing to reuse a pre-existing virtual environment"
-    fi
-    log "creating a fresh root-owned Python virtual environment"
-    python3 -m venv venv
+prepare_python_artifacts() {
+    local build_venv="$STAGE_DIR/build-venv"
+    WHEELHOUSE="$STAGE_DIR/wheelhouse"
+    install -d -m 755 "$WHEELHOUSE"
 
-    log "installing Python dependencies"
-    "$PANEL_DIR/venv/bin/python" -m pip install --upgrade pip -q
-    "$PANEL_DIR/venv/bin/python" -m pip install -q -r requirements.txt
+    log "resolving and validating Python dependencies before stopping the service"
+    python3 -m venv "$build_venv"
+    "$build_venv/bin/python" -m pip install --upgrade pip -q
+    "$build_venv/bin/python" -m pip download \
+        --require-hashes --dest "$WHEELHOUSE" \
+        -r "$RELEASE_SOURCE/requirements.txt" -q
+    "$build_venv/bin/python" -m pip install \
+        --require-hashes --no-index --find-links "$WHEELHOUSE" \
+        -r "$RELEASE_SOURCE/requirements.txt" -q
+
+    local smoke_dir="$STAGE_DIR/smoke"
+    install -d -m 700 "$smoke_dir"
+    (
+        cd "$RELEASE_SOURCE"
+        env \
+            ANYTLS_DATABASE="$smoke_dir/anytls.db" \
+            ANYTLS_SECRET_KEY_FILE="$smoke_dir/.secret_key" \
+            ANYTLS_TRAFFIC_API_TOKEN_FILE="$smoke_dir/.traffic_api_token" \
+            ANYTLS_ADMIN_PASSWORD_FILE="$smoke_dir/.initial_admin_password" \
+            ANYTLS_ADMIN_USER="smoke-admin" \
+            ANYTLS_ADMIN_PASS="smoke-password" \
+            "$build_venv/bin/python" - <<'PY'
+import app
+app.init_db()
+assert app.get_initial_admin_credentials()[0] == 'smoke-admin'
+PY
+    )
+}
+
+install_staged_release() {
+    validate_panel_dir
+    mkdir -p "$PANEL_DIR"
+    find "$RELEASE_SOURCE" -mindepth 1 -maxdepth 1 \
+        -exec cp -a -t "$PANEL_DIR" -- {} +
+    install -o root -g root -m 600 /dev/null "$PANEL_DIR/.anytls-panel-install"
+    printf '%s\n' 'anytls-panel-managed-v1' > "$PANEL_DIR/.anytls-panel-install"
+
+    [[ ! -e "$PANEL_DIR/venv" && ! -L "$PANEL_DIR/venv" ]] || \
+        fail "new release target unexpectedly contains a virtual environment"
+    log "installing the pre-fetched dependency set without network access"
+    python3 -m venv "$PANEL_DIR/venv"
+    "$PANEL_DIR/venv/bin/python" -m pip install \
+        --require-hashes --no-index --find-links "$WHEELHOUSE" \
+        -r "$PANEL_DIR/requirements.txt" -q
 }
 
 prepare_runtime_permissions() {
@@ -705,6 +933,97 @@ Environment=ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=${ALLOW_PRIVATE_SUBSCRIPTIONS}
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+
+write_keepalive_config() {
+    log "installing service recovery and end-to-end health checks"
+    local script_tmp service_tmp timer_tmp caddy_tmp
+    script_tmp="$(mktemp /tmp/anytls-healthcheck.XXXXXX)"
+    service_tmp="$(mktemp /tmp/anytls-healthcheck-service.XXXXXX)"
+    timer_tmp="$(mktemp /tmp/anytls-healthcheck-timer.XXXXXX)"
+    caddy_tmp="$(mktemp /tmp/anytls-caddy-restart.XXXXXX)"
+
+    cat > "$script_tmp" <<EOF
+#!/usr/bin/env bash
+set -u
+
+exec 9>/run/lock/${SERVICE_NAME}-healthcheck.lock
+flock -n 9 || exit 0
+
+probe_backend() {
+    curl --fail --silent --show-error --output /dev/null \\
+        --connect-timeout 3 --max-time 8 \\
+        http://127.0.0.1:${PORT}/login
+}
+
+probe_https() {
+    curl --fail --silent --show-error --output /dev/null \\
+        --connect-timeout 3 --max-time 8 \\
+        --resolve ${PANEL_DOMAIN}:443:127.0.0.1 \\
+        https://${PANEL_DOMAIN}/login
+}
+
+if ! systemctl is-active --quiet ${SERVICE_NAME} || ! probe_backend; then
+    logger -p daemon.warning -t ${SERVICE_NAME}-healthcheck \\
+        'panel health probe failed; restarting ${SERVICE_NAME}'
+    systemctl restart ${SERVICE_NAME}
+    sleep 3
+    probe_backend || exit 1
+fi
+
+if ! systemctl is-active --quiet caddy || ! probe_https; then
+    logger -p daemon.warning -t ${SERVICE_NAME}-healthcheck \\
+        'HTTPS health probe failed; recovering Caddy'
+    systemctl reload-or-restart caddy
+    sleep 3
+    probe_https || exit 1
+fi
+EOF
+
+    cat > "$service_tmp" <<EOF
+[Unit]
+Description=AnyTLS Panel local health check and recovery (${SERVICE_NAME})
+After=network-online.target ${SERVICE_NAME}.service caddy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${HEALTHCHECK_SCRIPT}
+TimeoutStartSec=30s
+EOF
+
+    cat > "$timer_tmp" <<EOF
+[Unit]
+Description=Run the AnyTLS Panel health check every minute (${SERVICE_NAME})
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+RandomizedDelaySec=10s
+Persistent=true
+Unit=${SERVICE_NAME}-healthcheck.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    cat > "$caddy_tmp" <<'EOF'
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+EOF
+
+    install -o root -g root -m 755 "$script_tmp" "$HEALTHCHECK_SCRIPT"
+    install -o root -g root -m 644 "$service_tmp" "$HEALTHCHECK_SERVICE"
+    install -o root -g root -m 644 "$timer_tmp" "$HEALTHCHECK_TIMER"
+    install -d -o root -g root -m 755 "${CADDY_RESTART_DROPIN%/*}"
+    install -o root -g root -m 644 "$caddy_tmp" "$CADDY_RESTART_DROPIN"
+    rm -f -- "$script_tmp" "$service_tmp" "$timer_tmp" "$caddy_tmp"
 }
 
 start_service() {
@@ -837,6 +1156,14 @@ start_https_proxy() {
     fail "Let's Encrypt certificate verification timed out; check DNS and public ports 80/443"
 }
 
+start_keepalive() {
+    systemctl daemon-reload
+    systemctl enable --now "${SERVICE_NAME}-healthcheck.timer" >/dev/null
+    systemctl start "${SERVICE_NAME}-healthcheck.service"
+    systemctl is-active --quiet "${SERVICE_NAME}-healthcheck.timer" || \
+        fail "health-check timer failed to start"
+}
+
 print_summary() {
     echo
     log "deployment succeeded"
@@ -870,21 +1197,25 @@ main() {
     verify_domain_resolution
     ensure_caddy
     ensure_service_user
-    stop_service_for_update
-    prepare_state_directory
-    sync_project_files
+    prepare_release_source
+    prepare_python_artifacts
+    begin_cutover
+    install_staged_release
     prepare_external_secret_directories
     persist_admin_password
     prepare_traffic_api_token
     prepare_secret_key
-    install_python_deps
     prepare_runtime_permissions
     initialize_database
     secure_panel_permissions
     write_service
+    write_keepalive_config
     start_service
     write_caddy_config
     start_https_proxy
+    start_keepalive
+    DEPLOY_SUCCEEDED=1
+    CUTOVER_STARTED=0
     print_summary
 }
 
