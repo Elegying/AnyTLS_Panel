@@ -857,16 +857,19 @@ prepare_runtime_permissions() {
 
 initialize_database() {
     log "initializing and migrating the database"
-    runuser -u "$SERVICE_USER" -- env \
-        ANYTLS_DATABASE="$DATA_DIR/anytls.db" \
-        ANYTLS_SECRET_KEY_FILE="$SECRET_KEY_FILE" \
-        ANYTLS_TRAFFIC_API_TOKEN_FILE="$TRAFFIC_API_TOKEN_FILE" \
-        ANYTLS_ADMIN_PASSWORD_FILE="$ADMIN_PASSWORD_FILE" \
-        ANYTLS_ADMIN_USER="$ADMIN_USER" \
-        "$PANEL_DIR/venv/bin/python" - <<'PY'
+    (
+        cd "$PANEL_DIR"
+        runuser -u "$SERVICE_USER" -- env \
+            ANYTLS_DATABASE="$DATA_DIR/anytls.db" \
+            ANYTLS_SECRET_KEY_FILE="$SECRET_KEY_FILE" \
+            ANYTLS_TRAFFIC_API_TOKEN_FILE="$TRAFFIC_API_TOKEN_FILE" \
+            ANYTLS_ADMIN_PASSWORD_FILE="$ADMIN_PASSWORD_FILE" \
+            ANYTLS_ADMIN_USER="$ADMIN_USER" \
+            "$PANEL_DIR/venv/bin/python" - <<'PY'
 import app
 app.init_db()
 PY
+    )
 }
 
 secure_panel_permissions() {
