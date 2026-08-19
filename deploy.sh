@@ -9,8 +9,9 @@ SERVICE_NAME="${ANYTLS_SERVICE_NAME:-anytls-panel}"
 SERVICE_USER="${ANYTLS_SERVICE_USER:-anytls-panel}"
 BIND_HOST="${ANYTLS_BIND_HOST:-127.0.0.1}"
 SESSION_COOKIE_SECURE="${ANYTLS_SESSION_COOKIE_SECURE:-1}"
-TRUST_PROXY="${ANYTLS_TRUST_PROXY:-0}"
+TRUST_PROXY="${ANYTLS_TRUST_PROXY:-1}"
 ALLOW_PRIVATE_SUBSCRIPTIONS="${ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS:-0}"
+PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
 REPO_REF="${ANYTLS_REPO_REF:-main}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
@@ -22,6 +23,12 @@ SECRET_KEY_FILE=""
 TRAFFIC_API_TOKEN_FILE=""
 ADMIN_PASSWORD_FILE=""
 SYSTEMD_UNIT_DIR="/etc/systemd/system"
+CADDY_CONFIG_DIR="/etc/caddy"
+CADDY_SITES_DIR="$CADDY_CONFIG_DIR/anytls-panel.d"
+CADDYFILE="$CADDY_CONFIG_DIR/Caddyfile"
+CADDY_INSTALLED_NOW=0
+CADDYFILE_PREEXISTED=0
+[[ -e "$CADDYFILE" || -L "$CADDYFILE" ]] && CADDYFILE_PREEXISTED=1
 
 log() {
     printf '[anytls-panel] %s\n' "$*"
@@ -30,6 +37,55 @@ log() {
 fail() {
     printf '[anytls-panel] ERROR: %s\n' "$*" >&2
     exit 1
+}
+
+require_interactive_terminal() {
+    if [[ ! -r /dev/tty || ! -w /dev/tty ]]; then
+        fail "$1 must be set for non-interactive deployment"
+    fi
+}
+
+validate_admin_user() {
+    if ! [[ "$ADMIN_USER" =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$ ]]; then
+        fail "administrator username must be 1-64 characters: letters, numbers, . _ @ -"
+    fi
+}
+
+validate_admin_password() {
+    if (( ${#ADMIN_PASS} < 8 || ${#ADMIN_PASS} > 128 )); then
+        fail "administrator password must be 8-128 characters"
+    fi
+    if [[ "$ADMIN_PASS" == *$'\n'* || "$ADMIN_PASS" == *$'\r'* ]]; then
+        fail "administrator password must not contain line breaks"
+    fi
+}
+
+validate_panel_domain() {
+    PANEL_DOMAIN="${PANEL_DOMAIN%.}"
+    PANEL_DOMAIN="${PANEL_DOMAIN,,}"
+    if (( ${#PANEL_DOMAIN} < 4 || ${#PANEL_DOMAIN} > 253 )) || \
+       [[ "$PANEL_DOMAIN" != *.* ]] || \
+       [[ "$PANEL_DOMAIN" =~ ^[0-9.]+$ ]]; then
+        fail "panel domain must be a public DNS name such as panel.example.com"
+    fi
+
+    local label
+    local labels=()
+    IFS='.' read -r -a labels <<< "$PANEL_DOMAIN"
+    for label in "${labels[@]}"; do
+        if (( ${#label} < 1 || ${#label} > 63 )) || \
+           ! [[ "$label" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$ ]]; then
+            fail "invalid panel domain: $PANEL_DOMAIN"
+        fi
+    done
+}
+
+prepare_panel_domain() {
+    if [[ -z "$PANEL_DOMAIN" ]]; then
+        require_interactive_terminal "ANYTLS_PANEL_DOMAIN"
+        read -r -p "Panel domain (for example panel.example.com): " PANEL_DOMAIN </dev/tty
+    fi
+    validate_panel_domain
 }
 
 validate_panel_dir() {
@@ -206,6 +262,12 @@ validate_configuration() {
             fail "security flags must be 0 or 1"
         fi
     done
+    if [[ "$BIND_HOST" != "127.0.0.1" && "$BIND_HOST" != "::1" ]]; then
+        fail "automatic HTTPS requires ANYTLS_BIND_HOST to remain on loopback"
+    fi
+    if [[ "$SESSION_COOKIE_SECURE" != "1" || "$TRUST_PROXY" != "1" ]]; then
+        fail "automatic HTTPS requires secure cookies and trusted proxy handling"
+    fi
 }
 
 install_packages() {
@@ -303,6 +365,22 @@ ensure_runtime() {
     else
         rm -rf "$probe_dir"
     fi
+}
+
+ensure_caddy() {
+    if command -v caddy >/dev/null 2>&1; then
+        systemctl cat caddy.service >/dev/null 2>&1 || \
+            fail "the caddy command exists but caddy.service is not installed"
+        return
+    fi
+
+    log "installing Caddy for automatic Let's Encrypt HTTPS"
+    if ! install_packages caddy; then
+        fail "Caddy is unavailable from the configured package repositories"
+    fi
+    command -v caddy >/dev/null 2>&1 || fail "Caddy installation did not provide the caddy command"
+    systemctl cat caddy.service >/dev/null 2>&1 || fail "Caddy installation did not provide caddy.service"
+    CADDY_INSTALLED_NOW=1
 }
 
 stop_service_for_update() {
@@ -437,16 +515,6 @@ sync_project_files() {
     rm -rf "$tmp_dir"
 }
 
-generate_password() {
-    python3 - <<'PY'
-import secrets
-import string
-
-alphabet = string.ascii_letters + string.digits
-print(''.join(secrets.choice(alphabet) for _ in range(18)))
-PY
-}
-
 generate_api_token() {
     python3 - <<'PY'
 import secrets
@@ -464,20 +532,38 @@ PY
 }
 
 prepare_admin_credentials() {
-    ADMIN_USER="${ANYTLS_ADMIN_USER:-admin}"
+    ADMIN_USER="${ANYTLS_ADMIN_USER:-}"
     ADMIN_PASS="${ANYTLS_ADMIN_PASS:-}"
-    GENERATED_ADMIN_PASS=0
     FRESH_DB=0
-    if [[ ! -f "$DATA_DIR/anytls.db" ]]; then
+    if [[ ! -f "$DATA_DIR/anytls.db" && ! -f "$PANEL_DIR/anytls.db" ]]; then
         FRESH_DB=1
     fi
-    if [[ -z "$ADMIN_PASS" ]]; then
-        ADMIN_PASS="$(generate_password)"
-        GENERATED_ADMIN_PASS=1
+
+    if [[ "$FRESH_DB" -ne 1 ]]; then
+        return
     fi
+
+    if [[ -z "$ADMIN_USER" ]]; then
+        require_interactive_terminal "ANYTLS_ADMIN_USER"
+        read -r -p "Panel administrator username: " ADMIN_USER </dev/tty
+    fi
+    validate_admin_user
+
+    if [[ -z "$ADMIN_PASS" ]]; then
+        require_interactive_terminal "ANYTLS_ADMIN_PASS"
+        local password_confirmation=""
+        read -r -s -p "Panel administrator password (8-128 characters): " ADMIN_PASS </dev/tty
+        printf '\n' >/dev/tty
+        read -r -s -p "Confirm panel administrator password: " password_confirmation </dev/tty
+        printf '\n' >/dev/tty
+        if [[ "$ADMIN_PASS" != "$password_confirmation" ]]; then
+            fail "administrator passwords do not match"
+        fi
+    fi
+    validate_admin_password
 }
 
-persist_generated_admin_password() {
+persist_admin_password() {
     if [[ "$FRESH_DB" -eq 1 ]]; then
         validate_secret_paths
         install -m 600 /dev/null "$ADMIN_PASSWORD_FILE"
@@ -632,28 +718,136 @@ start_service() {
     }
 }
 
-print_summary() {
-    local local_ip public_ip
-    local_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    public_ip="$(curl -s -m 5 ifconfig.me 2>/dev/null || true)"
+verify_domain_resolution() {
+    local resolved_addresses
+    if ! resolved_addresses="$(python3 - "$PANEL_DOMAIN" <<'PY'
+import socket
+import sys
 
+addresses = sorted({item[4][0] for item in socket.getaddrinfo(sys.argv[1], 443)})
+print(', '.join(addresses))
+PY
+)" || [[ -z "$resolved_addresses" ]]; then
+        fail "panel domain does not currently resolve: $PANEL_DOMAIN"
+    fi
+    log "domain resolves to: $resolved_addresses"
+}
+
+render_caddy_site() {
+    cat <<EOF
+${PANEL_DOMAIN} {
+    tls {
+        ca https://acme-v02.api.letsencrypt.org/directory
+    }
+    reverse_proxy 127.0.0.1:${PORT}
+}
+EOF
+}
+
+caddyfile_contains_only_panel_site() {
+    [[ -f "$CADDYFILE" ]] || return 1
+    local compact
+    compact="$(sed '/^[[:space:]]*#/d' "$CADDYFILE" | tr -d '[:space:]')"
+    [[ "$compact" == "${PANEL_DOMAIN}{reverse_proxy127.0.0.1:${PORT}}" || \
+       "$compact" == "${PANEL_DOMAIN}{tls{cahttps://acme-v02.api.letsencrypt.org/directory}reverse_proxy127.0.0.1:${PORT}}" ]]
+}
+
+write_caddy_config() {
+    local site_file="$CADDY_SITES_DIR/${SERVICE_NAME}.caddy"
+    local import_line='import anytls-panel.d/*.caddy'
+    local backup_dir
+    local main_existed=0
+    local site_existed=0
+
+    if [[ -L "$CADDY_CONFIG_DIR" || -L "$CADDYFILE" || -L "$CADDY_SITES_DIR" || \
+          -L "$site_file" ]]; then
+        fail "refusing symlinked Caddy configuration paths"
+    fi
+    install -d -o root -g root -m 755 "$CADDY_CONFIG_DIR" "$CADDY_SITES_DIR"
+
+    backup_dir="$(mktemp -d "$CADDY_CONFIG_DIR/.anytls-backup.XXXXXX")"
+    chmod 700 "$backup_dir"
+    if [[ -f "$CADDYFILE" ]]; then
+        cp -a "$CADDYFILE" "$backup_dir/Caddyfile"
+        main_existed=1
+    fi
+    if [[ -f "$site_file" ]]; then
+        cp -a "$site_file" "$backup_dir/site.caddy"
+        site_existed=1
+    fi
+
+    local temp_site
+    temp_site="$(mktemp "$CADDY_CONFIG_DIR/.anytls-site.XXXXXX")"
+    render_caddy_site > "$temp_site"
+    install -o root -g root -m 644 "$temp_site" "$site_file"
+    rm -f "$temp_site"
+
+    if [[ "$CADDY_INSTALLED_NOW" -eq 1 && "$CADDYFILE_PREEXISTED" -eq 0 ]] || \
+       [[ ! -s "$CADDYFILE" ]] || \
+       caddyfile_contains_only_panel_site; then
+        printf '%s\n' "$import_line" > "$CADDYFILE"
+        chmod 644 "$CADDYFILE"
+    elif ! grep -Fqx "$import_line" "$CADDYFILE"; then
+        printf '\n%s\n' "$import_line" >> "$CADDYFILE"
+    fi
+
+    if ! caddy fmt --overwrite "$site_file" >/dev/null || \
+       ! caddy validate --config "$CADDYFILE" >/dev/null; then
+        if [[ "$main_existed" -eq 1 ]]; then
+            cp -a "$backup_dir/Caddyfile" "$CADDYFILE"
+        else
+            rm -f "$CADDYFILE"
+        fi
+        if [[ "$site_existed" -eq 1 ]]; then
+            cp -a "$backup_dir/site.caddy" "$site_file"
+        else
+            rm -f "$site_file"
+        fi
+        rm -f "$backup_dir/Caddyfile" "$backup_dir/site.caddy"
+        rmdir "$backup_dir"
+        fail "Caddy configuration validation failed; previous configuration restored"
+    fi
+
+    rm -f "$backup_dir/Caddyfile" "$backup_dir/site.caddy"
+    rmdir "$backup_dir"
+}
+
+start_https_proxy() {
+    systemctl enable caddy >/dev/null
+    local caddy_action="start"
+    if systemctl is-active --quiet caddy; then
+        caddy_action="reload"
+    fi
+    if ! systemctl "$caddy_action" caddy; then
+        journalctl -u caddy -n 80 --no-pager || true
+        fail "Caddy failed to start; ensure public TCP ports 80 and 443 are available"
+    fi
+
+    local _
+    for _ in {1..45}; do
+        if curl --resolve "${PANEL_DOMAIN}:443:127.0.0.1" \
+            --fail --silent --show-error --output /dev/null --max-time 5 \
+            "https://${PANEL_DOMAIN}/login"; then
+            return
+        fi
+        sleep 2
+    done
+
+    journalctl -u caddy -n 80 --no-pager || true
+    fail "Let's Encrypt certificate verification timed out; check DNS and public ports 80/443"
+}
+
+print_summary() {
     echo
     log "deployment succeeded"
-    if [[ "$BIND_HOST" == "127.0.0.1" || "$BIND_HOST" == "::1" ]]; then
-        echo "  Local URL:  http://${BIND_HOST}:${PORT}"
-        echo "  Panel is bound to loopback; publish it only through an HTTPS reverse proxy."
-    else
-        [[ -n "$local_ip" ]] && echo "  Local URL:  http://${local_ip}:${PORT}"
-        [[ -n "$public_ip" ]] && echo "  Public URL: http://${public_ip}:${PORT}"
-    fi
+    echo "  Panel URL:  https://${PANEL_DOMAIN}"
+    echo "  HTTPS:      Let's Encrypt certificate managed and renewed by Caddy"
     if [[ "$FRESH_DB" -eq 1 ]]; then
         echo "  Username:   ${ADMIN_USER}"
         if [[ "${ANYTLS_SHOW_SECRETS:-0}" = "1" ]]; then
             echo "  Password:   ${ADMIN_PASS}"
-        elif [[ "$GENERATED_ADMIN_PASS" -eq 1 ]]; then
-            echo "  Password file: ${ADMIN_PASSWORD_FILE}"
         else
-            echo "  Password:   hidden (set ANYTLS_SHOW_SECRETS=1 to print)"
+            echo "  Password:   hidden"
         fi
     else
         echo "  Existing database preserved; use the current admin credentials."
@@ -670,14 +864,17 @@ main() {
     validate_configuration
     validate_install_target
     validate_service_target
+    prepare_panel_domain
+    prepare_admin_credentials
     ensure_runtime
+    verify_domain_resolution
+    ensure_caddy
     ensure_service_user
     stop_service_for_update
     prepare_state_directory
     sync_project_files
     prepare_external_secret_directories
-    prepare_admin_credentials
-    persist_generated_admin_password
+    persist_admin_password
     prepare_traffic_api_token
     prepare_secret_key
     install_python_deps
@@ -686,6 +883,8 @@ main() {
     secure_panel_permissions
     write_service
     start_service
+    write_caddy_config
+    start_https_proxy
     print_summary
 }
 

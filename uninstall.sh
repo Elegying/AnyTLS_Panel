@@ -6,6 +6,7 @@ SERVICE_NAME="${ANYTLS_SERVICE_NAME:-anytls-panel}"
 CONFIRM=0
 KEEP_DATA=0
 SYSTEMD_UNIT_DIR="/etc/systemd/system"
+CADDY_SITE_FILE="/etc/caddy/anytls-panel.d/${SERVICE_NAME}.caddy"
 
 usage() {
   cat <<'EOF'
@@ -142,10 +143,23 @@ fi
 validate_install_marker
 validate_service_target
 
+if [[ -L "$CADDY_SITE_FILE" ]]; then
+  fail "refusing to remove a symlinked Caddy site: $CADDY_SITE_FILE"
+fi
+
 log "disabling service: $SERVICE_NAME"
 systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
 rm -f "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service"
 systemctl daemon-reload >/dev/null 2>&1 || true
+
+if [[ -f "$CADDY_SITE_FILE" ]]; then
+  log "removing managed Caddy site"
+  rm -f -- "$CADDY_SITE_FILE"
+  if command -v caddy >/dev/null 2>&1 && \
+     caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+    systemctl reload caddy >/dev/null 2>&1 || true
+  fi
+fi
 
 if [[ "$KEEP_DATA" -eq 1 ]]; then
   log "kept panel directory because --keep-data was set: $PANEL_DIR"
