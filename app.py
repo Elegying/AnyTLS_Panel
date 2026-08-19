@@ -843,6 +843,16 @@ def calc_traffic_percent(used_bytes, limit_gb):
     return min(round((used_bytes or 0) / limit_bytes * 100, 1), 100)
 
 
+def days_until(expire_date):
+    if not expire_date:
+        return None
+    try:
+        target_date = datetime.strptime(str(expire_date), '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return None
+    return (target_date - datetime.now().date()).days
+
+
 def parse_nonnegative_float(value, field_name):
     try:
         parsed = float(value)
@@ -895,6 +905,7 @@ def inject_utils():
     return {
         'format_bytes': format_bytes,
         'calc_traffic_percent': calc_traffic_percent,
+        'days_until': days_until,
         'now': datetime.now(),
     }
 

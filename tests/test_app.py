@@ -2013,7 +2013,7 @@ proxies:
         self.assertNotIn("value=\"' + data.url", content)
         self.assertIn("shareUrl.value = data.url", content)
 
-    def test_dashboard_account_overview_shows_expiration_after_account_name(self):
+    def test_dashboard_account_overview_shows_expiration_in_aligned_column(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
             app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
@@ -2037,9 +2037,14 @@ proxies:
 
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
+        self.assertIn("<th>到期时间</th>", html)
         account_name_index = html.index("<strong>demo-account</strong>")
         expiration_index = html.index("到期：2030-01-02")
+        node_count_index = html.index('data-label="节点数"', expiration_index)
         self.assertLess(account_name_index, expiration_index)
+        self.assertLess(expiration_index, node_count_index)
+        self.assertIn('data-label="到期时间"', html)
+        self.assertIn(f"剩余{app.days_until('2030-01-02')}天", html)
         self.assertIn("到期：未设置", html)
 
     def test_monitor_template_does_not_embed_host_in_javascript(self):
