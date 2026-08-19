@@ -52,10 +52,23 @@
     <h2>👤 账号概览</h2>
     {% if accounts %}
     <table class="rwd-table">
-        <thead><tr><th>账号</th><th>节点数</th><th>流量</th><th>状态</th><th class="hide-mobile">最后同步</th></tr></thead>
+        <thead><tr><th>账号</th><th>到期时间</th><th>节点数</th><th>流量</th><th>状态</th><th class="hide-mobile">最后同步</th></tr></thead>
         {% for a in accounts %}
         <tr class="clickable" onclick="location.href='{{ url_for('account_detail', account_id=a.id) }}'">
             <td data-label="账号"><strong>{{ a.name }}</strong></td>
+            <td data-label="到期时间" style="white-space:nowrap">
+                {% if a.expire_date %}
+                {% set remaining_days = days_until(a.expire_date) %}
+                <span style="font-size:13px">到期：{{ a.expire_date }}</span>
+                {% if remaining_days is not none %}
+                <span class="badge {{ 'badge-red' if remaining_days < 0 else 'badge-orange' if remaining_days <= 30 else 'badge-green' }}" style="margin-left:6px">
+                    {{ '已过期' ~ (-remaining_days) ~ '天' if remaining_days < 0 else '剩余' ~ remaining_days ~ '天' }}
+                </span>
+                {% endif %}
+                {% else %}
+                <span style="font-size:13px;color:var(--text2)">到期：未设置</span>
+                {% endif %}
+            </td>
             <td data-label="节点数"><span class="badge badge-blue">{{ a.node_count or 0 }} 个</span></td>
             <td data-label="流量">
                 {% set pct = calc_traffic_percent(a.traffic_used_bytes or 0, a.traffic_limit_gb or 250) %}

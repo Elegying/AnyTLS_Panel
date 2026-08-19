@@ -28,7 +28,9 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
 ```
 
-部署默认只监听 `127.0.0.1`，并启用 Secure Session Cookie；完成 HTTPS 反向代理后再从浏览器登录。不要把 Gunicorn 的明文 HTTP 端口直接开放到公网。
+首次部署会依次提示输入面板管理员用户名、隐藏输入并确认密码，以及面板域名。请先把域名的 A/AAAA 记录指向服务器，并在云安全组/防火墙放行 TCP 80 和 443。脚本会安装 Caddy、从 Let’s Encrypt 自动签发证书、启用 HTTP→HTTPS 跳转，并由 Caddy 在后台自动续签。
+
+无人值守部署可预先设置 `ANYTLS_ADMIN_USER`、`ANYTLS_ADMIN_PASS` 和 `ANYTLS_PANEL_DOMAIN`；已有数据库更新时保留原管理员账号，只需输入域名。
 
 ### 方式二：克隆部署
 
@@ -137,7 +139,7 @@ bash traffic_collector.sh
 
 当前 iptables 方案只统计 IPv4 的整个 `ANYTLS_PORT`，不能统计 IPv6，也不能区分同端口内的不同 AnyTLS 用户。因此一个采集实例只适用于“一个 IPv4 独占端口对应一个面板账号”，同一端口也只能运行一个 collector。双栈/纯 IPv6或共享端口场景必须改用 AnyTLS/进程提供的用户级指标，不能用此脚本做账号级计费。
 
-随机生成的初始管理员密码会保存到 `data/.initial_admin_password`；部署输出默认隐藏密码和流量 API token。如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
+首次输入的管理员密码会保存到仅 root 可读的 `data/.initial_admin_password`，用于数据库初始化；部署输出默认隐藏密码和流量 API token。如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
 
 ## 🛠️ 管理命令
 
@@ -154,9 +156,8 @@ journalctl -u anytls-panel -n 50 # 最近50条
 # 修改密码
 # 登录后点击左下角「修改密码」
 
-# 修改端口
-# 编辑 /etc/systemd/system/anytls-panel.service 中的端口号
-# 然后执行: systemctl daemon-reload && systemctl restart anytls-panel
+# 修改后端端口（会同步更新 Caddy 反向代理）
+ANYTLS_PANEL_DOMAIN="panel.example.com" bash deploy.sh 9090
 ```
 
 ## 📁 项目结构
@@ -192,21 +193,25 @@ AnyTLS_Panel/
 - ✅ Secret Key 原子持久化，避免并发启动产生不同会话密钥
 - ✅ 订阅拉取拒绝常规内网/回环目标，并限制重定向和响应体大小
 
-生产环境必须在面板前配置 HTTPS 反向代理。部署默认已将 Gunicorn 绑定到本机并启用 Secure Cookie；仍需显式信任这一层代理：
+生产部署会自动把 Gunicorn 绑定到 `127.0.0.1`，并写入独立的 Caddy 站点片段 `/etc/caddy/anytls-panel.d/anytls-panel.caddy`。Caddy 使用 Let’s Encrypt ACME 接口签发受信任证书并自动续签；这里不会使用自签证书。
+
+自动化部署示例：
 
 ```bash
-ANYTLS_BIND_HOST=127.0.0.1 \
-ANYTLS_SESSION_COOKIE_SECURE=1 \
-ANYTLS_TRUST_PROXY=1 \
+ANYTLS_ADMIN_USER="admin" \
+ANYTLS_ADMIN_PASS="replace-with-a-strong-password" \
+ANYTLS_PANEL_DOMAIN="panel.example.com" \
 bash deploy.sh
 ```
 
-不要在面板直接暴露公网时开启 `ANYTLS_TRUST_PROXY`。完整的 HTTPS、备份、更新和回滚步骤见[运维手册](docs/OPERATIONS.md)。
+若服务器已有 Caddy 配置，脚本只添加一次 `import anytls-panel.d/*.caddy`，并在重启前运行配置校验。完整的 HTTPS、备份、更新和回滚步骤见[运维手册](docs/OPERATIONS.md)。
 
 ## 📋 环境要求
 
 - Python 3.10+
 - 带 systemd 的 Linux（发行版仓库需能提供 Python 3.10+）
+- 可解析到服务器的公网域名，且 TCP 80/443 可从公网访问
+- 发行版软件源可提供 Caddy
 - 512MB+ 内存
 
 ## 📄 开源协议

@@ -2013,6 +2013,40 @@ proxies:
         self.assertNotIn("value=\"' + data.url", content)
         self.assertIn("shareUrl.value = data.url", content)
 
+    def test_dashboard_account_overview_shows_expiration_in_aligned_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, expire_date) VALUES (?, ?, ?)",
+                    ("demo-account", "anytls://pw@example.com:443", "2030-01-02"),
+                )
+                db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("no-expiry", "anytls://pw2@example.com:443"),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["logged_in"] = True
+                    session["username"] = "admin"
+                response = client.get("/")
+
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("<th>到期时间</th>", html)
+        account_name_index = html.index("<strong>demo-account</strong>")
+        expiration_index = html.index("到期：2030-01-02")
+        node_count_index = html.index('data-label="节点数"', expiration_index)
+        self.assertLess(account_name_index, expiration_index)
+        self.assertLess(expiration_index, node_count_index)
+        self.assertIn('data-label="到期时间"', html)
+        self.assertIn(f"剩余{app.days_until('2030-01-02')}天", html)
+        self.assertIn("到期：未设置", html)
+
     def test_monitor_template_does_not_embed_host_in_javascript(self):
         content = (REPO_ROOT / "templates" / "monitor.html").read_text(encoding="utf-8")
 
@@ -2035,7 +2069,7 @@ proxies:
         self.assertIn("headers: csrfHeaders({'Content-Type': 'application/json'})", detail)
         self.assertIn("headers: csrfHeaders({'Content-Type': 'application/json'})", monitor)
 
-    def test_deploy_script_supports_online_curl_mode_and_random_passwords(self):
+    def test_deploy_script_supports_interactive_credentials_and_automatic_https(self):
         content = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
 
         self.assertIn("git clone --depth 1 --branch", content)
@@ -2050,8 +2084,18 @@ proxies:
         self.assertIn(".traffic_api_token", content)
         self.assertIn("ANYTLS_SHOW_SECRETS", content)
         self.assertIn("ANYTLS_ADMIN_PASSWORD_FILE", content)
-        self.assertIn("generate_password", content)
+        self.assertIn("ANYTLS_PANEL_DOMAIN", content)
+        self.assertIn("Panel administrator username", content)
+        self.assertIn("Panel administrator password", content)
+        self.assertIn("read -r -s -p", content)
+        self.assertIn("administrator passwords do not match", content)
+        self.assertNotIn("generate_password", content)
         self.assertIn("generate_api_token", content)
+        self.assertIn("installing Caddy for automatic Let's Encrypt HTTPS", content)
+        self.assertIn("https://acme-v02.api.letsencrypt.org/directory", content)
+        self.assertIn("import anytls-panel.d/*.caddy", content)
+        self.assertIn('systemctl enable caddy', content)
+        self.assertIn('https://${PANEL_DOMAIN}/login', content)
         self.assertIn('systemctl restart "$SERVICE_NAME"', content)
         self.assertIn('cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"', content)
         self.assertIn('"$SCRIPT_DIR/security_utils.py"', content)
@@ -2078,6 +2122,105 @@ proxies:
         self.assertNotIn("apt-get not found; this installer currently supports Ubuntu/Debian", content)
         self.assertNotIn("默认账号:", content)
         self.assertNotIn("默认密码:", content)
+
+    def test_deploy_validates_and_normalizes_panel_domain(self):
+        script = REPO_ROOT / "deploy.sh"
+        for domain, expected in (
+            ("panel.example.com", "panel.example.com"),
+            ("VIP.SSRVPN.VIP.", "vip.ssrvpn.vip"),
+            ("xn--fiqs8s.example", "xn--fiqs8s.example"),
+        ):
+            with self.subTest(domain=domain):
+                env = os.environ.copy()
+                env["TEST_DOMAIN"] = domain
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        f'source "{script}"; PANEL_DOMAIN="$TEST_DOMAIN"; '
+                        'validate_panel_domain; printf "%s" "$PANEL_DOMAIN"',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                self.assertEqual(result.returncode, 0, msg=result.stderr)
+                self.assertEqual(result.stdout, expected)
+
+        for domain in (
+            "localhost",
+            "127.0.0.1",
+            "https://panel.example.com",
+            "bad_label.example.com",
+            "-bad.example.com",
+            "bad-.example.com",
+        ):
+            with self.subTest(domain=domain):
+                env = os.environ.copy()
+                env["TEST_DOMAIN"] = domain
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        f'source "{script}"; PANEL_DOMAIN="$TEST_DOMAIN"; '
+                        "validate_panel_domain",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("panel domain", result.stderr)
+
+    def test_deploy_accepts_noninteractive_initial_admin_credentials(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            env = os.environ.copy()
+            env.update({
+                "TEST_DATA_DIR": tmp,
+                "ANYTLS_ADMIN_USER": "panel-admin",
+                "ANYTLS_ADMIN_PASS": "strong-password",
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; DATA_DIR="$TEST_DATA_DIR"; '
+                    "prepare_admin_credentials; "
+                    'printf "%s|%s|%s" "$FRESH_DB" "$ADMIN_USER" "$ADMIN_PASS"',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout, "1|panel-admin|strong-password")
+
+        for username, password, expected_error in (
+            ("bad user", "strong-password", "administrator username"),
+            ("panel-admin", "short", "administrator password"),
+        ):
+            with self.subTest(username=username, password=password):
+                env = os.environ.copy()
+                env.update({
+                    "TEST_DATA_DIR": tmp,
+                    "ANYTLS_ADMIN_USER": username,
+                    "ANYTLS_ADMIN_PASS": password,
+                })
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        f'source "{script}"; DATA_DIR="$TEST_DATA_DIR"; '
+                        "prepare_admin_credentials",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_error, result.stderr)
 
     def test_account_traffic_token_cli_works_outside_project_directory(self):
         helper = REPO_ROOT / "traffic_token.py"
@@ -2267,7 +2410,7 @@ proxies:
             self.assertIn("non-empty unmarked directory", result.stderr)
             self.assertTrue((panel_dir / "important.txt").is_file())
 
-    def test_deploy_defaults_to_loopback_and_marks_managed_directory(self):
+    def test_deploy_defaults_to_loopback_https_and_marks_managed_directory(self):
         content = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
 
         self.assertIn('BIND_HOST="${ANYTLS_BIND_HOST:-127.0.0.1}"', content)
@@ -2275,9 +2418,11 @@ proxies:
             'SESSION_COOKIE_SECURE="${ANYTLS_SESSION_COOKIE_SECURE:-1}"',
             content,
         )
+        self.assertIn('TRUST_PROXY="${ANYTLS_TRUST_PROXY:-1}"', content)
         self.assertIn("anytls-panel-managed-v1", content)
         self.assertIn('chown root:root "$PANEL_DIR/.anytls-panel-install"', content)
-        self.assertIn("publish it only through an HTTPS reverse proxy", content)
+        self.assertIn("automatic HTTPS requires ANYTLS_BIND_HOST to remain on loopback", content)
+        self.assertIn("Let's Encrypt certificate managed and renewed by Caddy", content)
 
     def test_deploy_migrates_legacy_state_into_isolated_data_directory(self):
         script = REPO_ROOT / "deploy.sh"
@@ -2390,6 +2535,8 @@ proxies:
         self.assertIn("refusing to uninstall without --yes", content)
         self.assertIn("ANYTLS_SERVICE_NAME", content)
         self.assertIn("refusing to manage an unmarked directory", content)
+        self.assertIn("/etc/caddy/anytls-panel.d/", content)
+        self.assertIn("removing managed Caddy site", content)
 
     def test_deploy_and_uninstall_reject_foreign_systemd_units(self):
         for script_name in ("deploy.sh", "uninstall.sh"):

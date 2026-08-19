@@ -8,6 +8,8 @@
 - 带 systemd 的 Linux
 - `apt-get`、`dnf` 或 `yum` 包管理器
 - systemd
+- 已解析到服务器的公网域名
+- 公网 TCP 80/443 已在云安全组和主机防火墙中放行
 
 部署脚本会先校验 `python3` 版本和 venv/pip 可用性，不满足要求时会在修改系统前失败退出。旧版发行版即使包管理器受支持，也可能因默认 Python 版本过低而不适用。
 
@@ -34,19 +36,25 @@ ANYTLS_REPO_REF="v1.0.0" \
 bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
 ```
 
-自定义端口、服务名、目录和管理员账号：
+首次交互部署会要求输入管理员用户名、两次输入密码以及面板域名。密码输入不会回显。自定义端口、服务名和目录时仍会显示这些提示：
 
 ```bash
 ANYTLS_PANEL_DIR="/opt/anytls-panel" \
 ANYTLS_SERVICE_NAME="anytls-panel" \
 ANYTLS_PANEL_PORT="8866" \
-ANYTLS_ADMIN_USER="admin" \
-ANYTLS_ADMIN_PASS="change-this-password" \
 bash deploy.sh
 ```
 
-首次安装时脚本会初始化管理员账号；如果数据库已存在，会保留原有账号。
-未通过 `ANYTLS_ADMIN_PASS` 指定密码时，随机初始密码会保存到面板 `data/.initial_admin_password`，文件仅 root 可读。部署输出默认隐藏密码和流量 API token；如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
+无人值守部署必须显式提供所需输入：
+
+```bash
+ANYTLS_ADMIN_USER="admin" \
+ANYTLS_ADMIN_PASS="replace-with-a-strong-password" \
+ANYTLS_PANEL_DOMAIN="panel.example.com" \
+bash deploy.sh
+```
+
+首次安装时脚本会初始化管理员账号；如果数据库已存在，会保留原有账号，不会用环境变量覆盖。首次密码会保存到面板 `data/.initial_admin_password`，文件仅 root 可读。部署输出默认隐藏密码和流量 API token；如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
 
 部署目录必须是 `/opt/<专用名称>` 或 `/srv/<专用名称>`，且父目录由 root 所有并不可组/全局写。脚本会拒绝符号链接路径以及没有 AnyTLS 安装标记的非空目录；卸载时也会在停止服务前验证同一标记。代码和每次重建的 venv 由 root 所有且服务只读，数据库、WAL 和运行密钥位于服务可写的 `data/` 子目录。旧版根目录状态会在停服后通过 SQLite backup/安全复制迁入 `data/`。
 
@@ -54,27 +62,26 @@ bash deploy.sh
 
 ## 生产 HTTPS
 
-不要把管理面板的明文 HTTP 端口直接暴露到公网。部署默认使用 `127.0.0.1` 和 Secure Cookie；推荐让 Caddy、Nginx 或其他 TLS 反向代理监听公网 443，并显式启用代理信任：
+部署脚本自动完成以下工作：
 
-```bash
-ANYTLS_BIND_HOST="127.0.0.1" \
-ANYTLS_SESSION_COOKIE_SECURE="1" \
-ANYTLS_TRUST_PROXY="1" \
-bash deploy.sh
-```
+1. 校验输入的是公网 DNS 域名并确认其当前可解析。
+2. 安装 Caddy，将 Gunicorn 保持在 `127.0.0.1:<面板端口>`。
+3. 写入 `/etc/caddy/anytls-panel.d/<服务名>.caddy`，并安全地导入现有 Caddyfile。
+4. 指定 Let’s Encrypt ACME 接口签发证书，自动将 HTTP 跳转至 HTTPS。
+5. 等待 `https://<域名>/login` 通过真实证书校验后才报告部署成功。
 
-- `ANYTLS_SESSION_COOKIE_SECURE=1` 使浏览器只通过 HTTPS 发送 Session Cookie。
-- `ANYTLS_TRUST_PROXY=1` 只适用于面板前方恰好有一层受信任反向代理；直接暴露面板时保持为 `0`。
-- 反向代理应覆盖 `X-Forwarded-For`、`X-Forwarded-Proto` 和 `Host`，并将请求转发到 `127.0.0.1:8866`。
-- 域名、证书和公网 ACL 属于站点环境信息，部署脚本不会臆测或自动修改。
-
-示例 Caddy 站点片段：
+生成的站点配置等价于：
 
 ```caddyfile
 panel.example.com {
+    tls {
+        ca https://acme-v02.api.letsencrypt.org/directory
+    }
     reverse_proxy 127.0.0.1:8866
 }
 ```
+
+Caddy 常驻服务会在证书到期前自动续签，不使用 cron，也不是自签证书。部署脚本强制启用 Secure Cookie 与可信代理处理，并拒绝把 Gunicorn 改为公网监听。若端口 80/443 已被其他服务占用、域名尚未生效或云安全组阻断 ACME 验证，部署会显示 Caddy 日志并失败退出。
 
 HTTP(S) 订阅默认禁止访问内网、回环、链路本地和保留地址。确需拉取可信内网订阅时，可在隔离环境中设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1` 后重新部署；不要在可导入不可信订阅的面板上开启。
 
@@ -97,11 +104,12 @@ sudo -u anytls-panel /opt/anytls-panel/venv/bin/python \
 
 ```bash
 systemctl is-active anytls-panel
+journalctl -u caddy -n 50 --no-pager
 journalctl -u anytls-panel -n 50 --no-pager
-curl -I http://127.0.0.1:8866/login
+curl -I https://panel.example.com/login
 ```
 
-配置 HTTPS 后，还需要从独立客户端验证域名、证书、登录和订阅同步，并确认响应包含 HSTS、安全 Cookie 等安全头。`systemctl active` 只能证明进程存活，不能替代真实业务验收。
+部署脚本会从服务器本机验证证书与登录页；仍建议从独立客户端验证域名、证书、登录和订阅同步，并确认响应包含 HSTS、安全 Cookie 等安全头。`systemctl active` 只能证明进程存活，不能替代真实业务验收。
 
 ## 更新
 
@@ -139,12 +147,13 @@ trap - EXIT
 bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
 ```
 
-如果使用自定义目录、服务名或 `/etc/anytls-panel/` 下的密钥文件，更新时需要继续传入相同环境变量。
+更新时会再次询问面板域名，已有数据库不会再次询问或覆盖管理员凭据。自动化更新可设置 `ANYTLS_PANEL_DOMAIN`。如果使用自定义目录、服务名或 `/etc/anytls-panel/` 下的密钥文件，更新时需要继续传入相同环境变量。
 
 回滚时重新部署上一个已验证标签，再检查数据库完整性、服务日志、登录和订阅输出：
 
 ```bash
 ANYTLS_REPO_REF="上一个版本标签" \
+ANYTLS_PANEL_DOMAIN="panel.example.com" \
 bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
 ```
 
@@ -186,9 +195,10 @@ GitHub Actions 会在 push 和 pull request 时自动运行这些检查。
 
 ## 常见排障
 
-- 登录页打不开：检查 `systemctl status anytls-panel` 和端口防火墙。
-- 管理员密码不对：确认首次初始化时传入的 `ANYTLS_ADMIN_PASS`，已有数据库不会被覆盖。
+- 登录页打不开：检查 `systemctl status anytls-panel caddy`、`journalctl -u caddy`、域名解析以及云安全组/防火墙的 TCP 80/443。
+- 管理员密码不对：确认首次部署时输入或通过 `ANYTLS_ADMIN_PASS` 提供的密码；已有数据库不会被覆盖。
 - 在线部署失败：确认服务器可以访问 GitHub，或改用克隆部署。
+- Let’s Encrypt 签发失败：确认 A/AAAA 记录指向当前服务器，Caddy 可以占用 80/443，且这两个端口能从公网访问。
 - 订阅导入失败：先确认订阅内容是否是 Clash YAML、Base64 或支持的单链接格式。
 - 内网订阅被拒绝：这是默认 SSRF 防护；仅在订阅源完全可信且网络隔离时启用 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。
-- HTTPS 下反复跳回登录：确认反向代理发送 `X-Forwarded-Proto: https`，且 `ANYTLS_TRUST_PROXY=1`、`ANYTLS_SESSION_COOKIE_SECURE=1` 配套启用。
+- HTTPS 下反复跳回登录：确认当前 Caddy 站点仍反向代理到面板端口，且 systemd 服务中的 `ANYTLS_TRUST_PROXY=1`、`ANYTLS_SESSION_COOKIE_SECURE=1` 未被手工覆盖。
