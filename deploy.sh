@@ -13,7 +13,7 @@ TRUST_PROXY="${ANYTLS_TRUST_PROXY:-1}"
 ALLOW_PRIVATE_SUBSCRIPTIONS="${ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS:-0}"
 PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
-REPO_REF="${ANYTLS_REPO_REF:-main}"
+REPO_REF="${ANYTLS_REPO_REF:-v1.1.0}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
@@ -27,6 +27,8 @@ CADDY_CONFIG_DIR="/etc/caddy"
 CADDY_SITES_DIR="$CADDY_CONFIG_DIR/anytls-panel.d"
 CADDYFILE="$CADDY_CONFIG_DIR/Caddyfile"
 CADDY_INSTALLED_NOW=0
+CADDY_INSTALL_ATTEMPTED=0
+CADDY_STATE_CAPTURED=0
 CADDYFILE_PREEXISTED=0
 [[ -e "$CADDYFILE" || -L "$CADDYFILE" ]] && CADDYFILE_PREEXISTED=1
 STAGE_DIR=""
@@ -37,8 +39,18 @@ CUTOVER_STARTED=0
 ROLLBACK_FINISHED=0
 DEPLOY_SUCCEEDED=0
 OLD_PANEL_ACTIVE=0
+OLD_PANEL_ENABLED=0
+OLD_PANEL_ENABLEMENT_MANAGED=0
+OLD_PANEL_UNIT_PRESENT=0
 OLD_CADDY_ACTIVE=0
+OLD_CADDY_ENABLED=0
+OLD_CADDY_ENABLEMENT_MANAGED=0
+OLD_CADDY_UNIT_PRESENT=0
 OLD_HEALTH_TIMER_ACTIVE=0
+OLD_HEALTH_TIMER_ENABLED=0
+OLD_HEALTH_TIMER_ENABLEMENT_MANAGED=0
+OLD_HEALTH_TIMER_UNIT_PRESENT=0
+OLD_DATA_DATABASE_PRESENT=0
 OLD_INSTALL_PRESENT=0
 CODE_BACKED_UP=0
 DATABASE_BACKED_UP=0
@@ -63,6 +75,31 @@ fail() {
 }
 
 cleanup_deploy_artifacts() {
+    if [[ "${DEPLOY_SUCCEEDED:-0}" -eq 0 && "${CUTOVER_STARTED:-0}" -eq 0 && \
+          "${ROLLBACK_FINISHED:-0}" -eq 0 && \
+          "${CADDY_INSTALL_ATTEMPTED:-0}" -eq 1 ]]; then
+        local caddy_probe_status
+        if systemd_unit_exists caddy; then
+            systemctl stop caddy >/dev/null 2>&1 || \
+                printf '[anytls-panel] ERROR: failed to stop Caddy after deployment failure\n' >&2
+            if [[ "${OLD_CADDY_ENABLED:-0}" -eq 1 ]]; then
+                systemctl enable caddy >/dev/null 2>&1 || \
+                    printf '[anytls-panel] ERROR: failed to re-enable Caddy\n' >&2
+            else
+                systemctl disable caddy >/dev/null 2>&1 || \
+                    printf '[anytls-panel] ERROR: failed to disable newly installed Caddy\n' >&2
+            fi
+            if [[ "${OLD_CADDY_ACTIVE:-0}" -eq 1 ]]; then
+                systemctl start caddy >/dev/null 2>&1 || \
+                    printf '[anytls-panel] ERROR: failed to restart Caddy\n' >&2
+            fi
+        else
+            caddy_probe_status=$?
+            if [[ "$caddy_probe_status" -eq 2 ]]; then
+                printf '[anytls-panel] ERROR: failed to inspect Caddy after deployment failure; manual recovery required\n' >&2
+            fi
+        fi
+    fi
     if [[ -n "${STAGE_DIR:-}" && -d "$STAGE_DIR" ]]; then
         rm -rf -- "$STAGE_DIR"
     fi
@@ -107,7 +144,7 @@ validate_admin_password() {
 
 validate_panel_domain() {
     PANEL_DOMAIN="${PANEL_DOMAIN%.}"
-    PANEL_DOMAIN="${PANEL_DOMAIN,,}"
+    PANEL_DOMAIN="$(printf '%s' "$PANEL_DOMAIN" | tr '[:upper:]' '[:lower:]')"
     if (( ${#PANEL_DOMAIN} < 4 || ${#PANEL_DOMAIN} > 253 )) || \
        [[ "$PANEL_DOMAIN" != *.* ]] || \
        [[ "$PANEL_DOMAIN" =~ ^[0-9.]+$ ]]; then
@@ -416,6 +453,65 @@ ensure_runtime() {
     fi
 }
 
+systemd_unit_exists() {
+    local load_state
+    if ! load_state="$(systemctl show "$1" --property=LoadState --value 2>/dev/null)" || \
+       [[ -z "$load_state" ]]; then
+        return 2
+    fi
+    [[ "$load_state" != "not-found" ]]
+}
+
+capture_systemd_unit_state() {
+    local unit="$1"
+    local load_state active_state unit_file_state
+    if ! load_state="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)" || \
+       [[ -z "$load_state" ]]; then
+        fail "cannot inspect systemd load state for $unit"
+    fi
+    if [[ "$load_state" == "not-found" ]]; then
+        printf '0 0 0 1\n'
+        return
+    fi
+    if ! active_state="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" || \
+       [[ -z "$active_state" ]]; then
+        fail "cannot inspect systemd active state for $unit"
+    fi
+    if ! unit_file_state="$(systemctl show "$unit" --property=UnitFileState --value 2>/dev/null)"; then
+        fail "cannot inspect systemd enablement for $unit"
+    fi
+
+    local was_active=0
+    case "$active_state" in
+        active|reloading) was_active=1 ;;
+        inactive|failed) ;;
+        *) fail "systemd unit is in a transitional state: $unit ($active_state)" ;;
+    esac
+
+    local was_enabled=0
+    local enablement_managed=0
+    case "$unit_file_state" in
+        enabled|enabled-runtime)
+            was_enabled=1
+            enablement_managed=1
+            ;;
+        disabled)
+            enablement_managed=1
+            ;;
+    esac
+    printf '1 %s %s %s\n' \
+        "$was_active" "$was_enabled" "$enablement_managed"
+}
+
+capture_caddy_state() {
+    [[ "$CADDY_STATE_CAPTURED" -eq 0 ]] || return 0
+    local snapshot
+    snapshot="$(capture_systemd_unit_state caddy)"
+    read -r OLD_CADDY_UNIT_PRESENT OLD_CADDY_ACTIVE \
+        OLD_CADDY_ENABLED OLD_CADDY_ENABLEMENT_MANAGED <<< "$snapshot"
+    CADDY_STATE_CAPTURED=1
+}
+
 ensure_caddy() {
     if command -v caddy >/dev/null 2>&1; then
         systemctl cat caddy.service >/dev/null 2>&1 || \
@@ -424,12 +520,13 @@ ensure_caddy() {
     fi
 
     log "installing Caddy for automatic Let's Encrypt HTTPS"
+    CADDY_INSTALL_ATTEMPTED=1
     if ! install_packages caddy; then
         fail "Caddy is unavailable from the configured package repositories"
     fi
+    CADDY_INSTALLED_NOW=1
     command -v caddy >/dev/null 2>&1 || fail "Caddy installation did not provide the caddy command"
     systemctl cat caddy.service >/dev/null 2>&1 || fail "Caddy installation did not provide caddy.service"
-    CADDY_INSTALLED_NOW=1
 }
 
 stop_service_for_update() {
@@ -482,10 +579,12 @@ backup_configuration_for_rollback() {
 
 backup_database_for_rollback() {
     local database_file="$DATA_DIR/anytls.db"
-    if [[ ! -f "$database_file" ]]; then
+    if [[ "$OLD_DATA_DATABASE_PRESENT" -eq 0 ]]; then
         DATABASE_STATE_CAPTURED=1
         return
     fi
+    [[ -f "$database_file" && ! -L "$database_file" ]] || \
+        fail "existing data database disappeared before rollback backup"
     python3 - "$database_file" "$ROLLBACK_DIR/anytls.db" <<'PY'
 import sqlite3
 import sys
@@ -520,14 +619,17 @@ begin_cutover() {
        [[ "$(< "$PANEL_DIR/.anytls-panel-install")" == "anytls-panel-managed-v1" ]]; then
         OLD_INSTALL_PRESENT=1
     fi
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        OLD_PANEL_ACTIVE=1
-    fi
-    if systemctl is-active --quiet caddy; then
-        OLD_CADDY_ACTIVE=1
-    fi
-    if systemctl is-active --quiet "${SERVICE_NAME}-healthcheck.timer"; then
-        OLD_HEALTH_TIMER_ACTIVE=1
+    local snapshot
+    snapshot="$(capture_systemd_unit_state "$SERVICE_NAME")"
+    read -r OLD_PANEL_UNIT_PRESENT OLD_PANEL_ACTIVE \
+        OLD_PANEL_ENABLED OLD_PANEL_ENABLEMENT_MANAGED <<< "$snapshot"
+    capture_caddy_state
+    snapshot="$(capture_systemd_unit_state "${SERVICE_NAME}-healthcheck.timer")"
+    read -r OLD_HEALTH_TIMER_UNIT_PRESENT OLD_HEALTH_TIMER_ACTIVE \
+        OLD_HEALTH_TIMER_ENABLED OLD_HEALTH_TIMER_ENABLEMENT_MANAGED \
+        <<< "$snapshot"
+    if [[ -f "$DATA_DIR/anytls.db" && ! -L "$DATA_DIR/anytls.db" ]]; then
+        OLD_DATA_DATABASE_PRESENT=1
     fi
     backup_configuration_for_rollback
     CUTOVER_STARTED=1
@@ -535,66 +637,174 @@ begin_cutover() {
     systemctl stop "${SERVICE_NAME}-healthcheck.timer" >/dev/null 2>&1 || true
     systemctl stop "${SERVICE_NAME}-healthcheck.service" >/dev/null 2>&1 || true
     stop_service_for_update
-    prepare_state_directory
     backup_database_for_rollback
+    prepare_state_directory
     backup_current_release
+}
+
+rollback_step() {
+    local description="$1"
+    shift
+    if ! "$@" >/dev/null 2>&1; then
+        printf '[anytls-panel] ERROR: rollback step failed: %s\n' "$description" >&2
+        ROLLBACK_FAILED=1
+    fi
+}
+
+rollback_systemd_unit_exists() {
+    local unit="$1"
+    local status
+    if systemd_unit_exists "$unit"; then
+        return 0
+    else
+        status=$?
+    fi
+    if [[ "$status" -eq 2 ]]; then
+        printf '[anytls-panel] ERROR: rollback could not inspect systemd unit: %s\n' \
+            "$unit" >&2
+        ROLLBACK_FAILED=1
+    fi
+    return "$status"
+}
+
+stop_unit_for_rollback_if_present() {
+    local description="$1"
+    local unit="$2"
+    if rollback_systemd_unit_exists "$unit"; then
+        rollback_step "$description" systemctl stop "$unit"
+    fi
+    return 0
+}
+
+disable_unit_if_previously_disabled() {
+    local unit="$1"
+    local was_enabled="$2"
+    local enablement_managed="$3"
+    if [[ "$was_enabled" -eq 0 && "$enablement_managed" -eq 1 ]] && \
+       rollback_systemd_unit_exists "$unit"; then
+        rollback_step "disable $unit" systemctl disable "$unit"
+    fi
+    return 0
+}
+
+enable_unit_if_previously_enabled() {
+    local unit="$1"
+    local was_enabled="$2"
+    local enablement_managed="$3"
+    if [[ "$was_enabled" -eq 1 && "$enablement_managed" -eq 1 ]]; then
+        rollback_step "enable $unit" systemctl enable "$unit"
+    fi
+}
+
+restore_unit_activity() {
+    local unit="$1"
+    local was_present="$2"
+    local was_active="$3"
+    local description="$4"
+    if [[ "$was_present" -eq 0 ]]; then
+        stop_unit_for_rollback_if_present "keep $description stopped" "$unit"
+    elif [[ "$was_active" -eq 1 ]]; then
+        rollback_step "start $description" systemctl start "$unit"
+    else
+        rollback_step "keep $description stopped" systemctl stop "$unit"
+    fi
 }
 
 rollback_deployment() {
     [[ "${ROLLBACK_FINISHED:-0}" -eq 0 ]] || return 0
-    ROLLBACK_FINISHED=1
+    ROLLBACK_FAILED=0
     printf '[anytls-panel] deployment failed; restoring the previous release\n' >&2
 
-    systemctl stop "${SERVICE_NAME}-healthcheck.timer" >/dev/null 2>&1 || true
-    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    stop_unit_for_rollback_if_present \
+        "stop health-check timer" "${SERVICE_NAME}-healthcheck.timer"
+    stop_unit_for_rollback_if_present "stop panel" "$SERVICE_NAME"
+    stop_unit_for_rollback_if_present "stop Caddy" caddy
+    disable_unit_if_previously_disabled \
+        "$SERVICE_NAME" "$OLD_PANEL_ENABLED" "$OLD_PANEL_ENABLEMENT_MANAGED"
+    disable_unit_if_previously_disabled \
+        caddy "$OLD_CADDY_ENABLED" "$OLD_CADDY_ENABLEMENT_MANAGED"
+    disable_unit_if_previously_disabled \
+        "${SERVICE_NAME}-healthcheck.timer" "$OLD_HEALTH_TIMER_ENABLED" \
+        "$OLD_HEALTH_TIMER_ENABLEMENT_MANAGED"
 
     if [[ "$CODE_BACKED_UP" -eq 1 && -d "$PANEL_DIR" ]]; then
-        find "$PANEL_DIR" -mindepth 1 -maxdepth 1 ! -name data \
-            -exec rm -rf -- {} +
+        rollback_step "remove incomplete release" \
+            find "$PANEL_DIR" -mindepth 1 -maxdepth 1 ! -name data \
+                -exec rm -rf -- {} +
         if [[ -d "$ROLLBACK_DIR/code" ]]; then
             while IFS= read -r -d '' entry; do
-                mv -- "$entry" "$PANEL_DIR/"
+                rollback_step "restore release file ${entry##*/}" \
+                    mv -- "$entry" "$PANEL_DIR/"
             done < <(find "$ROLLBACK_DIR/code" -mindepth 1 -maxdepth 1 -print0)
         fi
     fi
     if [[ "$OLD_INSTALL_PRESENT" -eq 0 ]]; then
-        rm -f -- "$PANEL_DIR/.anytls-panel-install"
+        rollback_step "remove new installation marker" \
+            rm -f -- "$PANEL_DIR/.anytls-panel-install"
     fi
 
     if [[ "$DATABASE_STATE_CAPTURED" -eq 1 ]]; then
-        rm -f -- "$DATA_DIR/anytls.db" "$DATA_DIR/anytls.db-wal" "$DATA_DIR/anytls.db-shm"
+        rollback_step "remove failed database" \
+            rm -f -- "$DATA_DIR/anytls.db" "$DATA_DIR/anytls.db-wal" \
+                "$DATA_DIR/anytls.db-shm"
         if [[ "$DATABASE_BACKED_UP" -eq 1 ]]; then
-            cp -a -- "$ROLLBACK_DIR/anytls.db" "$DATA_DIR/anytls.db"
-            chown "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIR/anytls.db" || true
-            chmod 600 "$DATA_DIR/anytls.db" || true
+            rollback_step "restore database" \
+                cp -a -- "$ROLLBACK_DIR/anytls.db" "$DATA_DIR/anytls.db"
+            rollback_step "restore database ownership" \
+                chown "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIR/anytls.db"
+            rollback_step "restore database permissions" \
+                chmod 600 "$DATA_DIR/anytls.db"
         fi
     fi
 
     if [[ "$CONFIG_BACKED_UP" -eq 1 ]]; then
-        restore_optional_file "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service" panel.service
-        restore_optional_file "$CADDYFILE" Caddyfile
-        restore_optional_file "$CADDY_SITES_DIR/${SERVICE_NAME}.caddy" caddy-site
-        restore_optional_file "$HEALTHCHECK_SCRIPT" healthcheck-script
-        restore_optional_file "$HEALTHCHECK_SERVICE" healthcheck.service
-        restore_optional_file "$HEALTHCHECK_TIMER" healthcheck.timer
-        restore_optional_file "$CADDY_RESTART_DROPIN" caddy-restart.conf
-        restore_optional_file "$SECRET_KEY_FILE" secret-key
-        restore_optional_file "$TRAFFIC_API_TOKEN_FILE" traffic-api-token
-        restore_optional_file "$ADMIN_PASSWORD_FILE" admin-password
-        restore_optional_file "$DATA_DIR/.anytls-panel-data" data-marker
+        rollback_step "restore panel service" restore_optional_file \
+            "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service" panel.service
+        rollback_step "restore Caddyfile" restore_optional_file \
+            "$CADDYFILE" Caddyfile
+        rollback_step "restore Caddy site" restore_optional_file \
+            "$CADDY_SITES_DIR/${SERVICE_NAME}.caddy" caddy-site
+        rollback_step "restore health-check script" restore_optional_file \
+            "$HEALTHCHECK_SCRIPT" healthcheck-script
+        rollback_step "restore health-check service" restore_optional_file \
+            "$HEALTHCHECK_SERVICE" healthcheck.service
+        rollback_step "restore health-check timer" restore_optional_file \
+            "$HEALTHCHECK_TIMER" healthcheck.timer
+        rollback_step "restore Caddy restart policy" restore_optional_file \
+            "$CADDY_RESTART_DROPIN" caddy-restart.conf
+        rollback_step "restore session secret" restore_optional_file \
+            "$SECRET_KEY_FILE" secret-key
+        rollback_step "restore traffic token" restore_optional_file \
+            "$TRAFFIC_API_TOKEN_FILE" traffic-api-token
+        rollback_step "restore admin password" restore_optional_file \
+            "$ADMIN_PASSWORD_FILE" admin-password
+        rollback_step "restore data marker" restore_optional_file \
+            "$DATA_DIR/.anytls-panel-data" data-marker
     fi
 
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    if [[ "$OLD_PANEL_ACTIVE" -eq 1 ]]; then
-        systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
-    fi
-    if [[ "$OLD_CADDY_ACTIVE" -eq 1 ]]; then
-        systemctl reload-or-restart caddy >/dev/null 2>&1 || true
-    fi
-    if [[ "$OLD_HEALTH_TIMER_ACTIVE" -eq 1 ]]; then
-        systemctl enable --now "${SERVICE_NAME}-healthcheck.timer" >/dev/null 2>&1 || true
+    rollback_step "reload systemd" systemctl daemon-reload
+    enable_unit_if_previously_enabled \
+        "$SERVICE_NAME" "$OLD_PANEL_ENABLED" "$OLD_PANEL_ENABLEMENT_MANAGED"
+    enable_unit_if_previously_enabled \
+        caddy "$OLD_CADDY_ENABLED" "$OLD_CADDY_ENABLEMENT_MANAGED"
+    enable_unit_if_previously_enabled \
+        "${SERVICE_NAME}-healthcheck.timer" "$OLD_HEALTH_TIMER_ENABLED" \
+        "$OLD_HEALTH_TIMER_ENABLEMENT_MANAGED"
+    restore_unit_activity \
+        "$SERVICE_NAME" "$OLD_PANEL_UNIT_PRESENT" "$OLD_PANEL_ACTIVE" panel
+    restore_unit_activity \
+        caddy "$OLD_CADDY_UNIT_PRESENT" "$OLD_CADDY_ACTIVE" Caddy
+    restore_unit_activity \
+        "${SERVICE_NAME}-healthcheck.timer" \
+        "$OLD_HEALTH_TIMER_UNIT_PRESENT" "$OLD_HEALTH_TIMER_ACTIVE" \
+        "health-check timer"
+    if [[ "$ROLLBACK_FAILED" -ne 0 ]]; then
+        printf '[anytls-panel] ERROR: rollback incomplete; manual recovery required\n' >&2
+        return 1
     fi
     CUTOVER_STARTED=0
+    ROLLBACK_FINISHED=1
+    printf '[anytls-panel] previous release restored successfully\n' >&2
 }
 
 prepare_state_directory() {
@@ -668,6 +878,50 @@ prepare_external_secret_directories() {
     validate_secret_paths
 }
 
+copy_release_files() {
+    local source_dir="$1"
+    local destination_dir="$2"
+    local manifest="$source_dir/release-files.txt"
+    [[ -f "$manifest" && ! -L "$manifest" ]] || \
+        fail "release source is missing a safe release-files.txt manifest"
+
+    local entry source_path destination_path current_path component
+    local path_components=()
+    while IFS= read -r entry || [[ -n "$entry" ]]; do
+        [[ -n "$entry" && "$entry" != \#* ]] || continue
+        case "$entry" in
+            /*|.|./*|*/./*|*/.|..|../*|*/../*|*/..|*//* )
+                fail "unsafe path in release-files.txt: $entry"
+                ;;
+        esac
+        if ! [[ "$entry" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            fail "invalid path in release-files.txt: $entry"
+        fi
+        source_path="$source_dir/$entry"
+        destination_path="$destination_dir/$entry"
+        current_path="$source_dir"
+        IFS='/' read -r -a path_components <<< "$entry"
+        for component in "${path_components[@]}"; do
+            current_path="$current_path/$component"
+            [[ ! -L "$current_path" ]] || \
+                fail "release manifest path must not traverse symlinks: $entry"
+        done
+        [[ -f "$source_path" && ! -L "$source_path" ]] || \
+            fail "release manifest entry is not a regular file: $entry"
+        install -d -m 755 "${destination_path%/*}"
+        cp -a -- "$source_path" "$destination_path"
+    done < "$manifest"
+}
+
+copy_directory_contents() {
+    local source_dir="$1"
+    local destination_dir="$2"
+    local entry
+    while IFS= read -r -d '' entry; do
+        cp -a "$entry" "$destination_dir/"
+    done < <(find "$source_dir" -mindepth 1 -maxdepth 1 -print0)
+}
+
 prepare_release_source() {
     validate_panel_dir
     validate_install_target
@@ -678,10 +932,7 @@ prepare_release_source() {
 
     if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/app.py" ]]; then
         log "staging local project files before touching the active release"
-        find "$SCRIPT_DIR" -mindepth 1 -maxdepth 1 \
-            ! -name .git ! -name .venv ! -name venv ! -name data \
-            ! -name .anytls-panel-install ! -name .anytls-panel-data \
-            -exec cp -a -t "$RELEASE_SOURCE" -- {} +
+        copy_release_files "$SCRIPT_DIR" "$RELEASE_SOURCE"
     else
         log "fetching project from $REPO_URL ($REPO_REF) before stopping the service"
         local clone_dir="$STAGE_DIR/clone"
@@ -691,10 +942,7 @@ prepare_release_source() {
             source_dir="$clone_dir/$REPO_SUBDIR"
         fi
         [[ -d "$source_dir" ]] || fail "project source directory not found: $source_dir"
-        find "$source_dir" -mindepth 1 -maxdepth 1 \
-            ! -name .git ! -name .venv ! -name venv ! -name data \
-            ! -name .anytls-panel-install ! -name .anytls-panel-data \
-            -exec cp -a -t "$RELEASE_SOURCE" -- {} +
+        copy_release_files "$source_dir" "$RELEASE_SOURCE"
     fi
 
     for required_file in app.py security_utils.py traffic_token.py requirements.txt; do
@@ -790,6 +1038,35 @@ prepare_traffic_api_token() {
     chmod 600 "$TRAFFIC_API_TOKEN_FILE" 2>/dev/null || true
 }
 
+prepare_smoke_database() {
+    local target_database="$1"
+    local source_database=""
+    local candidate
+    for candidate in "$DATA_DIR/anytls.db" "$PANEL_DIR/anytls.db"; do
+        if [[ -e "$candidate" || -L "$candidate" ]]; then
+            if [[ -L "$candidate" || ! -f "$candidate" ]]; then
+                fail "existing panel database must be a regular non-symlink file"
+            fi
+            source_database="$candidate"
+            break
+        fi
+    done
+    [[ -n "$source_database" ]] || return 0
+
+    log "validating the staged release against a safe copy of the existing database"
+    python3 - "$source_database" "$target_database" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1], timeout=30) as source, \
+     sqlite3.connect(sys.argv[2], timeout=30) as target:
+    source.backup(target)
+    if target.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+        raise SystemExit('smoke database quick_check failed')
+PY
+    chmod 600 "$target_database"
+}
+
 prepare_python_artifacts() {
     local build_venv="$STAGE_DIR/build-venv"
     WHEELHOUSE="$STAGE_DIR/wheelhouse"
@@ -807,6 +1084,7 @@ prepare_python_artifacts() {
 
     local smoke_dir="$STAGE_DIR/smoke"
     install -d -m 700 "$smoke_dir"
+    prepare_smoke_database "$smoke_dir/anytls.db"
     (
         cd "$RELEASE_SOURCE"
         env \
@@ -819,7 +1097,7 @@ prepare_python_artifacts() {
             "$build_venv/bin/python" - <<'PY'
 import app
 app.init_db()
-assert app.get_initial_admin_credentials()[0] == 'smoke-admin'
+assert app.get_initial_admin_credentials()[0]
 PY
     )
 }
@@ -827,8 +1105,7 @@ PY
 install_staged_release() {
     validate_panel_dir
     mkdir -p "$PANEL_DIR"
-    find "$RELEASE_SOURCE" -mindepth 1 -maxdepth 1 \
-        -exec cp -a -t "$PANEL_DIR" -- {} +
+    copy_directory_contents "$RELEASE_SOURCE" "$PANEL_DIR"
     install -o root -g root -m 600 /dev/null "$PANEL_DIR/.anytls-panel-install"
     printf '%s\n' 'anytls-panel-managed-v1' > "$PANEL_DIR/.anytls-panel-install"
 
@@ -1198,6 +1475,7 @@ main() {
     prepare_admin_credentials
     ensure_runtime
     verify_domain_resolution
+    capture_caddy_state
     ensure_caddy
     ensure_service_user
     prepare_release_source

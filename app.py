@@ -15,6 +15,7 @@ import ipaddress
 import socket
 import ssl
 import http.client
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import wraps
@@ -371,9 +372,60 @@ def init_db():
 # ─── 订阅解析 ──────────────────────────────────────────────
 
 _MAX_SUBSCRIPTION_BYTES = 2 * 1024 * 1024
+_SUBSCRIPTION_TIMEOUT_SECONDS = 10
+_SUBSCRIPTION_READ_CHUNK = 64 * 1024
+_SUBSCRIPTION_RESOLVER_CODE = (
+    'import json, socket, sys\n'
+    'try:\n'
+    '    rows = socket.getaddrinfo(sys.argv[1], int(sys.argv[2]), '
+    'type=socket.SOCK_STREAM)\n'
+    'except socket.gaierror:\n'
+    '    raise SystemExit(2)\n'
+    "json.dump(sorted({row[4][0].split('%', 1)[0] for row in rows}), sys.stdout)\n"
+)
 
 
-def _resolve_public_subscription_url(raw_url):
+def _subscription_remaining_time(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('订阅拉取超时')
+    return remaining
+
+
+def _resolve_subscription_addresses(hostname, port, deadline):
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                '-I',
+                '-c',
+                _SUBSCRIPTION_RESOLVER_CODE,
+                hostname,
+                str(port),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_subscription_remaining_time(deadline),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise TimeoutError('订阅拉取超时') from None
+    if completed.returncode != 0:
+        raise ValueError("订阅地址无法解析")
+    try:
+        addresses = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError):
+        raise ValueError("订阅地址解析结果无效") from None
+    if not isinstance(addresses, list) or not all(
+        isinstance(address, str) for address in addresses
+    ):
+        raise ValueError("订阅地址解析结果无效")
+    return addresses
+
+
+def _resolve_public_subscription_url(raw_url, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_SECONDS
     try:
         parsed = urlparse(raw_url)
         if parsed.scheme not in ('http', 'https') or not parsed.hostname:
@@ -384,24 +436,22 @@ def _resolve_public_subscription_url(raw_url):
     except (TypeError, ValueError):
         raise ValueError("订阅地址必须是有效的 HTTP(S) URL") from None
 
-    if os.environ.get('ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS', '0') == '1':
-        return parsed, []
-
-    try:
-        addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise ValueError("订阅地址无法解析") from exc
+    addresses = _resolve_subscription_addresses(
+        parsed.hostname,
+        port,
+        deadline,
+    )
     if not addresses:
         raise ValueError("订阅地址无法解析")
 
     validated_addresses = []
-    for address in addresses:
-        ip_text = address[4][0].split('%', 1)[0]
+    for ip_text in addresses:
         try:
             ip = ipaddress.ip_address(ip_text)
         except ValueError as exc:
             raise ValueError("订阅地址解析结果无效") from exc
-        if not ip.is_global:
+        allow_private = os.environ.get('ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS', '0') == '1'
+        if not allow_private and not ip.is_global:
             raise ValueError("订阅地址必须指向公网 IP")
         if ip_text not in validated_addresses:
             validated_addresses.append(ip_text)
@@ -430,30 +480,55 @@ def _subscription_host_header(parsed):
     return host if parsed.port in (None, default_port) else f'{host}:{parsed.port}'
 
 
-def _read_pinned_subscription_response(url, user_agent):
-    parsed, addresses = _resolve_public_subscription_url(url)
-    if not addresses:
-        raise ValueError("私有订阅模式不支持 DNS 固定连接")
+def _set_subscription_socket_deadline(sock, deadline):
+    remaining = _subscription_remaining_time(deadline)
+    sock.settimeout(remaining)
+    return remaining
+
+
+def _read_subscription_body(response, sock, deadline):
+    chunks = []
+    size = 0
+    while True:
+        _set_subscription_socket_deadline(sock, deadline)
+        chunk = response.read1(min(
+            _SUBSCRIPTION_READ_CHUNK,
+            _MAX_SUBSCRIPTION_BYTES + 1 - size,
+        ))
+        if not chunk:
+            return b''.join(chunks)
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > _MAX_SUBSCRIPTION_BYTES:
+            raise ValueError("订阅响应过大（最大 2 MiB）")
+
+
+def _read_pinned_subscription_response(url, user_agent, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_SECONDS
+    parsed, addresses = _resolve_public_subscription_url(url, deadline)
 
     port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-    deadline = time.monotonic() + 10
     last_error = None
     for address in addresses:
         connection = None
         sock = None
         try:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            try:
+                remaining = _subscription_remaining_time(deadline)
+            except TimeoutError:
                 break
             sock = socket.create_connection((address, port), timeout=remaining)
             if parsed.scheme == 'https':
+                _set_subscription_socket_deadline(sock, deadline)
                 context = ssl.create_default_context()
                 sock = context.wrap_socket(sock, server_hostname=parsed.hostname)
+            remaining = _set_subscription_socket_deadline(sock, deadline)
 
             connection = http.client.HTTPConnection(
                 parsed.hostname,
                 port,
-                timeout=max(0.1, deadline - time.monotonic()),
+                timeout=remaining,
             )
             connection.sock = sock
             connection.putrequest(
@@ -466,22 +541,20 @@ def _read_pinned_subscription_response(url, user_agent):
             connection.putheader('User-Agent', user_agent)
             connection.putheader('Accept', '*/*')
             connection.putheader('Connection', 'close')
+            _set_subscription_socket_deadline(sock, deadline)
             connection.endheaders()
+            _set_subscription_socket_deadline(sock, deadline)
             response = connection.getresponse()
 
             if response.status in (301, 302, 303, 307, 308):
                 location = response.getheader('Location')
-                response.read()
                 if not location:
                     raise OSError('订阅服务器返回了无 Location 的重定向')
                 return None, urljoin(url, location)
             if not 200 <= response.status < 300:
-                response.read(_MAX_SUBSCRIPTION_BYTES + 1)
                 raise OSError(f'订阅服务器返回 HTTP {response.status}')
 
-            raw = response.read(_MAX_SUBSCRIPTION_BYTES + 1)
-            if len(raw) > _MAX_SUBSCRIPTION_BYTES:
-                raise ValueError("订阅响应过大（最大 2 MiB）")
+            raw = _read_subscription_body(response, sock, deadline)
             return raw, None
         except ValueError:
             raise
@@ -496,20 +569,16 @@ def _read_pinned_subscription_response(url, user_agent):
     raise OSError('订阅地址连接失败') from last_error
 
 
-def _read_subscription_url(url, user_agent):
+def _read_subscription_url(url, user_agent, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_SECONDS
     current_url = url
     for _ in range(6):
-        if os.environ.get('ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS', '0') == '1':
-            # Trusted private subscriptions retain urllib's standard transport.
-            import urllib.request
-            req = urllib.request.Request(current_url, headers={'User-Agent': user_agent})
-            with urllib.request.urlopen(req, timeout=10) as response:
-                raw = response.read(_MAX_SUBSCRIPTION_BYTES + 1)
-            if len(raw) > _MAX_SUBSCRIPTION_BYTES:
-                raise ValueError("订阅响应过大（最大 2 MiB）")
-            return raw
-
-        raw, redirect_url = _read_pinned_subscription_response(current_url, user_agent)
+        raw, redirect_url = _read_pinned_subscription_response(
+            current_url,
+            user_agent,
+            deadline,
+        )
         if redirect_url is None:
             return raw
         current_url = redirect_url
@@ -522,25 +591,13 @@ def parse_subscribe_url(url):
     2. base64 编码的多行订阅
     3. HTTP(S) URL 返回的订阅内容 (Clash YAML / 纯文本)
     """
-    nodes = []
-
-    # 情况1：直接是 anytls:// 链接
-    if url.strip().startswith('anytls://'):
-        for line in url.strip().splitlines():
-            line = line.strip()
-            if line:
-                node = parse_anytls_uri(line)
-                if node:
-                    nodes.append(node)
-        return nodes, {}
-
-    # 情况2：尝试作为 HTTP URL 拉取。不同上游会按 User-Agent 返回不同格式，
+    # HTTP URL 会按 User-Agent 返回不同格式，
     # 需要取样后选择最完整、AnyTLS 原生节点最多的结果。
     content = url.strip()
     traffic_info = {}
     if content.startswith('http://') or content.startswith('https://'):
-        _assert_public_subscription_url(content)
         candidates = []
+        deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_SECONDS
         for ua in [
             'SSRVPN/2.4.0',
             'Clash.Meta/1.18.0',
@@ -548,7 +605,7 @@ def parse_subscribe_url(url):
             'ClashForAndroid/2.5.12',
         ]:
             try:
-                raw = _read_subscription_url(content, ua)
+                raw = _read_subscription_url(content, ua, deadline)
                 text = _decode_subscription_response(raw)
                 parsed_nodes = _parse_subscription_content(text)
                 if parsed_nodes:
@@ -1241,6 +1298,8 @@ def account_sync(account_id):
 
     try:
         nodes, traffic_info = parse_subscribe_url(account['subscribe_url'])
+        if not nodes:
+            raise ValueError('订阅中未找到可用节点')
     except ValueError as e:
         flash(f'同步失败: {e}', 'error')
         return redirect(url_for('account_detail', account_id=account_id))
@@ -1702,6 +1761,14 @@ def api_sync_all():
                     "msg": "account was deleted during sync",
                 })
                 continue
+            if not nodes:
+                results.append({
+                    "id": account['id'],
+                    "name": account['name'],
+                    "status": "error",
+                    "msg": "订阅中未找到可用节点",
+                })
+                continue
             db.execute('DELETE FROM nodes WHERE account_id=?', (account['id'],))
             for n in nodes:
                 db.execute(
@@ -2067,7 +2134,10 @@ def public_subscribe(token):
         return 'Invalid token', 404
 
     db = get_db()
-    account = db.execute('SELECT * FROM accounts WHERE sub_token=?', (token,)).fetchone()
+    account = db.execute(
+        "SELECT * FROM accounts WHERE sub_token=? AND status='active'",
+        (token,),
+    ).fetchone()
     if not account:
         return 'Not found', 404
 

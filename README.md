@@ -25,7 +25,7 @@
 ### 方式一：在线部署
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.1.0/deploy.sh)
 ```
 
 首次部署会依次提示输入面板管理员用户名、隐藏输入并确认密码，以及面板域名。请先把域名的 A/AAAA 记录指向服务器，并在云安全组/防火墙放行 TCP 80 和 443。脚本会安装 Caddy、从 Let’s Encrypt 自动签发证书、启用 HTTP→HTTPS 跳转，并由 Caddy 在后台自动续签。
@@ -34,10 +34,24 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/d
 
 无人值守部署可预先设置 `ANYTLS_ADMIN_USER`、`ANYTLS_ADMIN_PASS` 和 `ANYTLS_PANEL_DOMAIN`；已有数据库更新时保留原管理员账号，只需输入域名。
 
+正式 Release 同时提供版本化源码归档、SHA-256 和 Sigstore bundle。下载三个同名资产后可验证：
+
+```bash
+gh release verify v1.1.0 --repo Elegying/AnyTLS_Panel
+gh release verify-asset v1.1.0 AnyTLS_Panel-v1.1.0.tar.gz \
+  --repo Elegying/AnyTLS_Panel
+sha256sum -c AnyTLS_Panel-v1.1.0.tar.gz.sha256
+cosign verify-blob \
+  --bundle AnyTLS_Panel-v1.1.0.tar.gz.sigstore.json \
+  --certificate-identity "https://github.com/Elegying/AnyTLS_Panel/.github/workflows/release.yml@refs/tags/v1.1.0" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  AnyTLS_Panel-v1.1.0.tar.gz
+```
+
 ### 方式二：克隆部署
 
 ```bash
-git clone https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.1.0 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -77,7 +91,7 @@ bash deploy.sh 9090
 - 仪表盘点击「一键同步全部」更新所有账号
 - 或进入账号详情点击「同步订阅」更新单个账号
 
-HTTP(S) 订阅默认拒绝回环、内网、链路本地和保留地址，并会逐次校验重定向目标；响应上限为 2 MiB。只有确实需要从可信内网订阅源导入时，才应在隔离网络中设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。
+HTTP(S) 订阅默认拒绝回环、内网、链路本地和保留地址，并会逐次校验重定向目标；DNS 解析、所有 User-Agent 尝试、重定向和正文读取共享 10 秒绝对期限，响应上限为 2 MiB。只有确实需要从可信内网订阅源导入时，才应在隔离网络中设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。停用账号后，已有公开订阅链接立即失效并返回 404。
 
 ## 🔌 API 接口
 

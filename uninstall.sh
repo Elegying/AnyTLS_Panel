@@ -18,7 +18,7 @@ Usage: bash uninstall.sh --yes [--keep-data]
 
 Options:
   --yes        Required. Confirm removal.
-  --keep-data  Keep the panel directory and database; only disable the service.
+  --keep-data  Uninstall service configuration but preserve the panel directory and database.
   -h, --help   Show this help.
 
 Environment overrides:

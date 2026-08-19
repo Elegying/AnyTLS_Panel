@@ -20,13 +20,13 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
 在线部署：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.1.0/deploy.sh)
 ```
 
 克隆后部署：
 
 ```bash
-git clone https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.1.0 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -34,8 +34,8 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.0.0" \
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
+ANYTLS_REPO_REF="v1.1.0" \
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.1.0/deploy.sh)
 ```
 
 首次交互部署会要求输入管理员用户名、两次输入密码以及面板域名。密码输入不会回显。自定义端口、服务名和目录时仍会显示这些提示：
@@ -147,7 +147,7 @@ trap - EXIT
 重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库。脚本先完成源码暂存、带哈希依赖下载和独立数据库初始化测试，再停止服务进行短切换；切换后任一步失败都会自动恢复旧代码、数据库、systemd 和 Caddy 配置：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.1.0/deploy.sh)
 ```
 
 更新时会再次询问面板域名，已有数据库不会再次询问或覆盖管理员凭据。自动化更新可设置 `ANYTLS_PANEL_DOMAIN`。如果使用自定义目录、服务名或 `/etc/anytls-panel/` 下的密钥文件，更新时需要继续传入相同环境变量。
@@ -165,7 +165,7 @@ journalctl -u anytls-panel-healthcheck.service -n 30 --no-pager
 ```bash
 ANYTLS_REPO_REF="上一个版本标签" \
 ANYTLS_PANEL_DOMAIN="panel.example.com" \
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.1.0/deploy.sh)
 ```
 
 ## 卸载
@@ -176,7 +176,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/main/d
 bash /opt/anytls-panel/uninstall.sh --yes
 ```
 
-只禁用服务，保留数据库和项目目录：
+卸载 systemd、健康检查和 Caddy 站点配置，但保留数据库和项目目录：
 
 ```bash
 bash /opt/anytls-panel/uninstall.sh --yes --keep-data
@@ -193,16 +193,21 @@ bash /opt/anytls-panel/uninstall.sh --yes
 ## 发布前检查
 
 ```bash
-python3 -m pip install -r requirements.txt
-python3 -m unittest discover -s tests -q
-python3 -m py_compile app.py security_utils.py traffic_token.py
-flake8 app.py security_utils.py traffic_token.py tests --select=E9,F63,F7,F82
+brew install python@3.12 shellcheck actionlint
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
+.venv/bin/python -m unittest discover -s tests -q
+.venv/bin/python -m py_compile app.py security_utils.py traffic_token.py
+.venv/bin/python -m flake8 app.py security_utils.py traffic_token.py tests \
+  --select=E9,F63,F7,F82
 bash -n deploy.sh start.sh traffic_collector.sh uninstall.sh
 shellcheck -x deploy.sh start.sh traffic_collector.sh uninstall.sh
-python3 -m pip_audit -r requirements.txt
+actionlint
+.venv/bin/python -m bandit -q -ll -r app.py security_utils.py traffic_token.py
+.venv/bin/python -m pip_audit -r requirements.txt
 ```
 
-GitHub Actions 会在 push 和 pull request 时自动运行这些检查。
+以上命令固定使用 Python 3.12 和带哈希的开发依赖锁，适用于 macOS 本地质量门禁。GitHub Actions 会在 push 和 pull request 时使用 Python 3.10/3.12 自动运行同等检查。
 
 ## 常见排障
 
