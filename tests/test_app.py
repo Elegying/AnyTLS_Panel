@@ -483,7 +483,7 @@ proxies:
             app = load_app(Path(tmp) / "anytls.db")
             seen_user_agents = []
 
-            def fake_read(_url, user_agent):
+            def fake_read(_url, user_agent, _deadline=None):
                 seen_user_agents.append(user_agent)
                 return b"anytls://pw@example.com:443#demo"
 
@@ -514,7 +514,7 @@ proxies:
             app = load_app(Path(tmp) / "anytls.db")
             seen_user_agents = []
 
-            def fake_read(_url, user_agent):
+            def fake_read(_url, user_agent, _deadline=None):
                 seen_user_agents.append(user_agent)
                 if "SSRVPN" in user_agent or "Clash.Meta" in user_agent:
                     raise OSError("blocked")
@@ -534,13 +534,37 @@ proxies:
         self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
         self.assertTrue(nodes[1]["raw_uri"].startswith("trojan://"))
 
+    def test_direct_mixed_protocol_subscription_preserves_each_scheme(self):
+        content = (
+            "anytls://apw@any.example.com:443#any-node\n"
+            "trojan://tpw@trojan.example.com:443#trojan-node"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            nodes, traffic_info = app.parse_subscribe_url(content)
+
+        self.assertEqual(traffic_info, {})
+        self.assertEqual(
+            [node["protocol"] for node in nodes],
+            ["anytls", "trojan"],
+        )
+
+    def test_invalid_direct_subscription_raises_instead_of_returning_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            with self.assertRaisesRegex(ValueError, "未找到可用节点"):
+                app.parse_subscribe_url("anytls://invalid")
+
     def test_http_subscription_rejects_private_network_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
-            private_result = [
-                (2, 1, 6, "", ("127.0.0.1", 80)),
-            ]
-            with mock.patch("socket.getaddrinfo", return_value=private_result):
+            private_result = ["127.0.0.1"]
+            with mock.patch.object(
+                app,
+                "_resolve_subscription_addresses",
+                return_value=private_result,
+            ):
                 with mock.patch.object(
                     app.socket,
                     "create_connection",
@@ -551,18 +575,49 @@ proxies:
 
         connect.assert_not_called()
 
+    def test_subscription_dns_resolution_obeys_absolute_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            started = time.monotonic()
+            with mock.patch.object(
+                app.subprocess,
+                "run",
+                side_effect=app.subprocess.TimeoutExpired("resolver", 0.05),
+            ):
+                with self.assertRaisesRegex(TimeoutError, "订阅拉取超时"):
+                    app._resolve_public_subscription_url(
+                        "https://sub.example/list",
+                        time.monotonic() + 0.05,
+                    )
+
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_subscription_dns_resolver_runs_in_an_isolated_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            addresses = app._resolve_subscription_addresses(
+                "localhost",
+                443,
+                time.monotonic() + 2,
+            )
+
+        self.assertTrue(addresses)
+        self.assertTrue(all(isinstance(address, str) for address in addresses))
+
     def test_http_subscription_limits_response_size(self):
         response = mock.Mock(status=200)
-        response.read.return_value = b"x" * (2 * 1024 * 1024 + 1)
+        response.read1.return_value = b"x" * (2 * 1024 * 1024 + 1)
         connection = mock.Mock()
         connection.getresponse.return_value = response
 
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
-            public_result = [
-                (2, 1, 6, "", ("93.184.216.34", 443)),
-            ]
-            with mock.patch("socket.getaddrinfo", return_value=public_result):
+            public_result = ["93.184.216.34"]
+            with mock.patch.object(
+                app,
+                "_resolve_subscription_addresses",
+                return_value=public_result,
+            ):
                 with mock.patch.object(app.socket, "create_connection", return_value=mock.Mock()):
                     with mock.patch.object(app.ssl, "create_default_context") as tls_context:
                         tls_context.return_value.wrap_socket.return_value = mock.Mock()
@@ -576,6 +631,77 @@ proxies:
                                     "https://sub.example/list", "SSRVPN/2.4.0"
                                 )
 
+    def test_http_subscription_stops_when_absolute_deadline_expires(self):
+        response = mock.Mock(status=200)
+        response.read1.side_effect = [
+            b"anytls://pw@example.com:443#demo",
+            b"",
+        ]
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+        raw_socket = mock.Mock()
+        tls_socket = mock.Mock()
+        clock_values = iter((0, 9, 11))
+
+        def monotonic():
+            return next(clock_values, 11)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            public_result = ["93.184.216.34"]
+            with mock.patch.object(
+                app,
+                "_resolve_subscription_addresses",
+                return_value=public_result,
+            ):
+                with mock.patch.object(app.time, "monotonic", side_effect=monotonic):
+                    with mock.patch.object(
+                        app.socket, "create_connection", return_value=raw_socket
+                    ):
+                        with mock.patch.object(app.ssl, "create_default_context") as tls_context:
+                            tls_context.return_value.wrap_socket.return_value = tls_socket
+                            with mock.patch.object(
+                                app.http.client,
+                                "HTTPConnection",
+                                return_value=connection,
+                            ):
+                                with self.assertRaisesRegex(OSError, "连接失败"):
+                                    app._read_subscription_url(
+                                        "https://sub.example/list", "SSRVPN/2.4.0"
+                                    )
+
+    def test_http_redirect_does_not_read_untrusted_response_body(self):
+        response = mock.Mock(status=302)
+        response.getheader.return_value = "https://next.example/list"
+        response.read.side_effect = AssertionError("redirect body must not be read")
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            public_result = ["93.184.216.34"]
+            with mock.patch.object(
+                app,
+                "_resolve_subscription_addresses",
+                return_value=public_result,
+            ):
+                with mock.patch.object(
+                    app.socket, "create_connection", return_value=mock.Mock()
+                ):
+                    with mock.patch.object(app.ssl, "create_default_context") as tls_context:
+                        tls_context.return_value.wrap_socket.return_value = mock.Mock()
+                        with mock.patch.object(
+                            app.http.client,
+                            "HTTPConnection",
+                            return_value=connection,
+                        ):
+                            _raw, redirect_url = app._read_pinned_subscription_response(
+                                "https://sub.example/list", "SSRVPN/2.4.0"
+                            )
+
+        self.assertEqual(redirect_url, "https://next.example/list")
+        response.read.assert_not_called()
+
     def test_http_subscription_rejects_redirects_to_private_networks(self):
         response = mock.Mock(status=302)
         response.getheader.return_value = "http://metadata.example/latest"
@@ -584,12 +710,11 @@ proxies:
         connection.getresponse.return_value = response
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
-            public_result = [(2, 1, 6, "", ("93.184.216.34", 443))]
-            private_result = [
-                (2, 1, 6, "", ("169.254.169.254", 80)),
-            ]
-            with mock.patch(
-                "socket.getaddrinfo",
+            public_result = ["93.184.216.34"]
+            private_result = ["169.254.169.254"]
+            with mock.patch.object(
+                app,
+                "_resolve_subscription_addresses",
                 side_effect=[public_result, private_result],
             ):
                 with mock.patch.object(app.socket, "create_connection", return_value=mock.Mock()):
@@ -607,7 +732,10 @@ proxies:
 
     def test_http_subscription_connects_to_the_validated_ip(self):
         response = mock.Mock(status=200)
-        response.read.return_value = b"anytls://pw@example.com:443#demo"
+        response.read1.side_effect = [
+            b"anytls://pw@example.com:443#demo",
+            b"",
+        ]
         connection = mock.Mock()
         connection.getresponse.return_value = response
         raw_socket = mock.Mock()
@@ -615,8 +743,12 @@ proxies:
 
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
-            public_result = [(2, 1, 6, "", ("93.184.216.34", 443))]
-            with mock.patch("socket.getaddrinfo", return_value=public_result):
+            public_result = ["93.184.216.34"]
+            with mock.patch.object(
+                app,
+                "_resolve_subscription_addresses",
+                return_value=public_result,
+            ):
                 with mock.patch.object(
                     app.socket, "create_connection", return_value=raw_socket
                 ) as connect:
@@ -1322,6 +1454,42 @@ proxies:
             self.assertIn('filename="bad Injected: yes name"', disposition)
             self.assertNotIn('yes"name', disposition)
 
+    def test_disabled_account_public_subscription_is_not_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, sub_token, status) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        "disabled-demo",
+                        "anytls://pw@example.com:443#demo",
+                        "disabled-token",
+                        "disabled",
+                    ),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "demo-node",
+                        "example.com",
+                        443,
+                        "pw",
+                        "anytls://pw@example.com:443#demo",
+                    ),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                response = client.get("/sub/disabled-token")
+
+        self.assertEqual(response.status_code, 404)
+
     def test_public_subscribe_preserves_anytls_for_ssrvpn_clients(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
@@ -1747,6 +1915,45 @@ proxies:
         self.assertEqual(account_count, 0)
         self.assertEqual(orphan_count, 0)
 
+    def test_account_sync_keeps_existing_nodes_when_parser_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "anytls://invalid"),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "existing",
+                        "existing.example.com",
+                        443,
+                        "pw",
+                        "anytls://pw@existing.example.com:443#existing",
+                    ),
+                )
+                db.commit()
+
+            with mock.patch.object(app, "parse_subscribe_url", return_value=([], {})):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                    response = client.post(f"/accounts/{account_id}/sync")
+
+            with sqlite3.connect(database) as db:
+                rows = db.execute(
+                    "SELECT name FROM nodes WHERE account_id=?", (account_id,)
+                ).fetchall()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(rows, [("existing",)])
+
     def test_sync_all_skips_account_deleted_during_fetch(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
@@ -1781,6 +1988,46 @@ proxies:
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["results"][0]["status"], "skipped")
         self.assertEqual(orphan_count, 0)
+
+    def test_sync_all_keeps_existing_nodes_when_parser_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "anytls://invalid"),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "existing",
+                        "existing.example.com",
+                        443,
+                        "pw",
+                        "anytls://pw@existing.example.com:443#existing",
+                    ),
+                )
+                db.commit()
+
+            with mock.patch.object(app, "parse_subscribe_url", return_value=([], {})):
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                    response = client.post("/api/sync-all")
+
+            with sqlite3.connect(database) as db:
+                rows = db.execute(
+                    "SELECT name FROM nodes WHERE account_id=?", (account_id,)
+                ).fetchall()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["results"][0]["status"], "error")
+        self.assertEqual(rows, [("existing",)])
 
     def test_public_subscription_uses_persisted_traffic_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2295,6 +2542,37 @@ proxies:
             (panel_dir / "templates" / "base.html").write_text(
                 "proof-template\n", encoding="utf-8"
             )
+            (panel_dir / "static").mkdir()
+            (panel_dir / "static" / "favicon.svg").write_text(
+                "proof-icon\n", encoding="utf-8"
+            )
+            (panel_dir / "static" / ".secret_key").write_text(
+                "must-not-stage\n", encoding="utf-8"
+            )
+            (panel_dir / "static" / "debug.log").write_text(
+                "must-not-stage\n", encoding="utf-8"
+            )
+            (panel_dir / "release-files.txt").write_text(
+                "app.py\n"
+                "security_utils.py\n"
+                "traffic_token.py\n"
+                "requirements.txt\n"
+                "deploy.sh\n"
+                "uninstall.sh\n"
+                "templates/base.html\n"
+                "static/favicon.svg\n"
+                "release-files.txt\n",
+                encoding="utf-8",
+            )
+            (panel_dir / ".secret_key").write_text(
+                "must-not-stage\n", encoding="utf-8"
+            )
+            (panel_dir / ".DS_Store").write_text(
+                "must-not-stage\n", encoding="utf-8"
+            )
+            (panel_dir / "untracked-junk").write_text(
+                "must-not-stage\n", encoding="utf-8"
+            )
             env = os.environ.copy()
             env["TEST_PANEL_DIR"] = str(panel_dir)
             result = subprocess.run(
@@ -2308,6 +2586,12 @@ proxies:
                     'prepare_release_source; '
                     'test -f "$RELEASE_SOURCE/app.py"; '
                     'test "$(cat "$RELEASE_SOURCE/app.py")" = "proof-app.py"; '
+                    'test ! -e "$RELEASE_SOURCE/.secret_key"; '
+                    'test ! -e "$RELEASE_SOURCE/.DS_Store"; '
+                    'test ! -e "$RELEASE_SOURCE/untracked-junk"; '
+                    'test -f "$RELEASE_SOURCE/static/favicon.svg"; '
+                    'test ! -e "$RELEASE_SOURCE/static/.secret_key"; '
+                    'test ! -e "$RELEASE_SOURCE/static/debug.log"; '
                     'test -f "$PANEL_DIR/app.py"; printf STAGED_OK',
                 ],
                 capture_output=True,
@@ -2345,6 +2629,82 @@ proxies:
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip().splitlines()[-1], str(panel_dir))
+
+    def test_release_manifest_cannot_traverse_a_symlinked_parent(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "destination"
+            outside = root / "outside"
+            source.mkdir()
+            destination.mkdir()
+            outside.mkdir()
+            (outside / "base.html").write_text("private\n", encoding="utf-8")
+            (source / "templates").symlink_to(outside, target_is_directory=True)
+            (source / "release-files.txt").write_text(
+                "templates/base.html\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env.update({
+                "TEST_SOURCE": str(source),
+                "TEST_DESTINATION": str(destination),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'copy_release_files "$TEST_SOURCE" "$TEST_DESTINATION"',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must not traverse symlinks", result.stderr)
+
+    def test_deploy_smoke_database_uses_a_safe_copy_of_existing_data(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            panel_dir = root / "panel"
+            data_dir = panel_dir / "data"
+            smoke_database = root / "smoke" / "anytls.db"
+            data_dir.mkdir(parents=True)
+            smoke_database.parent.mkdir()
+            with sqlite3.connect(data_dir / "anytls.db") as db:
+                db.execute("CREATE TABLE proof (value TEXT)")
+                db.execute("INSERT INTO proof VALUES ('existing-data')")
+                db.commit()
+
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_DATA_DIR": str(data_dir),
+                "TEST_SMOKE_DATABASE": str(smoke_database),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$TEST_DATA_DIR"; '
+                    'prepare_smoke_database "$TEST_SMOKE_DATABASE"; '
+                    'python3 - "$TEST_SMOKE_DATABASE" <<\'PY\'\n'
+                    'import sqlite3, sys\n'
+                    'print(sqlite3.connect(sys.argv[1]).execute("SELECT value FROM proof").fetchone()[0])\n'
+                    'PY',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "existing-data")
 
     def test_deploy_rollback_restores_previous_release_files(self):
         script = REPO_ROOT / "deploy.sh"
@@ -2385,14 +2745,16 @@ proxies:
                     f'source "{script}"; '
                     'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$PANEL_DIR/data"; '
                     'ROLLBACK_DIR="$TEST_ROLLBACK_DIR"; SERVICE_NAME="audit-panel"; '
-                    'SERVICE_USER="root"; SERVICE_GROUP="root"; '
+                    'SERVICE_USER="$(id -un)"; SERVICE_GROUP="$(id -gn)"; '
                     'SECRET_KEY_FILE="$DATA_DIR/.secret_key"; '
                     'TRAFFIC_API_TOKEN_FILE="$DATA_DIR/.traffic_api_token"; '
                     'ADMIN_PASSWORD_FILE="$DATA_DIR/.initial_admin_password"; '
                     'CODE_BACKED_UP=1; DATABASE_BACKED_UP=1; '
                     'DATABASE_STATE_CAPTURED=1; CONFIG_BACKED_UP=1; '
                     'CUTOVER_STARTED=1; ROLLBACK_FINISHED=0; '
-                    'systemctl() { return 0; }; '
+                    'systemctl() { '
+                    '[[ "$1" == "show" ]] && { printf "loaded\n"; return 0; }; '
+                    'return 0; }; '
                     'rollback_deployment; '
                     'test ! -e "$PANEL_DIR/.anytls-panel-install"; '
                     'cat "$PANEL_DIR/app.py" "$DATA_DIR/anytls.db" '
@@ -2408,6 +2770,278 @@ proxies:
             result.stdout.strip().splitlines()[-3:],
             ["old-release", "old-database", "old-secret"],
         )
+
+    def test_deploy_rollback_restores_inactive_disabled_service_state(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            panel_dir = root / "panel"
+            rollback_dir = root / "rollback"
+            (panel_dir / "data").mkdir(parents=True)
+            rollback_dir.mkdir()
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_ROLLBACK_DIR": str(rollback_dir),
+                "TEST_SYSTEMCTL_LOG": str(root / "systemctl.log"),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$PANEL_DIR/data"; '
+                    'ROLLBACK_DIR="$TEST_ROLLBACK_DIR"; SERVICE_NAME="audit-panel"; '
+                    'SERVICE_USER="root"; SERVICE_GROUP="root"; '
+                    'SECRET_KEY_FILE="$DATA_DIR/.secret_key"; '
+                    'TRAFFIC_API_TOKEN_FILE="$DATA_DIR/.traffic_api_token"; '
+                    'ADMIN_PASSWORD_FILE="$DATA_DIR/.initial_admin_password"; '
+                    'CODE_BACKED_UP=0; DATABASE_STATE_CAPTURED=0; CONFIG_BACKED_UP=0; '
+                    'OLD_PANEL_ACTIVE=0; OLD_PANEL_ENABLED=0; '
+                    'OLD_CADDY_ACTIVE=0; OLD_CADDY_ENABLED=0; '
+                    'OLD_HEALTH_TIMER_ACTIVE=0; OLD_HEALTH_TIMER_ENABLED=0; '
+                    'OLD_PANEL_UNIT_PRESENT=1; OLD_CADDY_UNIT_PRESENT=1; '
+                    'OLD_HEALTH_TIMER_UNIT_PRESENT=1; '
+                    'OLD_PANEL_ENABLEMENT_MANAGED=1; '
+                    'OLD_CADDY_ENABLEMENT_MANAGED=1; '
+                    'OLD_HEALTH_TIMER_ENABLEMENT_MANAGED=1; '
+                    'CUTOVER_STARTED=1; ROLLBACK_FINISHED=0; '
+                    'systemctl() { '
+                    '[[ "$1" == "show" ]] && { printf "loaded\\n"; return 0; }; '
+                    'printf "%s\\n" "$*" >> "$TEST_SYSTEMCTL_LOG"; return 0; }; '
+                    'rollback_deployment; cat "$TEST_SYSTEMCTL_LOG"',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        commands = result.stdout.splitlines()
+        self.assertIn("disable audit-panel", commands)
+        self.assertIn("disable caddy", commands)
+        self.assertIn("disable audit-panel-healthcheck.timer", commands)
+        self.assertIn("stop caddy", commands)
+
+    def test_deploy_rollback_restores_active_enabled_service_state(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            panel_dir = root / "panel"
+            rollback_dir = root / "rollback"
+            (panel_dir / "data").mkdir(parents=True)
+            rollback_dir.mkdir()
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_ROLLBACK_DIR": str(rollback_dir),
+                "TEST_SYSTEMCTL_LOG": str(root / "systemctl.log"),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$PANEL_DIR/data"; '
+                    'ROLLBACK_DIR="$TEST_ROLLBACK_DIR"; SERVICE_NAME="audit-panel"; '
+                    'CODE_BACKED_UP=0; DATABASE_STATE_CAPTURED=0; CONFIG_BACKED_UP=0; '
+                    'OLD_PANEL_ACTIVE=1; OLD_PANEL_ENABLED=1; '
+                    'OLD_CADDY_ACTIVE=1; OLD_CADDY_ENABLED=1; '
+                    'OLD_HEALTH_TIMER_ACTIVE=1; OLD_HEALTH_TIMER_ENABLED=1; '
+                    'OLD_PANEL_UNIT_PRESENT=1; OLD_CADDY_UNIT_PRESENT=1; '
+                    'OLD_HEALTH_TIMER_UNIT_PRESENT=1; '
+                    'OLD_PANEL_ENABLEMENT_MANAGED=1; '
+                    'OLD_CADDY_ENABLEMENT_MANAGED=1; '
+                    'OLD_HEALTH_TIMER_ENABLEMENT_MANAGED=1; '
+                    'CUTOVER_STARTED=1; ROLLBACK_FINISHED=0; '
+                    'systemctl() { '
+                    '[[ "$1" == "show" ]] && { printf "loaded\n"; return 0; }; '
+                    'printf "%s\n" "$*" >> "$TEST_SYSTEMCTL_LOG"; return 0; }; '
+                    'rollback_deployment; cat "$TEST_SYSTEMCTL_LOG"',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        commands = result.stdout.splitlines()
+        self.assertIn("enable audit-panel", commands)
+        self.assertIn("enable caddy", commands)
+        self.assertIn("enable audit-panel-healthcheck.timer", commands)
+        self.assertIn("start audit-panel", commands)
+        self.assertIn("start caddy", commands)
+        self.assertIn("start audit-panel-healthcheck.timer", commands)
+
+    def test_deploy_failure_before_cutover_disables_new_caddy(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            env = os.environ.copy()
+            env["TEST_SYSTEMCTL_LOG"] = str(root / "systemctl.log")
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'DEPLOY_SUCCEEDED=0; CUTOVER_STARTED=0; ROLLBACK_FINISHED=0; '
+                    'CADDY_INSTALL_ATTEMPTED=1; CADDY_INSTALLED_NOW=0; '
+                    'systemctl() { '
+                    '[[ "$1" == "show" ]] && { printf "loaded\n"; return 0; }; '
+                    'printf "%s\n" "$*" >> "$TEST_SYSTEMCTL_LOG"; return 0; }; '
+                    'cleanup_deploy_artifacts; DEPLOY_SUCCEEDED=1; '
+                    'cat "$TEST_SYSTEMCTL_LOG"',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("stop caddy", result.stdout.splitlines())
+        self.assertIn("disable caddy", result.stdout.splitlines())
+
+    def test_fresh_install_rollback_ignores_units_that_remain_absent(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            panel_dir = root / "panel"
+            rollback_dir = root / "rollback"
+            (panel_dir / "data").mkdir(parents=True)
+            rollback_dir.mkdir()
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_ROLLBACK_DIR": str(rollback_dir),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$PANEL_DIR/data"; '
+                    'ROLLBACK_DIR="$TEST_ROLLBACK_DIR"; SERVICE_NAME="audit-panel"; '
+                    'CODE_BACKED_UP=0; DATABASE_STATE_CAPTURED=0; CONFIG_BACKED_UP=0; '
+                    'OLD_PANEL_UNIT_PRESENT=0; OLD_CADDY_UNIT_PRESENT=1; '
+                    'OLD_HEALTH_TIMER_UNIT_PRESENT=0; '
+                    'OLD_PANEL_ACTIVE=0; OLD_PANEL_ENABLED=0; '
+                    'OLD_CADDY_ACTIVE=0; OLD_CADDY_ENABLED=0; '
+                    'OLD_HEALTH_TIMER_ACTIVE=0; OLD_HEALTH_TIMER_ENABLED=0; '
+                    'OLD_PANEL_ENABLEMENT_MANAGED=1; '
+                    'OLD_CADDY_ENABLEMENT_MANAGED=1; '
+                    'OLD_HEALTH_TIMER_ENABLEMENT_MANAGED=1; '
+                    'CUTOVER_STARTED=1; ROLLBACK_FINISHED=0; '
+                    'systemctl() { '
+                    'if [[ "$1" == "show" ]]; then '
+                    'case "$2" in audit-panel|audit-panel-healthcheck.timer) '
+                    'printf "not-found\n" ;; *) printf "loaded\n" ;; esac; '
+                    'return 0; fi; return 0; }; '
+                    'rollback_deployment; test "$ROLLBACK_FINISHED" -eq 1',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertNotIn("rollback incomplete", result.stderr)
+
+    def test_deploy_rollback_reports_incomplete_restoration(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            panel_dir = root / "panel"
+            rollback_dir = root / "rollback"
+            (panel_dir / "data").mkdir(parents=True)
+            rollback_dir.mkdir()
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_ROLLBACK_DIR": str(rollback_dir),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$PANEL_DIR/data"; '
+                    'ROLLBACK_DIR="$TEST_ROLLBACK_DIR"; SERVICE_NAME="audit-panel"; '
+                    'SERVICE_USER="root"; SERVICE_GROUP="root"; '
+                    'SECRET_KEY_FILE="$DATA_DIR/.secret_key"; '
+                    'TRAFFIC_API_TOKEN_FILE="$DATA_DIR/.traffic_api_token"; '
+                    'ADMIN_PASSWORD_FILE="$DATA_DIR/.initial_admin_password"; '
+                    'CODE_BACKED_UP=0; DATABASE_STATE_CAPTURED=0; CONFIG_BACKED_UP=0; '
+                    'OLD_PANEL_ACTIVE=0; OLD_PANEL_ENABLED=0; '
+                    'OLD_CADDY_ACTIVE=0; OLD_CADDY_ENABLED=0; '
+                    'OLD_HEALTH_TIMER_ACTIVE=0; OLD_HEALTH_TIMER_ENABLED=0; '
+                    'CUTOVER_STARTED=1; ROLLBACK_FINISHED=0; '
+                    'systemctl() { '
+                    '[[ "$1" == "show" ]] && { printf "loaded\n"; return 0; }; '
+                    '[[ "$*" != "daemon-reload" ]]; }; '
+                    'if rollback_deployment; then exit 99; fi; '
+                    'test "$ROLLBACK_FINISHED" -eq 0; printf ROLLBACK_FAILED',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout, "ROLLBACK_FAILED")
+        self.assertIn("rollback incomplete", result.stderr)
+
+    def test_deploy_refuses_to_guess_when_systemd_state_cannot_be_read(self):
+        script = REPO_ROOT / "deploy.sh"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{script}"; systemctl() {{ return 1; }}; '
+                'capture_systemd_unit_state audit-panel',
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot inspect systemd load state", result.stderr)
+
+    def test_rollback_reports_systemd_probe_failure(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            panel_dir = root / "panel"
+            rollback_dir = root / "rollback"
+            (panel_dir / "data").mkdir(parents=True)
+            rollback_dir.mkdir()
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_ROLLBACK_DIR": str(rollback_dir),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$PANEL_DIR/data"; '
+                    'ROLLBACK_DIR="$TEST_ROLLBACK_DIR"; SERVICE_NAME="audit-panel"; '
+                    'CODE_BACKED_UP=0; DATABASE_STATE_CAPTURED=0; CONFIG_BACKED_UP=0; '
+                    'OLD_PANEL_UNIT_PRESENT=0; OLD_CADDY_UNIT_PRESENT=0; '
+                    'OLD_HEALTH_TIMER_UNIT_PRESENT=0; '
+                    'CUTOVER_STARTED=1; ROLLBACK_FINISHED=0; '
+                    'systemctl() { [[ "$1" == "show" ]] && return 1; return 0; }; '
+                    'if rollback_deployment; then exit 99; fi; '
+                    'test "$ROLLBACK_FINISHED" -eq 0',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("rollback could not inspect systemd unit", result.stderr)
+        self.assertIn("rollback incomplete", result.stderr)
 
     def test_deploy_validates_and_normalizes_panel_domain(self):
         script = REPO_ROOT / "deploy.sh"
@@ -2457,6 +3091,37 @@ proxies:
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("panel domain", result.stderr)
+
+    def test_deploy_install_copy_is_portable_to_bsd_cp(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            release_source = root / "release"
+            panel_dir = root / "panel"
+            release_source.mkdir()
+            panel_dir.mkdir()
+            (release_source / "app.py").write_text("portable-copy\n", encoding="utf-8")
+            env = os.environ.copy()
+            env.update({
+                "TEST_RELEASE_SOURCE": str(release_source),
+                "TEST_PANEL_DIR": str(panel_dir),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'RELEASE_SOURCE="$TEST_RELEASE_SOURCE"; PANEL_DIR="$TEST_PANEL_DIR"; '
+                    'copy_directory_contents "$RELEASE_SOURCE" "$PANEL_DIR"; '
+                    'cat "$PANEL_DIR/app.py"',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip().splitlines()[0], "portable-copy")
 
     def test_deploy_accepts_noninteractive_initial_admin_credentials(self):
         script = REPO_ROOT / "deploy.sh"
@@ -2751,6 +3416,122 @@ proxies:
             )
             self.assertTrue((panel_dir / ".anytls-panel-install").is_file())
 
+    def test_legacy_database_rollback_does_not_leave_a_stale_data_copy(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            panel_dir = root / "panel"
+            rollback_dir = root / "rollback"
+            panel_dir.mkdir()
+            rollback_dir.mkdir()
+            with sqlite3.connect(panel_dir / "anytls.db") as db:
+                db.execute("CREATE TABLE proof (value TEXT NOT NULL)")
+                db.execute("INSERT INTO proof VALUES ('legacy-current')")
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_ROLLBACK_DIR": str(rollback_dir),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$PANEL_DIR/data"; '
+                    'ROLLBACK_DIR="$TEST_ROLLBACK_DIR"; SERVICE_NAME="audit-panel"; '
+                    'SERVICE_USER="$(id -un)"; SERVICE_GROUP="$(id -gn)"; '
+                    'SECRET_KEY_FILE="$DATA_DIR/.secret_key"; '
+                    'TRAFFIC_API_TOKEN_FILE="$DATA_DIR/.traffic_api_token"; '
+                    'ADMIN_PASSWORD_FILE="$DATA_DIR/.initial_admin_password"; '
+                    'OLD_DATA_DATABASE_PRESENT=0; OLD_INSTALL_PRESENT=0; '
+                    'CONFIG_BACKED_UP=0; CUTOVER_STARTED=1; ROLLBACK_FINISHED=0; '
+                    'runuser() { shift 2; [[ "$1" == "--" ]] && shift; "$@"; }; '
+                    'systemctl() { '
+                    '[[ "$1" == "show" ]] && { printf "not-found\n"; return 0; }; '
+                    'return 0; }; '
+                    'backup_database_for_rollback; prepare_state_directory; '
+                    'backup_current_release; rollback_deployment; '
+                    'test -f "$PANEL_DIR/anytls.db"; '
+                    'test ! -e "$DATA_DIR/anytls.db"',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            with sqlite3.connect(panel_dir / "anytls.db") as db:
+                self.assertEqual(
+                    db.execute("SELECT value FROM proof").fetchone()[0],
+                    "legacy-current",
+                )
+
+    def test_legacy_database_is_removed_when_state_migration_fails_midway(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            panel_dir = root / "panel"
+            rollback_dir = root / "rollback"
+            panel_dir.mkdir()
+            rollback_dir.mkdir()
+            with sqlite3.connect(panel_dir / "anytls.db") as db:
+                db.execute("CREATE TABLE proof (value TEXT NOT NULL)")
+                db.execute("INSERT INTO proof VALUES ('legacy-current')")
+            (panel_dir / ".secret_key").mkdir()
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_ROLLBACK_DIR": str(rollback_dir),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$PANEL_DIR/data"; '
+                    'ROLLBACK_DIR="$TEST_ROLLBACK_DIR"; SERVICE_NAME="audit-panel"; '
+                    'SERVICE_USER="$(id -un)"; SERVICE_GROUP="$(id -gn)"; '
+                    'SECRET_KEY_FILE="$DATA_DIR/.secret_key"; '
+                    'TRAFFIC_API_TOKEN_FILE="$DATA_DIR/.traffic_api_token"; '
+                    'ADMIN_PASSWORD_FILE="$DATA_DIR/.initial_admin_password"; '
+                    'OLD_DATA_DATABASE_PRESENT=0; OLD_INSTALL_PRESENT=0; '
+                    'CONFIG_BACKED_UP=0; CUTOVER_STARTED=1; ROLLBACK_FINISHED=0; '
+                    'runuser() { shift 2; [[ "$1" == "--" ]] && shift; "$@"; }; '
+                    'systemctl() { '
+                    '[[ "$1" == "show" ]] && { printf "not-found\n"; return 0; }; '
+                    'return 0; }; '
+                    'backup_database_for_rollback; prepare_state_directory',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("legacy panel state file must be regular", result.stderr)
+            self.assertTrue((panel_dir / "anytls.db").is_file())
+            self.assertFalse((panel_dir / "data" / "anytls.db").exists())
+
+    def test_ci_and_macos_gate_use_the_hashed_development_lock(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        operations = (REPO_ROOT / "docs" / "OPERATIONS.md").read_text(
+            encoding="utf-8"
+        )
+        dev_input = (REPO_ROOT / "requirements-dev.in").read_text(encoding="utf-8")
+
+        self.assertIn("--require-hashes -r requirements-dev.txt", workflow)
+        self.assertIn("python -m bandit -q -ll", workflow)
+        self.assertNotIn("python -m pip install flake8 pip-audit", workflow)
+        self.assertIn("python3.12 -m venv .venv", operations)
+        self.assertIn("brew install python@3.12 shellcheck actionlint", operations)
+        self.assertIn("--require-hashes -r requirements-dev.txt", operations)
+        self.assertIn("git clone --depth 1 --branch v1.1.0", operations)
+        self.assertIn("flake8==7.3.0", dev_input)
+        self.assertIn("bandit==1.9.4", dev_input)
+        self.assertIn("pip-audit==2.10.1", dev_input)
+
     def test_deploy_rejects_symlinked_data_marker(self):
         script = REPO_ROOT / "deploy.sh"
         with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
@@ -2826,6 +3607,27 @@ proxies:
         self.assertIn('"${SERVICE_NAME}-healthcheck.timer"', content)
         self.assertIn('"$HEALTHCHECK_SCRIPT"', content)
         self.assertIn('"$CADDY_RESTART_DROPIN"', content)
+        self.assertIn(
+            "Uninstall service configuration but preserve the panel directory and database.",
+            content,
+        )
+        self.assertNotIn("only disable the service", content)
+
+    def test_release_defaults_and_workflow_use_immutable_signed_version(self):
+        deploy = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
+
+        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.1.0}"', deploy)
+        self.assertIn("AnyTLS_Panel/v1.1.0/deploy.sh", readme)
+        self.assertTrue(workflow.is_file())
+        workflow_text = workflow.read_text(encoding="utf-8")
+        self.assertIn("id-token: write", workflow_text)
+        self.assertIn("cosign sign-blob", workflow_text)
+        self.assertIn("--bundle", workflow_text)
+        self.assertIn("--draft", workflow_text)
+        self.assertIn("gh release upload", workflow_text)
+        self.assertIn("--draft=false", workflow_text)
 
     def test_deploy_and_uninstall_reject_foreign_systemd_units(self):
         for script_name in ("deploy.sh", "uninstall.sh"):
