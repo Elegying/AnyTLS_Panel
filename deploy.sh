@@ -520,10 +520,15 @@ begin_cutover() {
        [[ "$(< "$PANEL_DIR/.anytls-panel-install")" == "anytls-panel-managed-v1" ]]; then
         OLD_INSTALL_PRESENT=1
     fi
-    systemctl is-active --quiet "$SERVICE_NAME" && OLD_PANEL_ACTIVE=1 || true
-    systemctl is-active --quiet caddy && OLD_CADDY_ACTIVE=1 || true
-    systemctl is-active --quiet "${SERVICE_NAME}-healthcheck.timer" && \
-        OLD_HEALTH_TIMER_ACTIVE=1 || true
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        OLD_PANEL_ACTIVE=1
+    fi
+    if systemctl is-active --quiet caddy; then
+        OLD_CADDY_ACTIVE=1
+    fi
+    if systemctl is-active --quiet "${SERVICE_NAME}-healthcheck.timer"; then
+        OLD_HEALTH_TIMER_ACTIVE=1
+    fi
     backup_configuration_for_rollback
     CUTOVER_STARTED=1
 
