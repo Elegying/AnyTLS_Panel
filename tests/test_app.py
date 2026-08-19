@@ -2318,6 +2318,34 @@ proxies:
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("STAGED_OK", result.stdout)
 
+    def test_deploy_initializes_database_from_installed_release_directory(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            panel_dir = Path(tmp) / "panel"
+            panel_dir.mkdir()
+            env = os.environ.copy()
+            env["TEST_PANEL_DIR"] = str(panel_dir)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$PANEL_DIR/data"; '
+                    'SERVICE_USER="audit"; ADMIN_USER=""; '
+                    'SECRET_KEY_FILE="$DATA_DIR/.secret_key"; '
+                    'TRAFFIC_API_TOKEN_FILE="$DATA_DIR/.traffic_api_token"; '
+                    'ADMIN_PASSWORD_FILE="$DATA_DIR/.initial_admin_password"; '
+                    'runuser() { printf "%s\\n" "$PWD"; }; '
+                    'initialize_database',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], str(panel_dir))
+
     def test_deploy_rollback_restores_previous_release_files(self):
         script = REPO_ROOT / "deploy.sh"
         with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
