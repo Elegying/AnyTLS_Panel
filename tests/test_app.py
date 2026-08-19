@@ -541,31 +541,21 @@ proxies:
                 (2, 1, 6, "", ("127.0.0.1", 80)),
             ]
             with mock.patch("socket.getaddrinfo", return_value=private_result):
-                with mock.patch("urllib.request.urlopen", side_effect=AssertionError("network called")):
-                    with mock.patch("urllib.request.build_opener") as build_opener:
-                        with self.assertRaisesRegex(ValueError, "公网"):
-                            app.parse_subscribe_url("http://internal.example/sub")
+                with mock.patch.object(
+                    app.socket,
+                    "create_connection",
+                    side_effect=AssertionError("network called"),
+                ) as connect:
+                    with self.assertRaisesRegex(ValueError, "公网"):
+                        app.parse_subscribe_url("http://internal.example/sub")
 
-        build_opener.assert_not_called()
+        connect.assert_not_called()
 
     def test_http_subscription_limits_response_size(self):
-        class OversizedResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self, _limit):
-                return b"x" * (2 * 1024 * 1024 + 1)
-
-            def geturl(self):
-                return "https://sub.example/list"
-
-        class FakeOpener:
-            def open(self, _request, timeout=10):
-                self.timeout = timeout
-                return OversizedResponse()
+        response = mock.Mock(status=200)
+        response.read.return_value = b"x" * (2 * 1024 * 1024 + 1)
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
 
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
@@ -573,27 +563,80 @@ proxies:
                 (2, 1, 6, "", ("93.184.216.34", 443)),
             ]
             with mock.patch("socket.getaddrinfo", return_value=public_result):
-                with mock.patch("urllib.request.build_opener", return_value=FakeOpener()):
-                    with self.assertRaisesRegex(ValueError, "响应过大"):
-                        app._read_subscription_url("https://sub.example/list", "SSRVPN/2.4.0")
+                with mock.patch.object(app.socket, "create_connection", return_value=mock.Mock()):
+                    with mock.patch.object(app.ssl, "create_default_context") as tls_context:
+                        tls_context.return_value.wrap_socket.return_value = mock.Mock()
+                        with mock.patch.object(
+                            app.http.client,
+                            "HTTPConnection",
+                            return_value=connection,
+                        ):
+                            with self.assertRaisesRegex(ValueError, "响应过大"):
+                                app._read_subscription_url(
+                                    "https://sub.example/list", "SSRVPN/2.4.0"
+                                )
 
     def test_http_subscription_rejects_redirects_to_private_networks(self):
+        response = mock.Mock(status=302)
+        response.getheader.return_value = "http://metadata.example/latest"
+        response.read.return_value = b""
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
-            request = mock.Mock(full_url="https://sub.example/list")
+            public_result = [(2, 1, 6, "", ("93.184.216.34", 443))]
             private_result = [
                 (2, 1, 6, "", ("169.254.169.254", 80)),
             ]
-            with mock.patch("socket.getaddrinfo", return_value=private_result):
-                with self.assertRaisesRegex(ValueError, "公网"):
-                    app._SafeSubscriptionRedirectHandler().redirect_request(
-                        request,
-                        None,
-                        302,
-                        "Found",
-                        {},
-                        "http://metadata.example/latest",
-                    )
+            with mock.patch(
+                "socket.getaddrinfo",
+                side_effect=[public_result, private_result],
+            ):
+                with mock.patch.object(app.socket, "create_connection", return_value=mock.Mock()):
+                    with mock.patch.object(app.ssl, "create_default_context") as tls_context:
+                        tls_context.return_value.wrap_socket.return_value = mock.Mock()
+                        with mock.patch.object(
+                            app.http.client,
+                            "HTTPConnection",
+                            return_value=connection,
+                        ):
+                            with self.assertRaisesRegex(ValueError, "公网"):
+                                app._read_subscription_url(
+                                    "https://sub.example/list", "SSRVPN/2.4.0"
+                                )
+
+    def test_http_subscription_connects_to_the_validated_ip(self):
+        response = mock.Mock(status=200)
+        response.read.return_value = b"anytls://pw@example.com:443#demo"
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+        raw_socket = mock.Mock()
+        tls_socket = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            public_result = [(2, 1, 6, "", ("93.184.216.34", 443))]
+            with mock.patch("socket.getaddrinfo", return_value=public_result):
+                with mock.patch.object(
+                    app.socket, "create_connection", return_value=raw_socket
+                ) as connect:
+                    with mock.patch.object(app.ssl, "create_default_context") as tls_context:
+                        tls_context.return_value.wrap_socket.return_value = tls_socket
+                        with mock.patch.object(
+                            app.http.client,
+                            "HTTPConnection",
+                            return_value=connection,
+                        ):
+                            raw = app._read_subscription_url(
+                                "https://sub.example/list", "SSRVPN/2.4.0"
+                            )
+
+        self.assertEqual(raw, b"anytls://pw@example.com:443#demo")
+        self.assertEqual(connect.call_args.args[0], ("93.184.216.34", 443))
+        tls_context.return_value.wrap_socket.assert_called_once_with(
+            raw_socket, server_hostname="sub.example"
+        )
+        connection.putheader.assert_any_call("Host", "sub.example")
 
     def test_initial_admin_credentials_can_be_set_from_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1286,12 +1329,24 @@ proxies:
             app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
             with app.app.app_context():
                 db = app.get_db()
-                db.execute(
+                account_id = db.execute(
                     "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
                     (
                         "demo",
                         "anytls://pw@example.com:443?sni=sni.example.com#demo",
                         "token",
+                    ),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "demo",
+                        "example.com",
+                        443,
+                        "pw",
+                        "anytls://pw@example.com:443?sni=sni.example.com#demo",
                     ),
                 )
                 db.execute(
@@ -1381,7 +1436,7 @@ proxies:
             self.assertNotIn("#renamed", decoded)
             parse.assert_not_called()
 
-    def test_public_subscribe_outputs_anytls_for_clash_clients(self):
+    def test_public_subscribe_never_fetches_upstream_when_local_nodes_are_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
             app = load_app(database)
@@ -1390,10 +1445,47 @@ proxies:
                 db = app.get_db()
                 db.execute(
                     "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
+                    ("demo", "https://slow.example/sub", "empty-token"),
+                )
+                db.commit()
+
+            with mock.patch.object(
+                app,
+                "parse_subscribe_url",
+                side_effect=AssertionError("public endpoint fetched upstream"),
+            ) as parse:
+                with app.app.test_client() as client:
+                    response = client.get("/sub/empty-token")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers["Retry-After"], "60")
+        parse.assert_not_called()
+
+    def test_public_subscribe_outputs_anytls_for_clash_clients(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
                     (
                         "demo",
                         "anytls://pw@example.com:443?sni=sni.example.com&allowInsecure=1&fp=chrome#demo",
                         "token",
+                    ),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "demo",
+                        "example.com",
+                        443,
+                        "pw",
+                        "anytls://pw@example.com:443?sni=sni.example.com&allowInsecure=1&fp=chrome#demo",
                     ),
                 )
                 db.execute(
@@ -1563,6 +1655,52 @@ proxies:
                 enabled = app.get_db().execute("PRAGMA foreign_keys").fetchone()[0]
 
         self.assertEqual(enabled, 1)
+
+    def test_database_connections_wait_for_short_write_contention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            with app.app.app_context():
+                db = app.get_db()
+                busy_timeout = db.execute("PRAGMA busy_timeout").fetchone()[0]
+                journal_mode = db.execute("PRAGMA journal_mode").fetchone()[0]
+
+        self.assertEqual(busy_timeout, 15000)
+        self.assertEqual(journal_mode.lower(), "wal")
+
+    def test_password_change_rejects_passwords_shorter_than_deploy_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                db.execute(
+                    "UPDATE admin_users SET password_hash=? WHERE username='admin'",
+                    (app.hash_password("existing-password"),),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["logged_in"] = True
+                    session["username"] = "admin"
+                response = client.post(
+                    "/settings/password",
+                    data={
+                        "old_password": "existing-password",
+                        "new_password": "short7",
+                        "confirm_password": "short7",
+                    },
+                )
+
+            with sqlite3.connect(database) as db:
+                stored_hash = db.execute(
+                    "SELECT password_hash FROM admin_users WHERE username='admin'"
+                ).fetchone()[0]
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(app.verify_password(stored_hash, "existing-password")[0])
+        self.assertFalse(app.verify_password(stored_hash, "short7")[0])
 
     def test_account_sync_skips_account_deleted_during_fetch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1737,9 +1875,21 @@ proxies:
             app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
             with app.app.app_context():
                 db = app.get_db()
-                db.execute(
+                account_id = db.execute(
                     "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
                     ("demo", "anytls://pw@example.com:443#demo", "token"),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "demo",
+                        "example.com",
+                        443,
+                        "pw",
+                        "anytls://pw@example.com:443#demo",
+                    ),
                 )
                 db.execute(
                     "INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)",
@@ -2097,17 +2247,22 @@ proxies:
         self.assertIn('systemctl enable caddy', content)
         self.assertIn('https://${PANEL_DOMAIN}/login', content)
         self.assertIn('systemctl restart "$SERVICE_NAME"', content)
-        self.assertIn('cp "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/"', content)
-        self.assertIn('"$SCRIPT_DIR/security_utils.py"', content)
-        self.assertIn('"$SCRIPT_DIR/traffic_token.py"', content)
+        self.assertIn("prepare_release_source", content)
+        self.assertIn("prepare_python_artifacts", content)
+        self.assertIn("install_staged_release", content)
+        self.assertIn("rollback_deployment", content)
+        self.assertIn("deployment failed; restoring the previous release", content)
+        self.assertIn("--require-hashes", content)
+        self.assertIn("--no-index", content)
+        self.assertIn("write_keepalive_config", content)
+        self.assertIn('Restart=on-failure', content)
+        self.assertIn('OnUnitActiveSec=1min', content)
         self.assertIn("sys.version_info >= (3, 10)", content)
         self.assertIn("Python 3.10 or newer is required", content)
         self.assertIn("mktemp -d /tmp/anytls-venv-check", content)
         self.assertIn('python3 -m venv "$probe_dir/venv"', content)
         self.assertIn('"$probe_dir/venv/bin/python" -m pip --version', content)
-        self.assertNotIn("! -name venv", content)
         self.assertIn("! -name data", content)
-        self.assertIn("refusing to reuse a pre-existing virtual environment", content)
         self.assertIn('systemctl stop "$SERVICE_NAME"', content)
         self.assertIn("--no-install-recommends", content)
         self.assertIn("APT_UPDATED=0", content)
@@ -2122,6 +2277,109 @@ proxies:
         self.assertNotIn("apt-get not found; this installer currently supports Ubuntu/Debian", content)
         self.assertNotIn("默认账号:", content)
         self.assertNotIn("默认密码:", content)
+
+    def test_deploy_stages_source_before_replacing_the_installed_directory(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            panel_dir = Path(tmp) / "panel"
+            (panel_dir / "templates").mkdir(parents=True)
+            for name in (
+                "app.py",
+                "security_utils.py",
+                "traffic_token.py",
+                "requirements.txt",
+                "deploy.sh",
+                "uninstall.sh",
+            ):
+                (panel_dir / name).write_text(f"proof-{name}\n", encoding="utf-8")
+            (panel_dir / "templates" / "base.html").write_text(
+                "proof-template\n", encoding="utf-8"
+            )
+            env = os.environ.copy()
+            env["TEST_PANEL_DIR"] = str(panel_dir)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; SERVICE_NAME="audit-panel"; '
+                    'SCRIPT_DIR="$TEST_PANEL_DIR"; '
+                    'validate_panel_dir() { :; }; validate_install_target() { :; }; '
+                    'prepare_release_source; '
+                    'test -f "$RELEASE_SOURCE/app.py"; '
+                    'test "$(cat "$RELEASE_SOURCE/app.py")" = "proof-app.py"; '
+                    'test -f "$PANEL_DIR/app.py"; printf STAGED_OK',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("STAGED_OK", result.stdout)
+
+    def test_deploy_rollback_restores_previous_release_files(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
+            root = Path(tmp)
+            panel_dir = root / "panel"
+            rollback_dir = root / "rollback"
+            (panel_dir / "data").mkdir(parents=True)
+            (panel_dir / "app.py").write_text("new-release\n", encoding="utf-8")
+            (panel_dir / ".anytls-panel-install").write_text(
+                "anytls-panel-managed-v1\n", encoding="utf-8"
+            )
+            (panel_dir / "data" / "anytls.db").write_text(
+                "new-database\n", encoding="utf-8"
+            )
+            (panel_dir / "data" / ".secret_key").write_text(
+                "new-secret\n", encoding="utf-8"
+            )
+            (rollback_dir / "code").mkdir(parents=True)
+            (rollback_dir / "code" / "app.py").write_text(
+                "old-release\n", encoding="utf-8"
+            )
+            (rollback_dir / "anytls.db").write_text(
+                "old-database\n", encoding="utf-8"
+            )
+            (rollback_dir / "secret-key").write_text(
+                "old-secret\n", encoding="utf-8"
+            )
+            env = os.environ.copy()
+            env.update({
+                "TEST_PANEL_DIR": str(panel_dir),
+                "TEST_ROLLBACK_DIR": str(rollback_dir),
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; '
+                    'PANEL_DIR="$TEST_PANEL_DIR"; DATA_DIR="$PANEL_DIR/data"; '
+                    'ROLLBACK_DIR="$TEST_ROLLBACK_DIR"; SERVICE_NAME="audit-panel"; '
+                    'SERVICE_USER="root"; SERVICE_GROUP="root"; '
+                    'SECRET_KEY_FILE="$DATA_DIR/.secret_key"; '
+                    'TRAFFIC_API_TOKEN_FILE="$DATA_DIR/.traffic_api_token"; '
+                    'ADMIN_PASSWORD_FILE="$DATA_DIR/.initial_admin_password"; '
+                    'CODE_BACKED_UP=1; DATABASE_BACKED_UP=1; '
+                    'DATABASE_STATE_CAPTURED=1; CONFIG_BACKED_UP=1; '
+                    'CUTOVER_STARTED=1; ROLLBACK_FINISHED=0; '
+                    'systemctl() { return 0; }; '
+                    'rollback_deployment; '
+                    'test ! -e "$PANEL_DIR/.anytls-panel-install"; '
+                    'cat "$PANEL_DIR/app.py" "$DATA_DIR/anytls.db" '
+                    '"$DATA_DIR/.secret_key"',
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(
+            result.stdout.strip().splitlines()[-3:],
+            ["old-release", "old-database", "old-secret"],
+        )
 
     def test_deploy_validates_and_normalizes_panel_domain(self):
         script = REPO_ROOT / "deploy.sh"
@@ -2537,6 +2795,9 @@ proxies:
         self.assertIn("refusing to manage an unmarked directory", content)
         self.assertIn("/etc/caddy/anytls-panel.d/", content)
         self.assertIn("removing managed Caddy site", content)
+        self.assertIn('"${SERVICE_NAME}-healthcheck.timer"', content)
+        self.assertIn('"$HEALTHCHECK_SCRIPT"', content)
+        self.assertIn('"$CADDY_RESTART_DROPIN"', content)
 
     def test_deploy_and_uninstall_reject_foreign_systemd_units(self):
         for script_name in ("deploy.sh", "uninstall.sh"):

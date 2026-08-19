@@ -13,7 +13,8 @@ import hmac
 import math
 import ipaddress
 import socket
-import urllib.request
+import ssl
+import http.client
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import wraps
@@ -125,10 +126,10 @@ app.secret_key = _read_or_create_private_file(_sk_file, lambda: secrets.token_he
 
 def get_db():
     if 'db' not in g:
-        g.db = sqlite3.connect(app.config['DATABASE'])
+        g.db = sqlite3.connect(app.config['DATABASE'], timeout=15)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys=ON")
-        g.db.execute("PRAGMA journal_mode=WAL")
+        g.db.execute("PRAGMA busy_timeout=15000")
     return g.db
 
 @app.teardown_appcontext
@@ -262,8 +263,11 @@ def require_traffic_api_token(f):
 
 
 def init_db():
-    db = sqlite3.connect(app.config['DATABASE'])
+    db = sqlite3.connect(app.config['DATABASE'], timeout=30)
     db.execute('PRAGMA foreign_keys=ON')
+    db.execute('PRAGMA busy_timeout=30000')
+    db.execute('PRAGMA journal_mode=WAL')
+    db.execute('PRAGMA synchronous=NORMAL')
     db.executescript('''
         CREATE TABLE IF NOT EXISTS accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -369,17 +373,19 @@ def init_db():
 _MAX_SUBSCRIPTION_BYTES = 2 * 1024 * 1024
 
 
-def _assert_public_subscription_url(raw_url):
+def _resolve_public_subscription_url(raw_url):
     try:
         parsed = urlparse(raw_url)
         if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            raise ValueError
+        if parsed.username is not None or parsed.password is not None:
             raise ValueError
         port = parsed.port or (443 if parsed.scheme == 'https' else 80)
     except (TypeError, ValueError):
         raise ValueError("订阅地址必须是有效的 HTTP(S) URL") from None
 
     if os.environ.get('ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS', '0') == '1':
-        return raw_url
+        return parsed, []
 
     try:
         addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
@@ -388,6 +394,7 @@ def _assert_public_subscription_url(raw_url):
     if not addresses:
         raise ValueError("订阅地址无法解析")
 
+    validated_addresses = []
     for address in addresses:
         ip_text = address[4][0].split('%', 1)[0]
         try:
@@ -396,26 +403,117 @@ def _assert_public_subscription_url(raw_url):
             raise ValueError("订阅地址解析结果无效") from exc
         if not ip.is_global:
             raise ValueError("订阅地址必须指向公网 IP")
+        if ip_text not in validated_addresses:
+            validated_addresses.append(ip_text)
+    return parsed, validated_addresses
+
+
+def _assert_public_subscription_url(raw_url):
+    _resolve_public_subscription_url(raw_url)
     return raw_url
 
 
-class _SafeSubscriptionRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _assert_public_subscription_url(urljoin(req.full_url, newurl))
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+def _subscription_request_target(parsed):
+    target = parsed.path or '/'
+    if parsed.params:
+        target += f';{parsed.params}'
+    if parsed.query:
+        target += f'?{parsed.query}'
+    return target
+
+
+def _subscription_host_header(parsed):
+    host = parsed.hostname
+    if ':' in host:
+        host = f'[{host}]'
+    default_port = 443 if parsed.scheme == 'https' else 80
+    return host if parsed.port in (None, default_port) else f'{host}:{parsed.port}'
+
+
+def _read_pinned_subscription_response(url, user_agent):
+    parsed, addresses = _resolve_public_subscription_url(url)
+    if not addresses:
+        raise ValueError("私有订阅模式不支持 DNS 固定连接")
+
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    deadline = time.monotonic() + 10
+    last_error = None
+    for address in addresses:
+        connection = None
+        sock = None
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock = socket.create_connection((address, port), timeout=remaining)
+            if parsed.scheme == 'https':
+                context = ssl.create_default_context()
+                sock = context.wrap_socket(sock, server_hostname=parsed.hostname)
+
+            connection = http.client.HTTPConnection(
+                parsed.hostname,
+                port,
+                timeout=max(0.1, deadline - time.monotonic()),
+            )
+            connection.sock = sock
+            connection.putrequest(
+                'GET',
+                _subscription_request_target(parsed),
+                skip_host=True,
+                skip_accept_encoding=True,
+            )
+            connection.putheader('Host', _subscription_host_header(parsed))
+            connection.putheader('User-Agent', user_agent)
+            connection.putheader('Accept', '*/*')
+            connection.putheader('Connection', 'close')
+            connection.endheaders()
+            response = connection.getresponse()
+
+            if response.status in (301, 302, 303, 307, 308):
+                location = response.getheader('Location')
+                response.read()
+                if not location:
+                    raise OSError('订阅服务器返回了无 Location 的重定向')
+                return None, urljoin(url, location)
+            if not 200 <= response.status < 300:
+                response.read(_MAX_SUBSCRIPTION_BYTES + 1)
+                raise OSError(f'订阅服务器返回 HTTP {response.status}')
+
+            raw = response.read(_MAX_SUBSCRIPTION_BYTES + 1)
+            if len(raw) > _MAX_SUBSCRIPTION_BYTES:
+                raise ValueError("订阅响应过大（最大 2 MiB）")
+            return raw, None
+        except ValueError:
+            raise
+        except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+            last_error = exc
+        finally:
+            if connection is not None:
+                connection.close()
+            elif sock is not None:
+                sock.close()
+
+    raise OSError('订阅地址连接失败') from last_error
 
 
 def _read_subscription_url(url, user_agent):
-    _assert_public_subscription_url(url)
-    opener = urllib.request.build_opener(_SafeSubscriptionRedirectHandler())
-    req = urllib.request.Request(url, headers={'User-Agent': user_agent})
-    with opener.open(req, timeout=10) as resp:
-        final_url = getattr(resp, 'geturl', lambda: url)()
-        _assert_public_subscription_url(final_url)
-        raw = resp.read(_MAX_SUBSCRIPTION_BYTES + 1)
-    if len(raw) > _MAX_SUBSCRIPTION_BYTES:
-        raise ValueError("订阅响应过大（最大 2 MiB）")
-    return raw
+    current_url = url
+    for _ in range(6):
+        if os.environ.get('ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS', '0') == '1':
+            # Trusted private subscriptions retain urllib's standard transport.
+            import urllib.request
+            req = urllib.request.Request(current_url, headers={'User-Agent': user_agent})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                raw = response.read(_MAX_SUBSCRIPTION_BYTES + 1)
+            if len(raw) > _MAX_SUBSCRIPTION_BYTES:
+                raise ValueError("订阅响应过大（最大 2 MiB）")
+            return raw
+
+        raw, redirect_url = _read_pinned_subscription_response(current_url, user_agent)
+        if redirect_url is None:
+            return raw
+        current_url = redirect_url
+    raise OSError('订阅重定向次数过多')
 
 
 def parse_subscribe_url(url):
@@ -1665,8 +1763,8 @@ def change_password():
     if new_pw != confirm_pw:
         flash('两次输入的新密码不一致', 'error')
         return redirect(url_for('dashboard'))
-    if len(new_pw) < 6:
-        flash('密码至少6个字符', 'error')
+    if not 8 <= len(new_pw) <= 128:
+        flash('密码必须为8-128个字符', 'error')
         return redirect(url_for('dashboard'))
 
     db = get_db()
@@ -1697,22 +1795,6 @@ def _apply_rename(text, rules):
     for r in rules:
         text = text.replace(r['old_text'], r['new_text'])
     return text
-
-
-# ─── 订阅缓存（避免每次请求都拉上游）──────────────────────────
-_sub_cache = {}  # {account_id: {"ts": timestamp, "nodes": [...], "traffic_info": {...}}}
-_SUB_CACHE_TTL = 300  # 5 分钟
-
-
-def _fetch_sub_cached(account_id, subscribe_url):
-    """带缓存的订阅拉取"""
-    now = time.time()
-    cached = _sub_cache.get(account_id)
-    if cached and now - cached['ts'] < _SUB_CACHE_TTL:
-        return cached['nodes'], cached['traffic_info']
-    nodes, traffic_info = parse_subscribe_url(subscribe_url)
-    _sub_cache[account_id] = {'ts': now, 'nodes': nodes, 'traffic_info': traffic_info}
-    return nodes, traffic_info
 
 
 def _row_get(row, key, default=None):
@@ -1978,8 +2060,9 @@ def _clash_proxy_from_uri(uri):
 
 @app.route('/sub/<token>')
 @csrf.exempt
+@limiter.limit("120 per minute")
 def public_subscribe(token):
-    """公开订阅端点：优先读取本地同步节点 → 原样分享真实节点"""
+    """公开订阅端点：只读取最后一次成功同步到本地的节点。"""
     if not token:
         return 'Invalid token', 404
 
@@ -1994,11 +2077,10 @@ def public_subscribe(token):
     nodes = _nodes_from_db_rows(db_nodes)
     traffic_info = _account_traffic_info(account)
     if not nodes:
-        try:
-            nodes, traffic_info = _fetch_sub_cached(account['id'], account['subscribe_url'])
-        except Exception:
-            nodes = []
-            traffic_info = {}
+        return 'Subscription data is not ready', 503, {
+            'Retry-After': '60',
+            'Cache-Control': 'no-store',
+        }
 
     # 构建订阅配置名称（profile-title）
     sub_name = 'SSRVPN.VIP'  # 默认名
