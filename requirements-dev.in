@@ -2,4 +2,4 @@
 bandit==1.9.4
 flake8==7.3.0
 pip-audit==2.10.1
-stevedore==5.8.0
+stevedore==5.9.0
