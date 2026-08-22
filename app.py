@@ -470,6 +470,12 @@ def init_db():
 
 _MAX_SUBSCRIPTION_BYTES = 2 * 1024 * 1024
 _SUBSCRIPTION_TIMEOUT_SECONDS = 10
+
+
+class _SubscriptionResponseError(OSError):
+    """A definitive HTTP response that must not trigger IP failover."""
+
+
 _SUBSCRIPTION_READ_CHUNK = 64 * 1024
 MAX_SYNC_ACCOUNTS = 64
 MAX_CHECK_NODES = 320
@@ -650,14 +656,18 @@ def _read_pinned_subscription_response(url, user_agent, deadline=None):
             if response.status in (301, 302, 303, 307, 308):
                 location = response.getheader('Location')
                 if not location:
-                    raise OSError('订阅服务器返回了无 Location 的重定向')
+                    raise _SubscriptionResponseError(
+                        '订阅服务器返回了无 Location 的重定向'
+                    )
                 return None, urljoin(url, location)
             if not 200 <= response.status < 300:
-                raise OSError(f'订阅服务器返回 HTTP {response.status}')
+                raise _SubscriptionResponseError(
+                    f'订阅服务器返回 HTTP {response.status}'
+                )
 
             raw = _read_subscription_body(response, sock, deadline)
             return raw, None
-        except ValueError:
+        except (ValueError, _SubscriptionResponseError):
             raise
         except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
             last_error = exc
@@ -698,6 +708,7 @@ def parse_subscribe_url(url):
     traffic_info = {}
     if content.startswith('http://') or content.startswith('https://'):
         candidates = []
+        attempt_errors = []
         deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_SECONDS
         for ua in [
             'SSRVPN/2.4.0',
@@ -714,12 +725,18 @@ def parse_subscribe_url(url):
                     candidates.append((score, text, _extract_subscription_traffic_info(text)))
                     if score[0] > 0:
                         break
+                else:
+                    attempt_errors.append(
+                        f'{ua.split("/", 1)[0]}: 响应中未找到可用节点'
+                    )
             except ValueError:
                 raise
-            except Exception:
+            except Exception as exc:
+                attempt_errors.append(f'{ua.split("/", 1)[0]}: {exc}')
                 continue
         if not candidates:
-            raise ValueError("拉取订阅失败（所有 UA 均无法访问）")
+            detail = '；'.join(attempt_errors) or '所有 UA 均无法访问'
+            raise ValueError(f'拉取订阅失败（{detail}）')
         _score, content, traffic_info = max(candidates, key=lambda item: item[0])
 
     nodes = _parse_subscription_content(content)

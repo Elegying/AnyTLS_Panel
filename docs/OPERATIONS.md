@@ -19,13 +19,13 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
 在线部署：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.1/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh)
 ```
 
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.2.1 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.2.2 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -33,8 +33,8 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.2.1" \
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.1/deploy.sh)
+ANYTLS_REPO_REF="v1.2.2" \
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh)
 ```
 
 首次交互部署会要求输入管理员用户名、两次输入密码以及面板域名。密码输入不会回显。自定义端口、服务名和目录时仍会显示这些提示：
@@ -145,7 +145,7 @@ trap - EXIT
 重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库。脚本先完成源码暂存、带哈希依赖下载和现有数据库副本迁移测试，再停止服务进行短切换；切换后任一步失败都会自动恢复旧代码、数据库、systemd 和 Caddy 配置。成功更新还会在 `/var/backups/<服务名>/` 保留最近两份带 SHA-256 校验的上一版本快照：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.1/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh)
 ```
 
 更新时会再次询问面板域名，已有数据库不会再次询问或覆盖管理员凭据。自动化更新可设置 `ANYTLS_PANEL_DOMAIN`。如果使用自定义目录、服务名或 `/etc/anytls-panel/` 下的密钥文件，更新时需要继续传入相同环境变量。
