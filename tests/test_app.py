@@ -551,6 +551,24 @@ proxies:
         self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
         self.assertTrue(nodes[1]["raw_uri"].startswith("trojan://"))
 
+    def test_http_subscription_reports_sanitized_user_agent_failures(self):
+        subscription_url = "https://sub.example/private-token"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            with mock.patch.object(
+                app,
+                "_read_subscription_url",
+                side_effect=OSError("订阅服务器返回 HTTP 403"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "SSRVPN: 订阅服务器返回 HTTP 403",
+                ) as raised:
+                    app.parse_subscribe_url(subscription_url)
+
+        self.assertNotIn(subscription_url, str(raised.exception))
+
     def test_direct_mixed_protocol_subscription_preserves_each_scheme(self):
         content = (
             "anytls://apw@any.example.com:443#any-node\n"
@@ -786,6 +804,39 @@ proxies:
             raw_socket, server_hostname="sub.example"
         )
         connection.putheader.assert_any_call("Host", "sub.example")
+
+    def test_http_status_does_not_retry_other_validated_ips(self):
+        response = mock.Mock(status=403)
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+        raw_socket = mock.Mock()
+        tls_socket = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            public_result = ["93.184.216.34", "93.184.216.35"]
+            with mock.patch.object(
+                app,
+                "_resolve_subscription_addresses",
+                return_value=public_result,
+            ):
+                with mock.patch.object(
+                    app.socket, "create_connection", return_value=raw_socket
+                ) as connect:
+                    with mock.patch.object(app.ssl, "create_default_context") as tls_context:
+                        tls_context.return_value.wrap_socket.return_value = tls_socket
+                        with mock.patch.object(
+                            app.http.client,
+                            "HTTPConnection",
+                            return_value=connection,
+                        ):
+                            with self.assertRaisesRegex(OSError, "HTTP 403"):
+                                app._read_pinned_subscription_response(
+                                    "https://sub.example/list",
+                                    "SSRVPN/2.4.0",
+                                )
+
+        self.assertEqual(connect.call_count, 1)
 
     def test_initial_admin_credentials_can_be_set_from_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3874,7 +3925,7 @@ proxies:
         self.assertIn("python3.12 -m venv .venv", operations)
         self.assertIn("brew install python@3.12 shellcheck actionlint", operations)
         self.assertIn("--require-hashes -r requirements-dev.txt", operations)
-        self.assertIn("git clone --depth 1 --branch v1.2.1", operations)
+        self.assertIn("git clone --depth 1 --branch v1.2.2", operations)
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
@@ -3967,8 +4018,8 @@ proxies:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.2.1}"', deploy)
-        self.assertIn("AnyTLS_Panel/v1.2.1/deploy.sh", readme)
+        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.2.2}"', deploy)
+        self.assertIn("AnyTLS_Panel/v1.2.2/deploy.sh", readme)
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)

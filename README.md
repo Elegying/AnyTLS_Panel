@@ -25,7 +25,7 @@
 ### 方式一：在线部署
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.1/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh)
 ```
 
 首次部署会依次提示输入面板管理员用户名、隐藏输入并确认密码，以及面板域名。请先把域名的 A/AAAA 记录指向服务器，并在云安全组/防火墙放行 TCP 80 和 443。脚本会从 Caddy 官方稳定仓库安装受支持版本，由 Caddy 自动选择公开 ACME 签发方、启用 HTTP→HTTPS 跳转并自动续签证书。
@@ -37,21 +37,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.1
 正式 Release 同时提供版本化源码归档、SHA-256 和 Sigstore bundle。下载三个同名资产后可验证：
 
 ```bash
-gh release verify v1.2.1 --repo Elegying/AnyTLS_Panel
-gh release verify-asset v1.2.1 AnyTLS_Panel-v1.2.1.tar.gz \
+gh release verify v1.2.2 --repo Elegying/AnyTLS_Panel
+gh release verify-asset v1.2.2 AnyTLS_Panel-v1.2.2.tar.gz \
   --repo Elegying/AnyTLS_Panel
-sha256sum -c AnyTLS_Panel-v1.2.1.tar.gz.sha256
+sha256sum -c AnyTLS_Panel-v1.2.2.tar.gz.sha256
 cosign verify-blob \
-  --bundle AnyTLS_Panel-v1.2.1.tar.gz.sigstore.json \
-  --certificate-identity "https://github.com/Elegying/AnyTLS_Panel/.github/workflows/release.yml@refs/tags/v1.2.1" \
+  --bundle AnyTLS_Panel-v1.2.2.tar.gz.sigstore.json \
+  --certificate-identity "https://github.com/Elegying/AnyTLS_Panel/.github/workflows/release.yml@refs/tags/v1.2.2" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  AnyTLS_Panel-v1.2.1.tar.gz
+  AnyTLS_Panel-v1.2.2.tar.gz
 ```
 
 ### 方式二：克隆部署
 
 ```bash
-git clone --depth 1 --branch v1.2.1 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.2.2 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
