@@ -2805,8 +2805,9 @@ proxies:
                 'printf "2.6.2\\n"; }; '
                 'install_caddy_from_official_repository() { '
                 'UPGRADED=1; printf "upgrade-called\\n"; }; '
-                'ensure_caddy; printf "version=%s\\n" '
-                '"$(installed_caddy_version)"',
+                'ensure_caddy; printf "version=%s installed_now=%s '
+                'attempted=%s\\n" "$(installed_caddy_version)" '
+                '"$CADDY_INSTALLED_NOW" "$CADDY_INSTALL_ATTEMPTED"',
             ],
             capture_output=True,
             text=True,
@@ -2814,7 +2815,7 @@ proxies:
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("upgrade-called", result.stdout)
-        self.assertIn("version=2.11.4", result.stdout)
+        self.assertIn("version=2.11.4 installed_now=0 attempted=1", result.stdout)
 
     def test_release_requires_main_head_and_successful_ci_for_exact_sha(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
