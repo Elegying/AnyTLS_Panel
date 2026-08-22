@@ -3946,6 +3946,10 @@ proxies:
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)
+        validate_step = workflow_text.split(
+            "- name: Validate release tag", 1
+        )[1].split("- name:", 1)[0]
+        self.assertIn("GH_TOKEN: ${{ github.token }}", validate_step)
         self.assertIn("cosign sign-blob", workflow_text)
         self.assertIn("--bundle", workflow_text)
         self.assertIn("--draft", workflow_text)
