@@ -2489,7 +2489,7 @@ proxies:
         self.assertNotIn("generate_password", content)
         self.assertIn("generate_api_token", content)
         self.assertIn("installing Caddy for automatic Let's Encrypt HTTPS", content)
-        self.assertIn("https://acme-v02.api.letsencrypt.org/directory", content)
+        self.assertNotIn("https://acme-v02.api.letsencrypt.org/directory", content)
         self.assertIn("import anytls-panel.d/*.caddy", content)
         self.assertIn('systemctl enable caddy', content)
         self.assertIn('https://${PANEL_DOMAIN}/login', content)
@@ -2504,8 +2504,8 @@ proxies:
         self.assertIn("write_keepalive_config", content)
         self.assertIn('Restart=on-failure', content)
         self.assertIn('OnUnitActiveSec=1min', content)
-        self.assertIn("sys.version_info >= (3, 10)", content)
-        self.assertIn("Python 3.10 or newer is required", content)
+        self.assertIn("sys.version_info >= (3, 12)", content)
+        self.assertIn("Python 3.12 or newer is required", content)
         self.assertIn("mktemp -d /tmp/anytls-venv-check", content)
         self.assertIn('python3 -m venv "$probe_dir/venv"', content)
         self.assertIn('"$probe_dir/venv/bin/python" -m pip --version', content)
@@ -2513,17 +2513,76 @@ proxies:
         self.assertIn('systemctl stop "$SERVICE_NAME"', content)
         self.assertIn("--no-install-recommends", content)
         self.assertIn("APT_UPDATED=0", content)
-        self.assertIn("RPM_UPDATED=0", content)
-        self.assertIn("dnf", content)
-        self.assertIn("yum", content)
+        self.assertNotIn("RPM_UPDATED=0", content)
+        self.assertNotIn("dnf", content)
+        self.assertNotIn("yum", content)
         self.assertIn('"systemctl:systemd"', content)
         self.assertIn("python_venv_packages", content)
         self.assertIn("python3-venv python3-pip", content)
-        self.assertIn("python3-pip python3-virtualenv", content)
-        self.assertIn("no supported package manager found", content)
-        self.assertNotIn("apt-get not found; this installer currently supports Ubuntu/Debian", content)
+        self.assertNotIn("python3-pip python3-virtualenv", content)
+        self.assertIn("Ubuntu 24.04", content)
         self.assertNotIn("默认账号:", content)
         self.assertNotIn("默认密码:", content)
+
+    def test_deploy_accepts_only_the_verified_ubuntu_release(self):
+        script = REPO_ROOT / "deploy.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            os_release = Path(tmp) / "os-release"
+            os_release.write_text(
+                'ID=ubuntu\nVERSION_ID="24.04"\n', encoding="utf-8"
+            )
+            accepted = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; OS_RELEASE_FILE="$1"; validate_supported_os',
+                    "deploy-os-check",
+                    str(os_release),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            os_release.write_text(
+                'ID=ubuntu\nVERSION_ID="22.04"\n', encoding="utf-8"
+            )
+            rejected = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{script}"; OS_RELEASE_FILE="$1"; validate_supported_os',
+                    "deploy-os-check",
+                    str(os_release),
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(accepted.returncode, 0, msg=accepted.stderr)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("Ubuntu 24.04", rejected.stderr)
+
+    def test_deploy_installs_caddy_from_verified_official_repository(self):
+        content = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
+
+        self.assertIn("https://dl.cloudsmith.io/public/caddy/stable/gpg.key", content)
+        self.assertIn("https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt", content)
+        self.assertIn("65760C51EDEA2017CEA2CA15155B6D79CA56EA34", content)
+        self.assertIn('CADDY_MIN_VERSION="2.11.4"', content)
+        self.assertIn("dpkg --compare-versions", content)
+        self.assertIn("installed Caddy is older than the verified minimum", content)
+
+    def test_release_requires_main_head_and_successful_ci_for_exact_sha(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("actions: read", workflow)
+        self.assertIn('tag_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"', workflow)
+        self.assertIn('[[ "$(git rev-parse origin/main)" == "$tag_commit" ]]', workflow)
+        self.assertIn("actions/workflows/ci.yml/runs", workflow)
+        self.assertIn("head_sha=$tag_commit", workflow)
+        self.assertIn("event=push", workflow)
+        self.assertIn("status=success", workflow)
 
     def test_deploy_stages_source_before_replacing_the_installed_directory(self):
         script = REPO_ROOT / "deploy.sh"

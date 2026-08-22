@@ -17,7 +17,7 @@ REPO_REF="${ANYTLS_REPO_REF:-v1.1.0}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
-RPM_UPDATED=0
+OS_RELEASE_FILE="/etc/os-release"
 DATA_DIR=""
 SECRET_KEY_FILE=""
 TRAFFIC_API_TOKEN_FILE=""
@@ -26,6 +26,8 @@ SYSTEMD_UNIT_DIR="/etc/systemd/system"
 CADDY_CONFIG_DIR="/etc/caddy"
 CADDY_SITES_DIR="$CADDY_CONFIG_DIR/anytls-panel.d"
 CADDYFILE="$CADDY_CONFIG_DIR/Caddyfile"
+CADDY_MIN_VERSION="2.11.4"
+CADDY_KEY_FINGERPRINT="65760C51EDEA2017CEA2CA15155B6D79CA56EA34"
 CADDY_INSTALLED_NOW=0
 CADDY_INSTALL_ATTEMPTED=0
 CADDY_STATE_CAPTURED=0
@@ -356,43 +358,30 @@ validate_configuration() {
     CADDY_RESTART_DROPIN="${SYSTEMD_UNIT_DIR}/caddy.service.d/${SERVICE_NAME}-restart.conf"
 }
 
+validate_supported_os() {
+    [[ -r "$OS_RELEASE_FILE" ]] || fail "Ubuntu 24.04 is required"
+    local os_id version_id
+    os_id="$(sed -n 's/^ID=//p' "$OS_RELEASE_FILE" | head -n 1 | tr -d '\"')"
+    version_id="$(sed -n 's/^VERSION_ID=//p' "$OS_RELEASE_FILE" | head -n 1 | tr -d '\"')"
+    if [[ "$os_id" != "ubuntu" || "$version_id" != "24.04" ]]; then
+        fail "Ubuntu 24.04 is the only currently verified deployment target"
+    fi
+}
+
 install_packages() {
-    if command -v apt-get >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
-        if [[ "$APT_UPDATED" -eq 0 ]]; then
-            apt-get update -qq
-            APT_UPDATED=1
-        fi
-        apt-get install -y -qq --no-install-recommends "$@"
-        return
+    command -v apt-get >/dev/null 2>&1 || fail "Ubuntu 24.04 apt-get is required"
+    export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+    if [[ "$APT_UPDATED" -eq 0 ]]; then
+        apt-get update -qq
+        APT_UPDATED=1
     fi
-
-    local rpm_cmd=""
-    if command -v dnf >/dev/null 2>&1; then
-        rpm_cmd="dnf"
-    elif command -v yum >/dev/null 2>&1; then
-        rpm_cmd="yum"
-    fi
-    if [[ -n "$rpm_cmd" ]]; then
-        if [[ "$RPM_UPDATED" -eq 0 ]]; then
-            "$rpm_cmd" makecache -q >/dev/null 2>&1 || true
-            RPM_UPDATED=1
-        fi
-        "$rpm_cmd" install -y -q "$@"
-        return
-    fi
-
-    fail "no supported package manager found; please use Ubuntu/Debian or CentOS/RHEL"
+    apt-get install -y -qq --no-install-recommends "$@"
 }
 
 ensure_service_user() {
     if ! id "$SERVICE_USER" >/dev/null 2>&1; then
         if ! command -v useradd >/dev/null 2>&1; then
-            if command -v apt-get >/dev/null 2>&1; then
-                install_packages passwd
-            else
-                install_packages shadow-utils
-            fi
+            install_packages passwd
         fi
         local nologin_shell
         nologin_shell="$(command -v nologin || printf '/usr/sbin/nologin')"
@@ -407,11 +396,7 @@ ensure_service_user() {
 }
 
 python_venv_packages() {
-    if command -v apt-get >/dev/null 2>&1; then
-        echo "python3-venv python3-pip"
-    else
-        echo "python3-pip python3-virtualenv"
-    fi
+    echo "python3-venv python3-pip"
 }
 
 ensure_runtime() {
@@ -430,8 +415,8 @@ ensure_runtime() {
         install_packages "${missing[@]}"
     fi
 
-    if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
-        fail "Python 3.10 or newer is required"
+    if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)'; then
+        fail "Python 3.12 or newer is required"
     fi
 
     local probe_dir
@@ -512,21 +497,67 @@ capture_caddy_state() {
     CADDY_STATE_CAPTURED=1
 }
 
+installed_caddy_version() {
+    caddy version 2>/dev/null | sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p'
+}
+
+assert_supported_caddy_version() {
+    local installed_version
+    installed_version="$(installed_caddy_version)"
+    if [[ -z "$installed_version" ]] || \
+       ! dpkg --compare-versions "$installed_version" ge "$CADDY_MIN_VERSION"; then
+        fail "installed Caddy is older than the verified minimum ${CADDY_MIN_VERSION}; upgrade it from the official Caddy repository before deploying"
+    fi
+}
+
+install_caddy_from_official_repository() {
+    install_packages debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+
+    local key_file source_file fingerprint
+    key_file="$(mktemp /tmp/caddy-signing-key.XXXXXX)"
+    source_file="$(mktemp /tmp/caddy-stable-source.XXXXXX)"
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+        --output "$key_file"
+    fingerprint="$(gpg --show-keys --with-colons "$key_file" 2>/dev/null | \
+        awk -F: '$1 == "fpr" {print $10; exit}')"
+    [[ "$fingerprint" == "$CADDY_KEY_FINGERPRINT" ]] || \
+        fail "Caddy repository signing-key fingerprint did not match"
+
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+        --output "$source_file"
+    grep -Fqx \
+        'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main' \
+        "$source_file" || fail "Caddy repository definition was unexpected"
+
+    gpg --batch --yes --dearmor \
+        --output /usr/share/keyrings/caddy-stable-archive-keyring.gpg "$key_file"
+    install -o root -g root -m 644 "$source_file" \
+        /etc/apt/sources.list.d/caddy-stable.list
+    rm -f -- "$key_file" "$source_file"
+    apt-get update -qq
+    APT_UPDATED=1
+    install_packages caddy
+}
+
 ensure_caddy() {
     if command -v caddy >/dev/null 2>&1; then
         systemctl cat caddy.service >/dev/null 2>&1 || \
             fail "the caddy command exists but caddy.service is not installed"
+        assert_supported_caddy_version
         return
     fi
 
     log "installing Caddy for automatic Let's Encrypt HTTPS"
     CADDY_INSTALL_ATTEMPTED=1
-    if ! install_packages caddy; then
+    if ! install_caddy_from_official_repository; then
         fail "Caddy is unavailable from the configured package repositories"
     fi
     CADDY_INSTALLED_NOW=1
     command -v caddy >/dev/null 2>&1 || fail "Caddy installation did not provide the caddy command"
     systemctl cat caddy.service >/dev/null 2>&1 || fail "Caddy installation did not provide caddy.service"
+    assert_supported_caddy_version
 }
 
 stop_service_for_update() {
@@ -1335,9 +1366,6 @@ PY
 render_caddy_site() {
     cat <<EOF
 ${PANEL_DOMAIN} {
-    tls {
-        ca https://acme-v02.api.letsencrypt.org/directory
-    }
     reverse_proxy 127.0.0.1:${PORT}
 }
 EOF
@@ -1347,8 +1375,7 @@ caddyfile_contains_only_panel_site() {
     [[ -f "$CADDYFILE" ]] || return 1
     local compact
     compact="$(sed '/^[[:space:]]*#/d' "$CADDYFILE" | tr -d '[:space:]')"
-    [[ "$compact" == "${PANEL_DOMAIN}{reverse_proxy127.0.0.1:${PORT}}" || \
-       "$compact" == "${PANEL_DOMAIN}{tls{cahttps://acme-v02.api.letsencrypt.org/directory}reverse_proxy127.0.0.1:${PORT}}" ]]
+    [[ "$compact" == "${PANEL_DOMAIN}{reverse_proxy127.0.0.1:${PORT}}" ]]
 }
 
 write_caddy_config() {
@@ -1448,7 +1475,7 @@ print_summary() {
     echo
     log "deployment succeeded"
     echo "  Panel URL:  https://${PANEL_DOMAIN}"
-    echo "  HTTPS:      Let's Encrypt certificate managed and renewed by Caddy"
+    echo "  HTTPS:      certificate managed and renewed automatically by Caddy"
     if [[ "$FRESH_DB" -eq 1 ]]; then
         echo "  Username:   ${ADMIN_USER}"
         if [[ "${ANYTLS_SHOW_SECRETS:-0}" = "1" ]]; then
@@ -1469,6 +1496,7 @@ print_summary() {
 
 main() {
     validate_configuration
+    validate_supported_os
     validate_install_target
     validate_service_target
     prepare_panel_domain
