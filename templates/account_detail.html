@@ -10,7 +10,7 @@
 <div class="header detail-header">
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         <h1 id="account-name-display" style="font-size:20px">{{ account.name }}</h1>
-        <button class="btn btn-sm btn-ghost" onclick="openModal('renameModal')">✏️ 重命名</button>
+        <button class="btn btn-sm btn-ghost" data-action="open-modal" data-modal="renameModal">✏️ 重命名</button>
         {% if account.status == 'active' %}
         <span class="badge badge-green">活跃</span>
         {% elif account.status == 'suspended' %}
@@ -20,13 +20,13 @@
         {% endif %}
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-ghost" onclick="checkAll()">🔍 检测全部</button>
+        <button class="btn btn-ghost" data-action="check-all">🔍 检测全部</button>
         <form method="POST" action="{{ url_for('account_sync', account_id=account.id) }}" style="display:inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn btn-green" type="submit">🔄 同步</button>
         </form>
-        <button class="btn btn-primary" onclick="openShareModal()">📤 分享订阅</button>
-        <button class="btn btn-ghost" onclick="openModal('editModal')">⚙️ 设置</button>
+        <button class="btn btn-primary" data-action="open-share">📤 分享订阅</button>
+        <button class="btn btn-ghost" data-action="open-modal" data-modal="editModal">⚙️ 设置</button>
     </div>
 </div>
 
@@ -68,12 +68,12 @@
             <td data-label="节点"><strong>{{ n.name }}</strong></td>
             <td data-label="地址">
                 <code style="background:var(--bg);padding:2px 8px;border-radius:4px;font-size:12px;word-break:break-all">{{ n.host }}:{{ n.port }}</code>
-                <span onclick="copyText({{ (n.host ~ ':' ~ n.port)|tojson }})" style="cursor:pointer;color:var(--accent);margin-left:4px;flex-shrink:0">📋</span>
+                <span data-action="copy-value" data-copy-value="{{ (n.host ~ ':' ~ n.port) | e }}" style="cursor:pointer;color:var(--accent);margin-left:4px;flex-shrink:0">📋</span>
             </td>
             <td data-label="密码">
                 <span style="font-family:monospace;font-size:12px" id="pw-{{ n.id }}">{{ n.password[:6] }}•••</span>
-                <span onclick="copyText({{ n.password|tojson }})" style="cursor:pointer;color:var(--accent);margin-left:4px;flex-shrink:0">📋</span>
-                <span onclick="togglePw({{ n.id }}, {{ n.password|tojson }})" style="cursor:pointer;color:var(--text2);margin-left:4px;font-size:12px;flex-shrink:0">👁️</span>
+                <span data-action="copy-value" data-copy-value="{{ n.password | e }}" style="cursor:pointer;color:var(--accent);margin-left:4px;flex-shrink:0">📋</span>
+                <span data-action="toggle-password" data-node-id="{{ n.id }}" data-password="{{ n.password | e }}" style="cursor:pointer;color:var(--text2);margin-left:4px;font-size:12px;flex-shrink:0">👁️</span>
             </td>
             <td data-label="状态" id="status-{{ n.id }}">
                 {% if n.is_online == 1 %}
@@ -87,9 +87,9 @@
             <td data-label="检测时间" class="hide-mobile" style="font-size:12px;color:var(--text2)">{{ n.last_checked_at or '-' }}</td>
             <td data-label="操作">
                 <div style="display:flex;gap:6px;flex-wrap:wrap">
-                    <button class="btn btn-sm btn-ghost" onclick="checkNode({{ n.id }})">检测</button>
-                    <button class="btn btn-sm btn-ghost" data-uri="{{ n.raw_uri | e }}" onclick="shareNode(this)">🔗</button>
-                    <form method="POST" action="{{ url_for('node_delete', node_id=n.id) }}" style="display:inline" onsubmit="return confirm('确认删除节点 {{ n.name }}？')">
+                    <button class="btn btn-sm btn-ghost" data-action="check-node" data-node-id="{{ n.id }}">检测</button>
+                    <button class="btn btn-sm btn-ghost" data-action="share-node" data-uri="{{ n.raw_uri | e }}">🔗</button>
+                    <form method="POST" action="{{ url_for('node_delete', node_id=n.id) }}" style="display:inline" data-confirm="确认删除节点 {{ n.name | e }}？">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <button class="btn btn-sm btn-danger" type="submit">删除</button>
                     </form>
@@ -120,7 +120,7 @@
                 <input name="name" value="{{ account.name }}" required autofocus>
             </div>
             <div class="modal-actions">
-                <button type="button" class="btn btn-ghost" onclick="closeModal('renameModal')">取消</button>
+                <button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="renameModal">取消</button>
                 <button type="submit" class="btn btn-primary">保存</button>
             </div>
         </form>
@@ -155,9 +155,9 @@
                 <input name="notes" value="{{ account.notes or '' }}">
             </div>
             <div class="modal-actions">
-                <button type="button" class="btn btn-danger" onclick="if(confirm('确认删除此账号及所有节点？')){document.getElementById('deleteForm').submit()}">删除账号</button>
+                <button type="button" class="btn btn-danger" data-action="delete-account" data-confirm="确认删除此账号及所有节点？" data-form-id="deleteForm">删除账号</button>
                 <div style="flex:1"></div>
-                <button type="button" class="btn btn-ghost" onclick="closeModal('editModal')">取消</button>
+                <button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="editModal">取消</button>
                 <button type="submit" class="btn btn-primary">保存</button>
             </div>
         </form>
@@ -179,25 +179,25 @@
                 <label>分享链接（可直接导入 Shadowrocket / Clash）</label>
                 <div style="display:flex;gap:8px;align-items:center">
                     <input id="shareUrl" value="{{ url_for('public_subscribe', token=account.sub_token, _external=True) }}" readonly style="font-family:monospace;font-size:12px">
-                    <button class="btn btn-primary" onclick="copyText(document.getElementById('shareUrl').value)" style="white-space:nowrap">📋 复制</button>
+                    <button class="btn btn-primary" data-action="copy-input" data-input-id="shareUrl" style="white-space:nowrap">📋 复制</button>
                 </div>
             </div>
             <div style="margin-top:8px">
-                <button class="btn btn-sm btn-ghost" onclick="regenerateToken()">🔄 重新生成</button>
+                <button class="btn btn-sm btn-ghost" data-action="regenerate-token">🔄 重新生成</button>
             </div>
             {% else %}
             <div style="text-align:center;padding:20px">
-                <button class="btn btn-primary" onclick="regenerateToken()" id="genBtn">🔗 生成分享链接</button>
+                <button class="btn btn-primary" data-action="regenerate-token" id="genBtn">🔗 生成分享链接</button>
             </div>
             {% endif %}
         </div>
         <div class="modal-actions">
-            <button type="button" class="btn btn-ghost" onclick="closeModal('shareModal')">关闭</button>
+            <button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="shareModal">关闭</button>
         </div>
     </div>
 </div>
 
-<script>
+<script nonce="{{ g.csp_nonce }}">
 function shareNode(btn) {
     const uri = btn.getAttribute('data-uri');
     if (!uri) return;
@@ -222,9 +222,9 @@ async function regenerateToken() {
                 '<label>分享链接（可直接导入 Shadowrocket / Clash）</label>' +
                 '<div style="display:flex;gap:8px;align-items:center">' +
                 '<input id="shareUrl" readonly style="font-family:monospace;font-size:12px">' +
-                '<button class="btn btn-primary" onclick="copyText(document.getElementById(\'shareUrl\').value)" style="white-space:nowrap">📋 复制</button>' +
+                '<button class="btn btn-primary" data-action="copy-input" data-input-id="shareUrl" style="white-space:nowrap">📋 复制</button>' +
                 '</div></div>' +
-                '<div style="margin-top:8px"><button class="btn btn-sm btn-ghost" onclick="regenerateToken()">🔄 重新生成</button></div>';
+                '<div style="margin-top:8px"><button class="btn btn-sm btn-ghost" data-action="regenerate-token">🔄 重新生成</button></div>';
             const shareUrl = document.getElementById('shareUrl');
             shareUrl.value = data.url;
         }

@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -38,6 +39,22 @@ def extract_csrf_token(html):
 
 
 class AnyTlsPanelTests(unittest.TestCase):
+    def test_protocol_codecs_are_registry_driven_and_bounded(self):
+        import protocol_codecs
+
+        expected = {
+            "anytls", "trojan", "vmess", "vless", "hysteria2", "tuic", "ss"
+        }
+        self.assertTrue(expected.issubset(protocol_codecs.CODECS))
+        self.assertLessEqual(
+            len(inspect.getsource(protocol_codecs.parse_clash_yaml).splitlines()),
+            45,
+        )
+        self.assertLessEqual(
+            len(inspect.getsource(protocol_codecs.clash_proxy_from_uri).splitlines()),
+            30,
+        )
+
     def test_shell_scripts_use_lf_line_endings(self):
         for script in REPO_ROOT.glob("*.sh"):
             data = script.read_bytes()
@@ -887,15 +904,37 @@ proxies:
                     "ANYTLS_DATABASE": str(database),
                     "ANYTLS_SESSION_COOKIE_SECURE": "1",
                     "ANYTLS_TRUST_PROXY": "1",
-                    "ANYTLS_RATE_LIMIT_STORAGE_URI": "memory://",
                 },
                 clear=False,
             ):
                 app = load_app(database)
 
         self.assertTrue(app.app.config["SESSION_COOKIE_SECURE"])
-        self.assertEqual(app.limiter._storage_uri, "memory://")
         self.assertEqual(type(app.app.wsgi_app).__name__, "ProxyFix")
+
+    def test_login_rate_limit_survives_application_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.test_client() as client:
+                for _index in range(5):
+                    response = client.post(
+                        "/login",
+                        data={"username": "admin", "password": "wrong"},
+                    )
+                    self.assertEqual(response.status_code, 200)
+
+            reloaded = load_app(database)
+            reloaded.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with reloaded.app.test_client() as client:
+                response = client.post(
+                    "/login",
+                    data={"username": "admin", "password": "wrong"},
+                )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("登录尝试过于频繁", response.get_data(as_text=True))
 
     def test_responses_include_baseline_security_headers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -907,6 +946,125 @@ proxies:
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertIn("max-age=", response.headers["Strict-Transport-Security"])
+
+    def test_responses_use_nonce_based_content_security_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True)
+            with app.app.test_client() as client:
+                response = client.get("/login", base_url="https://panel.example")
+
+        policy = response.headers["Content-Security-Policy"]
+        self.assertIn("default-src 'self'", policy)
+        self.assertRegex(policy, r"script-src 'self' 'nonce-[A-Za-z0-9_-]+'")
+        self.assertIn("script-src-attr 'none'", policy)
+        self.assertIn("object-src 'none'", policy)
+        self.assertNotIn("script-src 'self' 'unsafe-inline'", policy)
+        nonce = re.search(r"script-src 'self' 'nonce-([^']+)'", policy).group(1)
+        self.assertIn(f'<style nonce="{nonce}">', response.get_data(as_text=True))
+
+    def test_templates_do_not_use_inline_event_handler_attributes(self):
+        for template in (REPO_ROOT / "templates").glob("*.html"):
+            content = template.read_text(encoding="utf-8")
+            self.assertIsNone(
+                re.search(
+                    r"\s(?:onclick|onsubmit|onchange|oninput|onload)\s*=",
+                    content,
+                    flags=re.IGNORECASE,
+                ),
+                msg=f"inline event handler remains in {template.name}",
+            )
+            for tag in re.findall(r"<(?:script|style)\b[^>]*>", content):
+                if tag.startswith("<script") and " src=" in tag:
+                    continue
+                self.assertIn("nonce=", tag, msg=f"missing nonce in {template.name}: {tag}")
+
+    def test_request_id_is_validated_and_returned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True)
+            with app.app.test_client() as client:
+                accepted = client.get(
+                    "/login", headers={"X-Request-ID": "trace-123_A"}
+                )
+                replaced = client.get(
+                    "/login", headers={"X-Request-ID": "x" * 200}
+                )
+
+        self.assertEqual(accepted.headers["X-Request-ID"], "trace-123_A")
+        self.assertNotEqual(replaced.headers["X-Request-ID"], "x" * 200)
+        self.assertRegex(replaced.headers["X-Request-ID"], r"^[a-f0-9]{32}$")
+
+    def test_health_endpoints_are_loopback_only_and_readiness_checks_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True)
+            with app.app.test_client() as client:
+                health = client.get(
+                    "/healthz", environ_overrides={"REMOTE_ADDR": "127.0.0.1"}
+                )
+                ready = client.get(
+                    "/readyz", environ_overrides={"REMOTE_ADDR": "::1"}
+                )
+                external = client.get(
+                    "/healthz",
+                    environ_overrides={"REMOTE_ADDR": "198.51.100.10"},
+                )
+
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(health.get_json(), {"status": "ok"})
+        self.assertEqual(ready.status_code, 200)
+        self.assertEqual(ready.get_json()["schema_version"], app.SCHEMA_VERSION)
+        self.assertEqual(external.status_code, 404)
+
+    def test_readiness_fails_closed_when_database_check_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True)
+            with mock.patch.object(
+                app, "get_db", side_effect=sqlite3.OperationalError("unavailable")
+            ):
+                with app.app.test_client() as client:
+                    response = client.get(
+                        "/readyz",
+                        environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+                    )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {"status": "unavailable"})
+
+    def test_readiness_fails_closed_when_database_disk_is_low(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True)
+            with mock.patch.object(
+                app.shutil, "disk_usage", return_value=mock.Mock(free=1024)
+            ):
+                with app.app.test_client() as client:
+                    response = client.get(
+                        "/readyz",
+                        environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+                    )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {"status": "unavailable"})
+
+    def test_login_audit_log_excludes_passwords(self):
+        password = "do-not-log-this-password"
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with self.assertLogs("anytls.audit", level="INFO") as captured:
+                with app.app.test_client() as client:
+                    client.post(
+                        "/login",
+                        data={"username": "admin", "password": password},
+                    )
+
+        output = "\n".join(captured.output)
+        self.assertIn('"action":"auth.login"', output)
+        self.assertIn('"outcome":"failure"', output)
+        self.assertNotIn(password, output)
 
     def test_debug_server_is_limited_to_loopback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1784,12 +1942,15 @@ proxies:
                         sub_token TEXT DEFAULT ''
                     )"""
                 )
-            load_app(database)
+            app = load_app(database)
             with sqlite3.connect(database) as db:
                 columns = {row[1] for row in db.execute("PRAGMA table_info(accounts)")}
                 tables = {row[0] for row in db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )}
+                migration_versions = [row[0] for row in db.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )]
 
         self.assertTrue({
             "traffic_upload_bytes",
@@ -1797,6 +1958,11 @@ proxies:
             "expire_date",
         }.issubset(columns))
         self.assertIn("traffic_collectors", tables)
+        self.assertIn("rate_limits", tables)
+        self.assertEqual(
+            migration_versions,
+            list(range(1, app.SCHEMA_VERSION + 1)),
+        )
 
     def test_database_path_rejects_empty_or_directory_values(self):
         original_mode = REPO_ROOT.stat().st_mode & 0o777
@@ -2270,6 +2436,36 @@ proxies:
         self.assertEqual(response.status_code, 200)
         self.assertGreater(max_active, 1)
 
+    def test_check_all_nodes_rejects_oversized_batch_before_network_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "anytls://pw@example.com:443#demo"),
+                ).lastrowid
+                db.executemany(
+                    "INSERT INTO nodes (account_id, name, host, port, password) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [
+                        (account_id, f"node-{index}", "example.com", 443, "pw")
+                        for index in range(app.MAX_CHECK_NODES + 1)
+                    ],
+                )
+                db.commit()
+
+            with mock.patch.object(app, "_check_node_connect") as check:
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                    response = client.post(f"/api/accounts/{account_id}/check-all")
+
+        self.assertEqual(response.status_code, 413)
+        check.assert_not_called()
+
     def test_sync_all_fetches_subscriptions_concurrently(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
@@ -2328,6 +2524,31 @@ proxies:
         self.assertGreater(max_active, 1)
         self.assertTrue(all(item["status"] == "ok" for item in response.get_json()["results"]))
         self.assertEqual(used_values, [500, 500, 500, 500])
+
+    def test_sync_all_rejects_oversized_batch_before_network_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                db.executemany(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    [
+                        (f"account-{index}", f"https://sub-{index}.example/list")
+                        for index in range(app.MAX_SYNC_ACCOUNTS + 1)
+                    ],
+                )
+                db.commit()
+
+            with mock.patch.object(app, "parse_subscribe_url") as parse:
+                with app.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["logged_in"] = True
+                    response = client.post("/api/sync-all")
+
+        self.assertEqual(response.status_code, 413)
+        parse.assert_not_called()
 
     def test_nodes_monitor_uses_latest_status_for_duplicate_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2403,10 +2624,9 @@ proxies:
     def test_account_detail_template_escapes_js_arguments(self):
         content = (REPO_ROOT / "templates" / "account_detail.html").read_text(encoding="utf-8")
 
-        self.assertIn("copyText({{ n.password|tojson }})", content)
-        self.assertIn("togglePw({{ n.id }}, {{ n.password|tojson }})", content)
-        self.assertNotIn("copyText('{{ n.password }}')", content)
-        self.assertNotIn("togglePw({{ n.id }}, '{{ n.password }}')", content)
+        self.assertIn('data-copy-value="{{ n.password | e }}"', content)
+        self.assertIn('data-password="{{ n.password | e }}"', content)
+        self.assertNotIn("onclick=", content)
         self.assertNotIn("value=\"' + data.url", content)
         self.assertIn("shareUrl.value = data.url", content)
 
@@ -2448,7 +2668,7 @@ proxies:
         content = (REPO_ROOT / "templates" / "monitor.html").read_text(encoding="utf-8")
 
         self.assertIn('data-host="{{ n.host }}"', content)
-        self.assertIn("checkOne(this.dataset.host, Number(this.dataset.port))", content)
+        self.assertIn('data-action="check-host"', content)
         self.assertNotIn("checkOne('{{ n.host }}'", content)
         self.assertIn("row.querySelector('button[data-host][data-port]')", content)
         self.assertNotIn("hostPort.textContent.split(':')", content)
@@ -3432,7 +3652,49 @@ proxies:
         self.assertIn("anytls-panel-managed-v1", content)
         self.assertIn('chown root:root "$PANEL_DIR/.anytls-panel-install"', content)
         self.assertIn("automatic HTTPS requires ANYTLS_BIND_HOST to remain on loopback", content)
-        self.assertIn("Let's Encrypt certificate managed and renewed by Caddy", content)
+        self.assertIn("certificate managed and renewed automatically by Caddy", content)
+
+    def test_systemd_units_have_resource_and_kernel_hardening(self):
+        required = (
+            "CapabilityBoundingSet=",
+            "AmbientCapabilities=",
+            "ProtectHome=true",
+            "ProtectKernelModules=true",
+            "ProtectKernelLogs=true",
+            "ProtectClock=true",
+            "RestrictNamespaces=true",
+            "LockPersonality=true",
+            "SystemCallArchitectures=native",
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+            "MemoryMax=256M",
+            "TasksMax=64",
+            "LimitNOFILE=4096",
+        )
+        for path in (REPO_ROOT / "deploy.sh", REPO_ROOT / "anytls-panel.service"):
+            content = path.read_text(encoding="utf-8")
+            for directive in required:
+                self.assertIn(directive, content, msg=f"{directive} missing from {path.name}")
+
+    def test_healthcheck_uses_readiness_hysteresis_and_certificate_warning(self):
+        content = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
+
+        self.assertIn("/readyz", content)
+        self.assertIn("FAILURE_THRESHOLD=3", content)
+        self.assertIn("RECOVERY_COOLDOWN_SECONDS=300", content)
+        self.assertIn("record_probe_failure", content)
+        self.assertIn("reset_probe_failures", content)
+        self.assertIn("health_recovery_suppressed", content)
+        self.assertIn("openssl x509 -checkend 1814400", content)
+        self.assertIn("certificate_expiring", content)
+
+    def test_deploy_keeps_two_verified_backups_and_supports_delayed_rollback(self):
+        content = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
+
+        self.assertIn("MAX_PERSISTENT_BACKUPS=2", content)
+        self.assertIn("SHA256SUMS", content)
+        self.assertIn("persist_rollback_backup", content)
+        self.assertIn("delayed_rollback", content)
+        self.assertIn("--rollback", content)
 
     def test_deploy_migrates_legacy_state_into_isolated_data_directory(self):
         script = REPO_ROOT / "deploy.sh"
@@ -3590,7 +3852,8 @@ proxies:
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
-        self.assertIn("stevedore==5.8.0", dev_input)
+        self.assertIn("coverage==7.15.4", dev_input)
+        self.assertIn("stevedore==5.9.1", dev_input)
 
     def test_deploy_rejects_symlinked_data_marker(self):
         script = REPO_ROOT / "deploy.sh"

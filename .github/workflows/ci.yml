@@ -8,11 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.12"]
 
     steps:
       - name: Checkout
@@ -31,20 +31,44 @@ jobs:
       - name: Lint
         run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -q
+      - name: Run unit tests with branch coverage
+        run: |
+          python -m coverage run --branch -m unittest discover -s tests -q
+          python -m coverage report \
+            --include='app.py,db_migrations.py,protocol_codecs.py,security_utils.py,sqlite_rate_limit.py,traffic_token.py' \
+            --fail-under=74
 
       - name: Compile app
-        run: python -m py_compile app.py security_utils.py traffic_token.py
+        run: >-
+          python -m py_compile app.py db_migrations.py protocol_codecs.py
+          security_utils.py sqlite_rate_limit.py traffic_token.py
 
       - name: Scan Python security issues
-        run: python -m bandit -q -ll -r app.py security_utils.py traffic_token.py
+        run: >-
+          python -m bandit -q -ll -r app.py db_migrations.py protocol_codecs.py
+          security_utils.py sqlite_rate_limit.py traffic_token.py
 
       - name: Check shell syntax
         run: bash -n deploy.sh start.sh traffic_collector.sh uninstall.sh
 
       - name: Lint shell scripts
-        run: shellcheck deploy.sh start.sh traffic_collector.sh uninstall.sh
+        run: >-
+          shellcheck deploy.sh start.sh traffic_collector.sh uninstall.sh
+          tests/ubuntu24_integration.sh
 
       - name: Audit dependencies
         run: python -m pip_audit -r requirements.txt
+
+  ubuntu24-deploy-integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify Ubuntu deployment runtime
+        run: sudo --preserve-env=PATH bash tests/ubuntu24_integration.sh

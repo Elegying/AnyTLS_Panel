@@ -5,7 +5,7 @@
     <h1>📡 节点检测</h1>
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <span id="check-status" style="font-size:13px;color:var(--text2)"></span>
-        <button class="btn btn-primary" id="checkAllBtn" onclick="checkAll()">🔍 一键检测全部</button>
+        <button class="btn btn-primary" id="checkAllBtn" data-action="check-all">🔍 一键检测全部</button>
     </div>
 </div>
 
@@ -68,7 +68,7 @@
             <td data-label="操作">
                 <button class="btn btn-sm btn-ghost"
                         data-host="{{ n.host }}" data-port="{{ n.port }}"
-                        onclick="checkOne(this.dataset.host, Number(this.dataset.port))">检测</button>
+                        data-action="check-host">检测</button>
             </td>
         </tr>
         {% endfor %}
@@ -103,7 +103,7 @@
     </div>
 </div>
 
-<script>
+<script nonce="{{ g.csp_nonce }}">
 async function checkOne(host, port) {
     const el = document.getElementById('status-' + host + '-' + port);
     const latEl = document.getElementById('latency-' + host + '-' + port);
