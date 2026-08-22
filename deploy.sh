@@ -555,7 +555,7 @@ ensure_caddy() {
         return
     fi
 
-    log "installing Caddy for automatic Let's Encrypt HTTPS"
+    log "installing Caddy for automatic public ACME HTTPS"
     CADDY_INSTALL_ATTEMPTED=1
     if ! install_caddy_from_official_repository; then
         fail "Caddy is unavailable from the configured package repositories"
@@ -1712,7 +1712,7 @@ start_https_proxy() {
     done
 
     journalctl -u caddy -n 80 --no-pager || true
-    fail "Let's Encrypt certificate verification timed out; check DNS and public ports 80/443"
+    fail "automatic HTTPS certificate verification timed out; check DNS and public ports 80/443"
 }
 
 start_keepalive() {

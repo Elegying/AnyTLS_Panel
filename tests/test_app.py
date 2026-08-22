@@ -2708,7 +2708,7 @@ proxies:
         self.assertIn("administrator passwords do not match", content)
         self.assertNotIn("generate_password", content)
         self.assertIn("generate_api_token", content)
-        self.assertIn("installing Caddy for automatic Let's Encrypt HTTPS", content)
+        self.assertIn("installing Caddy for automatic public ACME HTTPS", content)
         self.assertNotIn("https://acme-v02.api.letsencrypt.org/directory", content)
         self.assertIn("import anytls-panel.d/*.caddy", content)
         self.assertIn('systemctl enable caddy', content)

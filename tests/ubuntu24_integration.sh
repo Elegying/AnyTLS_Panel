@@ -135,7 +135,10 @@ capture_caddy_state
 ensure_caddy
 assert_supported_caddy_version
 temp_caddy="$(mktemp)"
-printf 'http://127.0.0.1:18080 { reverse_proxy 127.0.0.1:18866 }\n' > "$temp_caddy"
+printf '%s\n' \
+    'http://127.0.0.1:18080 {' \
+    '    reverse_proxy 127.0.0.1:18866' \
+    '}' > "$temp_caddy"
 caddy validate --config "$temp_caddy" --adapter caddyfile
 rm -f -- "$temp_caddy"
 
