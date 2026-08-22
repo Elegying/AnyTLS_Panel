@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
     <title>{% block title %}AnyTLS Panel{% endblock %}</title>
-    <style>
+    <style nonce="{{ g.csp_nonce }}">
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
             --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
@@ -250,11 +250,11 @@
 </head>
 <body>
     <div class="mobile-header">
-        <button class="hamburger" onclick="toggleSidebar()">☰</button>
+        <button class="hamburger" data-action="toggle-sidebar">☰</button>
         <span class="logo-text">⚡ AnyTLS</span>
         <div style="width:32px"></div>
     </div>
-    <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+    <div class="sidebar-overlay" id="sidebarOverlay" data-action="toggle-sidebar"></div>
 
     <div class="sidebar" id="sidebar">
         <div class="logo">
@@ -266,7 +266,7 @@
         <a href="{{ url_for('nodes_monitor') }}" class="{{ 'active' if request.endpoint == 'nodes_monitor' }}">📡 节点检测</a>
         <a href="{{ url_for('rename_rules_page') }}" class="{{ 'active' if request.endpoint == 'rename_rules_page' }}">🔄 重命名规则</a>
         <div class="bottom">
-            <a href="#" onclick="openModal('pwModal')">🔑 修改密码</a>
+            <a href="#" data-action="open-modal" data-modal="pwModal">🔑 修改密码</a>
             <a href="{{ url_for('logout') }}">🚪 退出登录</a>
         </div>
     </div>
@@ -299,14 +299,14 @@
                     <input type="password" name="confirm_password" required>
                 </div>
                 <div class="modal-actions">
-                    <button type="button" class="btn btn-ghost" onclick="closeModal('pwModal')">取消</button>
+                    <button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="pwModal">取消</button>
                     <button type="submit" class="btn btn-primary">保存</button>
                 </div>
             </form>
         </div>
     </div>
 
-    <script>
+    <script nonce="{{ g.csp_nonce }}">
         const CSRF_TOKEN = "{{ csrf_token() }}";
         function csrfHeaders(extra) {
             return Object.assign({'X-CSRFToken': CSRF_TOKEN}, extra || {});
@@ -327,6 +327,39 @@
         });
         function openModal(id) { document.getElementById(id).classList.add('show'); }
         function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+        document.addEventListener('click', event => {
+            const target = event.target.closest('[data-action]');
+            if (!target) return;
+            event.preventDefault();
+            const action = target.dataset.action;
+            if (action === 'toggle-sidebar') toggleSidebar();
+            else if (action === 'open-modal') openModal(target.dataset.modal);
+            else if (action === 'close-modal') closeModal(target.dataset.modal);
+            else if (action === 'navigate') location.href = target.dataset.href;
+            else if (action === 'sync-all') window.syncAll(target);
+            else if (action === 'check-all') window.checkAll();
+            else if (action === 'open-share') window.openShareModal();
+            else if (action === 'copy-value') copyText(target.dataset.copyValue);
+            else if (action === 'copy-input') {
+                copyText(document.getElementById(target.dataset.inputId).value);
+            } else if (action === 'toggle-password') {
+                window.togglePw(Number(target.dataset.nodeId), target.dataset.password);
+            } else if (action === 'check-node') {
+                window.checkNode(Number(target.dataset.nodeId));
+            } else if (action === 'share-node') window.shareNode(target);
+            else if (action === 'regenerate-token') window.regenerateToken();
+            else if (action === 'delete-account') {
+                if (confirm(target.dataset.confirm)) {
+                    document.getElementById(target.dataset.formId).submit();
+                }
+            } else if (action === 'check-host') {
+                window.checkOne(target.dataset.host, Number(target.dataset.port));
+            }
+        });
+        document.addEventListener('submit', event => {
+            const message = event.target.dataset.confirm;
+            if (message && !confirm(message)) event.preventDefault();
+        });
         document.querySelectorAll('.modal-overlay').forEach(m => {
             m.addEventListener('click', e => { if (e.target === m) m.classList.remove('show'); });
         });

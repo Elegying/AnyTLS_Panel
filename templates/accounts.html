@@ -3,14 +3,14 @@
 {% block content %}
 <div class="header">
     <h1>👤 账号管理</h1>
-    <button class="btn btn-primary" onclick="openModal('addModal')">＋ 导入订阅</button>
+    <button class="btn btn-primary" data-action="open-modal" data-modal="addModal">＋ 导入订阅</button>
 </div>
 
 {% if accounts %}
 <div class="accounts-grid">
     {% for a in accounts %}
     {% set pct = calc_traffic_percent(a.traffic_used_bytes or 0, a.traffic_limit_gb or 250) %}
-    <div class="account-card" onclick="location.href='{{ url_for('account_detail', account_id=a.id) }}'">
+    <div class="account-card" data-action="navigate" data-href="{{ url_for('account_detail', account_id=a.id) }}">
         <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:8px">
             <div class="name">{{ a.name }}</div>
             {% if a.status == 'active' %}
@@ -46,7 +46,7 @@
     <div class="empty-state">
         <div class="icon">📦</div>
         <p>还没有账号，导入你的第一个订阅开始使用</p>
-        <button class="btn btn-primary" onclick="openModal('addModal')">＋ 导入订阅</button>
+        <button class="btn btn-primary" data-action="open-modal" data-modal="addModal">＋ 导入订阅</button>
     </div>
 </div>
 {% endif %}
@@ -84,7 +84,7 @@
                 <input name="notes" placeholder="可选备注">
             </div>
             <div class="modal-actions">
-                <button type="button" class="btn btn-ghost" onclick="closeModal('addModal')">取消</button>
+                <button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="addModal">取消</button>
                 <button type="submit" class="btn btn-primary">导入</button>
             </div>
         </form>

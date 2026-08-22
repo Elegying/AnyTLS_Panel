@@ -28,7 +28,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.1.0/deploy.sh)
 ```
 
-首次部署会依次提示输入面板管理员用户名、隐藏输入并确认密码，以及面板域名。请先把域名的 A/AAAA 记录指向服务器，并在云安全组/防火墙放行 TCP 80 和 443。脚本会安装 Caddy、从 Let’s Encrypt 自动签发证书、启用 HTTP→HTTPS 跳转，并由 Caddy 在后台自动续签。
+首次部署会依次提示输入面板管理员用户名、隐藏输入并确认密码，以及面板域名。请先把域名的 A/AAAA 记录指向服务器，并在云安全组/防火墙放行 TCP 80 和 443。脚本会从 Caddy 官方稳定仓库安装受支持版本，由 Caddy 自动选择公开 ACME 签发方、启用 HTTP→HTTPS 跳转并自动续签证书。
 
 部署会先在独立暂存目录下载锁定依赖、创建测试环境并完成应用初始化验证，之后才短暂停止线上服务进行切换。切换、数据库迁移、Caddy 或健康检查失败时会自动恢复旧代码、数据库和系统配置。不要直接修改 `requirements.txt`；调整依赖时更新 `requirements.in` 并重新生成带哈希的锁文件。
 
@@ -201,7 +201,7 @@ AnyTLS_Panel/
 ## 🔒 安全特性
 
 - ✅ 浏览器管理 POST 接口验证 CSRF Token；流量 API 使用独立 Bearer Token
-- ✅ 登录速率限制（5次/分钟，防暴力破解）
+- ✅ SQLite 持久化登录速率限制（5次/分钟，跨进程和重启生效）
 - ✅ 流量上报 API 支持账号级 Bearer token，节点不能跨账号写入
 - ✅ Session HttpOnly + SameSite=Lax
 - ✅ 生产进程使用专用低权限用户和 systemd 沙箱
@@ -209,10 +209,11 @@ AnyTLS_Panel/
 - ✅ Secret Key 原子持久化，避免并发启动产生不同会话密钥
 - ✅ 订阅拉取拒绝常规内网/回环目标，并限制重定向和响应体大小
 - ✅ 订阅连接固定到已验证的公网 IP，阻断 DNS 重绑定到内网地址
-- ✅ systemd 自动拉起面板与 Caddy，每分钟执行本机 HTTP/HTTPS 健康检查
-- ✅ 更新前预构建依赖并验证应用，切换失败自动恢复上一版本和数据库
+- ✅ 严格 CSP、无内联事件处理器、请求 ID 与不记录秘密的结构化审计日志
+- ✅ systemd 自动拉起面板与 Caddy；每分钟检查就绪性、HTTPS 与证书剩余有效期，连续三次失败才恢复服务，并用五分钟冷却抑制重启风暴
+- ✅ 更新前预构建依赖并验证应用，切换失败自动恢复上一版本和数据库；成功更新保留两份带校验和的 LKG 备份
 
-生产部署会自动把 Gunicorn 绑定到 `127.0.0.1`，并写入独立的 Caddy 站点片段 `/etc/caddy/anytls-panel.d/anytls-panel.caddy`。Caddy 使用 Let’s Encrypt ACME 接口签发受信任证书并自动续签；这里不会使用自签证书。
+生产部署会自动把 Gunicorn 绑定到 `127.0.0.1`，并写入独立的 Caddy 站点片段 `/etc/caddy/anytls-panel.d/anytls-panel.caddy`。Caddy 使用默认公开 ACME 签发方签发受信任证书并自动续签；这里不会使用自签证书。部署服务限制为 256 MiB 内存、64 个任务和 4096 个文件描述符；批量同步/检测设有数量上限，且同一时刻只允许一个批处理，避免失控并发耗尽服务资源。
 
 自动化部署示例：
 
@@ -227,10 +228,11 @@ bash deploy.sh
 
 ## 📋 环境要求
 
-- Python 3.10+
-- 带 systemd 的 Linux（发行版仓库需能提供 Python 3.10+）
+- Ubuntu 24.04 LTS（当前唯一经过端到端验证的生产目标）
+- Python 3.12+
+- systemd 与 `apt-get`
 - 可解析到服务器的公网域名，且 TCP 80/443 可从公网访问
-- 发行版软件源可提供 Caddy
+- 可访问 Caddy 官方 Cloudsmith 稳定仓库和 Python 包索引
 - 512MB+ 内存
 
 ## 📄 开源协议

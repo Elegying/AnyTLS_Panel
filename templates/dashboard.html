@@ -11,7 +11,7 @@
         <div class="label">账号数</div>
         <div class="value blue">{{ total_accounts }}</div>
     </div>
-    <div class="stat-card" style="display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer" onclick="syncAll()">
+    <div class="stat-card" style="display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer" data-action="sync-all">
         <div style="font-size:32px;margin-bottom:8px">🔄</div>
         <div style="font-size:15px;font-weight:600">一键同步全部</div>
         <div style="font-size:12px;color:var(--text2);margin-top:4px">更新所有账号订阅</div>
@@ -54,7 +54,7 @@
     <table class="rwd-table">
         <thead><tr><th>账号</th><th>到期时间</th><th>节点数</th><th>流量</th><th>状态</th><th class="hide-mobile">最后同步</th></tr></thead>
         {% for a in accounts %}
-        <tr class="clickable" onclick="location.href='{{ url_for('account_detail', account_id=a.id) }}'">
+        <tr class="clickable" data-action="navigate" data-href="{{ url_for('account_detail', account_id=a.id) }}">
             <td data-label="账号"><strong>{{ a.name }}</strong></td>
             <td data-label="到期时间" style="white-space:nowrap">
                 {% if a.expire_date %}
@@ -101,10 +101,9 @@
     {% endif %}
 </div>
 
-<script>
-async function syncAll() {
+<script nonce="{{ g.csp_nonce }}">
+async function syncAll(card) {
     if (!confirm('确认同步所有账号的订阅？')) return;
-    const card = event.currentTarget;
     const orig = card.innerHTML;
     card.innerHTML = '<div style="font-size:32px;margin-bottom:8px">⏳</div><div style="font-size:15px;font-weight:600">同步中...</div>';
     card.style.pointerEvents = 'none';

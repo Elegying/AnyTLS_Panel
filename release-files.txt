@@ -1,13 +1,16 @@
 app.py
 anytls-panel.service
 CHANGELOG.md
+db_migrations.py
 deploy.sh
 docs/OPERATIONS.md
 LICENSE
 README.md
 requirements.in
 requirements.txt
+protocol_codecs.py
 security_utils.py
+sqlite_rate_limit.py
 start.sh
 static/favicon.svg
 templates/account_detail.html

@@ -4,14 +4,13 @@
 
 ## 支持环境
 
-- Python 3.10+
-- 带 systemd 的 Linux
-- `apt-get`、`dnf` 或 `yum` 包管理器
-- systemd
+- Ubuntu 24.04 LTS（当前唯一经过端到端验证的生产目标）
+- Python 3.12+
+- systemd 与 `apt-get`
 - 已解析到服务器的公网域名
 - 公网 TCP 80/443 已在云安全组和主机防火墙中放行
 
-部署脚本会先校验 `python3` 版本和 venv/pip 可用性，不满足要求时会在修改系统前失败退出。旧版发行版即使包管理器受支持，也可能因默认 Python 版本过低而不适用。
+部署脚本会先校验系统版本、`python3`、venv/pip 和基础工具，不满足要求时会在切换应用前失败退出。Debian、Ubuntu 22.04、RHEL 系发行版及非 systemd 环境目前都不在正式支持范围内。
 
 Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希的 `requirements.txt`。部署在停服前下载、校验并试装全部依赖，切换阶段不再访问 PyPI。
 
@@ -67,24 +66,21 @@ bash deploy.sh
 部署脚本自动完成以下工作：
 
 1. 校验输入的是公网 DNS 域名并确认其当前可解析。
-2. 安装 Caddy，将 Gunicorn 保持在 `127.0.0.1:<面板端口>`。
+2. 从 Caddy 官方 Cloudsmith 稳定仓库安装并验证签名和最低版本，将 Gunicorn 保持在 `127.0.0.1:<面板端口>`。
 3. 写入 `/etc/caddy/anytls-panel.d/<服务名>.caddy`，并安全地导入现有 Caddyfile。
-4. 指定 Let’s Encrypt ACME 接口签发证书，自动将 HTTP 跳转至 HTTPS。
+4. 使用 Caddy 默认的公开 ACME 签发方签发证书，自动将 HTTP 跳转至 HTTPS。
 5. 等待 `https://<域名>/login` 通过真实证书校验后才报告部署成功。
-6. 为面板和 Caddy 配置异常自动拉起，并安装每分钟运行一次的本机端到端健康检查 timer。
+6. 为面板和 Caddy 配置异常自动拉起，并安装每分钟运行一次的本机健康检查 timer；连续三次失败才触发恢复，两次恢复至少间隔五分钟，降低短暂抖动造成的重启风暴。
 
 生成的站点配置等价于：
 
 ```caddyfile
 panel.example.com {
-    tls {
-        ca https://acme-v02.api.letsencrypt.org/directory
-    }
     reverse_proxy 127.0.0.1:8866
 }
 ```
 
-Caddy 常驻服务会在证书到期前自动续签，不使用 cron，也不是自签证书。部署脚本强制启用 Secure Cookie 与可信代理处理，并拒绝把 Gunicorn 改为公网监听。若端口 80/443 已被其他服务占用、域名尚未生效或云安全组阻断 ACME 验证，部署会显示 Caddy 日志并失败退出。
+Caddy 常驻服务会在证书到期前自动续签，不使用 cron，也不是自签证书。健康检查会在证书剩余有效期不足 21 天或无法读取证书时写入 `certificate_expiring` 警告。部署脚本强制启用 Secure Cookie 与可信代理处理，并拒绝把 Gunicorn 改为公网监听。若端口 80/443 已被其他服务占用、域名尚未生效或云安全组阻断 ACME 验证，部署会显示 Caddy 日志并失败退出。
 
 HTTP(S) 订阅默认禁止访问内网、回环、链路本地和保留地址。确需拉取可信内网订阅时，可在隔离环境中设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1` 后重新部署；不要在可导入不可信订阅的面板上开启。
 
@@ -110,9 +106,11 @@ systemctl is-active anytls-panel
 journalctl -u caddy -n 50 --no-pager
 journalctl -u anytls-panel -n 50 --no-pager
 curl -I https://panel.example.com/login
+curl --fail http://127.0.0.1:8866/healthz
+curl --fail http://127.0.0.1:8866/readyz
 ```
 
-部署脚本会从服务器本机验证证书与登录页；仍建议从独立客户端验证域名、证书、登录和订阅同步，并确认响应包含 HSTS、安全 Cookie 等安全头。`systemctl active` 只能证明进程存活，不能替代真实业务验收。
+`/healthz` 只证明应用进程响应；`/readyz` 还检查数据库完整性、迁移版本、可写锁和剩余磁盘空间。两个端点仅允许回环访问。部署脚本会从服务器本机验证证书与登录页；仍建议从独立客户端验证域名、证书、登录和订阅同步，并确认响应包含 HSTS、安全 Cookie 和 CSP 等安全头。`systemctl active` 只能证明进程存活，不能替代真实业务验收。
 
 ## 更新
 
@@ -144,7 +142,7 @@ rm -rf -- "$staging_dir"
 trap - EXIT
 ```
 
-重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库。脚本先完成源码暂存、带哈希依赖下载和独立数据库初始化测试，再停止服务进行短切换；切换后任一步失败都会自动恢复旧代码、数据库、systemd 和 Caddy 配置：
+重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库。脚本先完成源码暂存、带哈希依赖下载和现有数据库副本迁移测试，再停止服务进行短切换；切换后任一步失败都会自动恢复旧代码、数据库、systemd 和 Caddy 配置。成功更新还会在 `/var/backups/<服务名>/` 保留最近两份带 SHA-256 校验的上一版本快照：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.1.0/deploy.sh)
@@ -158,15 +156,17 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.1.0
 systemctl is-active anytls-panel caddy anytls-panel-healthcheck.timer
 systemctl list-timers anytls-panel-healthcheck.timer --all
 journalctl -u anytls-panel-healthcheck.service -n 30 --no-pager
+journalctl -t anytls-panel-healthcheck -n 30 --no-pager
 ```
 
-回滚时重新部署上一个已验证标签，再检查数据库完整性、服务日志、登录和订阅输出：
+列出可用 LKG 快照并回滚到最新一份：
 
 ```bash
-ANYTLS_REPO_REF="上一个版本标签" \
-ANYTLS_PANEL_DOMAIN="panel.example.com" \
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.1.0/deploy.sh)
+/opt/anytls-panel/deploy.sh --list-backups
+/opt/anytls-panel/deploy.sh --rollback latest
 ```
+
+也可将 `latest` 换成列表中的完整 `backup-...` 标识。脚本会先校验快照哈希，并在回滚前为当前状态再建安全快照；之后恢复代码、数据库、Caddy 和 systemd unit 的 active/enabled 状态。回滚完成后检查数据库、服务日志、登录和订阅输出。若没有 LKG 快照，再使用已验证的旧标签重新部署。
 
 ## 卸载
 
@@ -197,24 +197,29 @@ brew install python@3.12 shellcheck actionlint
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
 .venv/bin/python -m unittest discover -s tests -q
-.venv/bin/python -m py_compile app.py security_utils.py traffic_token.py
-.venv/bin/python -m flake8 app.py security_utils.py traffic_token.py tests \
+.venv/bin/python -m coverage run --branch -m unittest discover -s tests -q
+.venv/bin/python -m coverage report --fail-under=74
+.venv/bin/python -m py_compile app.py db_migrations.py protocol_codecs.py \
+  security_utils.py sqlite_rate_limit.py traffic_token.py
+.venv/bin/python -m flake8 app.py db_migrations.py protocol_codecs.py \
+  security_utils.py sqlite_rate_limit.py traffic_token.py tests \
   --select=E9,F63,F7,F82
-bash -n deploy.sh start.sh traffic_collector.sh uninstall.sh
-shellcheck -x deploy.sh start.sh traffic_collector.sh uninstall.sh
+bash -n deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh
+shellcheck deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh
 actionlint
-.venv/bin/python -m bandit -q -ll -r app.py security_utils.py traffic_token.py
+.venv/bin/python -m bandit -q -ll -r app.py db_migrations.py protocol_codecs.py \
+  security_utils.py sqlite_rate_limit.py traffic_token.py
 .venv/bin/python -m pip_audit -r requirements.txt
 ```
 
-以上命令固定使用 Python 3.12 和带哈希的开发依赖锁，适用于 macOS 本地质量门禁。GitHub Actions 会在 push 和 pull request 时使用 Python 3.10/3.12 自动运行同等检查。
+以上命令固定使用 Python 3.12 和带哈希的开发依赖锁，适用于 macOS 本地质量门禁。GitHub Actions 会在 push 和 pull request 时使用 Python 3.12 运行同等检查，并在干净的 Ubuntu 24.04 runner 上完成旧数据库迁移、真实 systemd 服务、Caddy 配置与 LKG 校验集成测试。
 
 ## 常见排障
 
 - 登录页打不开：检查 `systemctl status anytls-panel caddy`、`journalctl -u caddy`、域名解析以及云安全组/防火墙的 TCP 80/443。
 - 管理员密码不对：确认首次部署时输入或通过 `ANYTLS_ADMIN_PASS` 提供的密码；已有数据库不会被覆盖。
 - 在线部署失败：确认服务器可以访问 GitHub，或改用克隆部署。
-- Let’s Encrypt 签发失败：确认 A/AAAA 记录指向当前服务器，Caddy 可以占用 80/443，且这两个端口能从公网访问。
+- ACME 证书签发失败：确认 A/AAAA 记录指向当前服务器，Caddy 可以占用 80/443，且这两个端口能从公网访问。
 - 订阅导入失败：先确认订阅内容是否是 Clash YAML、Base64 或支持的单链接格式。
 - 内网订阅被拒绝：这是默认 SSRF 防护；仅在订阅源完全可信且网络隔离时启用 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。
 - HTTPS 下反复跳回登录：确认当前 Caddy 站点仍反向代理到面板端口，且 systemd 服务中的 `ANYTLS_TRUST_PROXY=1`、`ANYTLS_SESSION_COOKIE_SECURE=1` 未被手工覆盖。

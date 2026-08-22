@@ -11,6 +11,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
       id-token: write
 
@@ -26,7 +27,12 @@ jobs:
         run: |
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           git fetch origin main --depth=1
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          tag_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          [[ "$(git rev-parse origin/main)" == "$tag_commit" ]]
+          successful_ci_runs="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=$tag_commit&event=push&status=success" \
+            --jq '.total_count')"
+          [[ "$successful_ci_runs" -ge 1 ]]
           ! gh release view "$RELEASE_TAG" >/dev/null 2>&1
         shell: bash
 

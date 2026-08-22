@@ -12,10 +12,13 @@ import sys
 import hmac
 import math
 import ipaddress
+import logging
+import shutil
 import socket
 import ssl
 import http.client
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import wraps
@@ -26,14 +29,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    flash, jsonify, session, g
+    flash, jsonify, session, g, has_request_context
 )
 from flask_wtf.csrf import CSRFProtect
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from db_migrations import SCHEMA_VERSION, apply_schema_migrations
+from protocol_codecs import (
+    clash_proxy_from_uri as _clash_proxy_from_uri,
+    parse_clash_yaml as _parse_clash_yaml,
+    parse_protocol_uri,
+)
 from security_utils import hash_password, verify_password
+from sqlite_rate_limit import enforce_rate_limit, rate_limit
 from traffic_token import make_account_traffic_token
 
 
@@ -70,22 +78,66 @@ if _env_flag('ANYTLS_TRUST_PROXY'):
 # CSRF 保护
 csrf = CSRFProtect(app)
 
-# 登录速率限制
-limiter = Limiter(
-    get_remote_address,
-    app=app,
-    default_limits=["200 per minute"],
-    storage_uri=os.environ.get('ANYTLS_RATE_LIMIT_STORAGE_URI', 'memory://'),
-)
+audit_logger = logging.getLogger('anytls.audit')
+_REQUEST_ID_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,64}$')
+_AUDIT_DETAIL_FIELDS = {
+    'account_id', 'node_count', 'node_id', 'rule_id', 'status', 'username', 'reason'
+}
+_READINESS_MIN_FREE_BYTES = 64 * 1024 * 1024
 
+
+def audit_event(action, outcome, **details):
+    payload = {
+        'event': 'audit',
+        'action': action,
+        'outcome': outcome,
+    }
+    if has_request_context():
+        payload['request_id'] = getattr(g, 'request_id', '')
+        payload['remote_addr'] = request.remote_addr or ''
+    payload.update({
+        key: value for key, value in details.items()
+        if key in _AUDIT_DETAIL_FIELDS
+    })
+    audit_logger.info(json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True,
+    ))
+
+
+@app.before_request
+def assign_request_id():
+    supplied = request.headers.get('X-Request-ID', '')
+    g.request_id = (
+        supplied if _REQUEST_ID_PATTERN.fullmatch(supplied)
+        else secrets.token_hex(16)
+    )
+    g.csp_nonce = secrets.token_urlsafe(18)
 
 @app.after_request
 def add_security_headers(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Referrer-Policy'] = 'same-origin'
+    nonce = getattr(g, 'csp_nonce', secrets.token_urlsafe(18))
+    response.headers['Content-Security-Policy'] = '; '.join((
+        "default-src 'self'",
+        f"script-src 'self' 'nonce-{nonce}'",
+        "script-src-attr 'none'",
+        f"style-src 'self' 'nonce-{nonce}'",
+        "style-src-attr 'unsafe-inline'",
+        "img-src 'self' data:",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    ))
     if request.is_secure:
         response.headers['Strict-Transport-Security'] = 'max-age=31536000'
+    response.headers['X-Request-ID'] = getattr(g, 'request_id', secrets.token_hex(16))
     return response
 
 
@@ -138,6 +190,61 @@ def close_db(exception):
     db = g.pop('db', None)
     if db is not None:
         db.close()
+
+
+@app.before_request
+def enforce_default_request_limit():
+    if request.endpoint in {'healthz', 'readyz'}:
+        return None
+    view = app.view_functions.get(request.endpoint)
+    if view is not None and getattr(view, '_sqlite_rate_limit', False):
+        return None
+    return enforce_rate_limit(
+        get_db,
+        "global",
+        200,
+        60,
+        "请求过于频繁，请稍后再试",
+    )
+
+
+def _is_loopback_request():
+    try:
+        return ipaddress.ip_address(request.remote_addr or '').is_loopback
+    except ValueError:
+        return False
+
+
+@app.route('/healthz')
+def healthz():
+    if not _is_loopback_request():
+        return '', 404
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/readyz')
+def readyz():
+    if not _is_loopback_request():
+        return '', 404
+    try:
+        db = get_db()
+        result = db.execute('PRAGMA quick_check(1)').fetchone()
+        version_row = db.execute(
+            'SELECT MAX(version) FROM schema_migrations'
+        ).fetchone()
+        free_bytes = shutil.disk_usage(Path(app.config['DATABASE']).parent).free
+        if (
+            not result
+            or result[0] != 'ok'
+            or version_row[0] != SCHEMA_VERSION
+            or free_bytes < _READINESS_MIN_FREE_BYTES
+        ):
+            raise sqlite3.DatabaseError('database readiness check failed')
+        db.execute('BEGIN IMMEDIATE')
+        db.rollback()
+    except sqlite3.Error:
+        return jsonify({'status': 'unavailable'}), 503
+    return jsonify({'status': 'ok', 'schema_version': SCHEMA_VERSION})
 
 
 def get_initial_admin_credentials():
@@ -349,17 +456,7 @@ def init_db():
         )
     db.commit()
 
-    db.execute('BEGIN IMMEDIATE')
-    account_columns = {row[1] for row in db.execute('PRAGMA table_info(accounts)')}
-    for column, declaration in (
-        ('sub_token', 'TEXT DEFAULT ""'),
-        ('traffic_upload_bytes', 'INTEGER DEFAULT 0'),
-        ('traffic_download_bytes', 'INTEGER DEFAULT 0'),
-        ('expire_date', 'TEXT DEFAULT ""'),
-    ):
-        if column not in account_columns:
-            db.execute(f'ALTER TABLE accounts ADD COLUMN {column} {declaration}')
-    db.commit()
+    apply_schema_migrations(db)
 
     db.close()
     try:
@@ -374,6 +471,10 @@ def init_db():
 _MAX_SUBSCRIPTION_BYTES = 2 * 1024 * 1024
 _SUBSCRIPTION_TIMEOUT_SECONDS = 10
 _SUBSCRIPTION_READ_CHUNK = 64 * 1024
+MAX_SYNC_ACCOUNTS = 64
+MAX_CHECK_NODES = 320
+MAX_NODES_PER_SUBSCRIPTION = 2000
+_BULK_OPERATION_LOCK = threading.Lock()
 _SUBSCRIPTION_RESOLVER_CODE = (
     'import json, socket, sys\n'
     'try:\n'
@@ -745,240 +846,10 @@ def _parse_status_line(line):
     return info
 
 
-def _parse_clash_yaml(content):
-    """从 Clash YAML 配置中提取节点（支持 anytls / trojan / vmess / vless / hysteria2 等）"""
-    import yaml
-    nodes = []
-    try:
-        data = yaml.safe_load(content)
-        if not isinstance(data, dict):
-            return []
-        proxies = data.get('proxies') or data.get('Proxy') or []
-        if not isinstance(proxies, list):
-            return []
-        for p in proxies:
-            try:
-                if not isinstance(p, dict):
-                    continue
-                ptype = str(p.get('type', '')).lower().replace('-', '').replace('_', '')
-                host = p.get('server', '')
-                port = int(p.get('port', 443))
-                password = p.get('password', '') or p.get('uuid', '')
-                name = p.get('name', f"{host}:{port}")
-                if not host or not 1 <= port <= 65535:
-                    continue
-
-                name_fragment = quote(str(name), safe='')
-
-                def build_uri(scheme, credential, query):
-                    authority_host = f'[{host}]' if ':' in str(host) else host
-                    query_string = urlencode({
-                        key: value for key, value in query.items()
-                        if value is not None and value != ''
-                    })
-                    suffix = f'?{query_string}' if query_string else ''
-                    return (
-                        f"{scheme}://{quote(str(credential), safe='')}@"
-                        f"{authority_host}:{port}{suffix}#{name_fragment}"
-                    )
-
-                ws_opts = p.get('ws-opts') if isinstance(p.get('ws-opts'), dict) else {}
-                ws_headers = ws_opts.get('headers') if isinstance(ws_opts.get('headers'), dict) else {}
-                grpc_opts = p.get('grpc-opts') if isinstance(p.get('grpc-opts'), dict) else {}
-                reality_opts = p.get('reality-opts') if isinstance(p.get('reality-opts'), dict) else {}
-                network = p.get('network', 'tcp') or 'tcp'
-                servername = p.get('servername') or p.get('sni') or host
-                insecure = '1' if p.get('skip-cert-verify') else '0'
-                fingerprint = p.get('client-fingerprint') or p.get('fingerprint') or ''
-
-                # 构建可供通用客户端使用、并能无损恢复关键 Clash 参数的 raw_uri。
-                if ptype in ('anytls', 'anytls1'):
-                    uri = build_uri('anytls', password, {
-                        'security': 'tls',
-                        'sni': servername,
-                        'allowInsecure': insecure,
-                        'fp': fingerprint,
-                        'idleSessionCheckInterval': p.get('idle-session-check-interval'),
-                        'idleSessionTimeout': p.get('idle-session-timeout'),
-                        'minIdleSession': p.get('min-idle-session'),
-                    })
-                elif ptype == 'trojan':
-                    uri = build_uri('trojan', password, {
-                        'sni': servername,
-                        'allowInsecure': insecure,
-                        'fp': fingerprint,
-                        'type': network,
-                        'path': ws_opts.get('path', ''),
-                        'host': ws_headers.get('Host', ''),
-                        'serviceName': grpc_opts.get('grpc-service-name', ''),
-                    })
-                elif ptype == 'vmess':
-                    import base64 as b64
-                    vmess_obj = {"v": "2", "ps": name, "add": host, "port": str(port),
-                                 "id": password, "aid": str(p.get('alterId', 0)),
-                                 "scy": p.get('cipher', 'auto'),
-                                 "net": network, "type": "none",
-                                 "host": ws_headers.get('Host', ''),
-                                 "path": ws_opts.get('path', ''),
-                                 "serviceName": grpc_opts.get('grpc-service-name', ''),
-                                 "tls": "tls" if p.get('tls') else "none",
-                                 "sni": servername if p.get('tls') else "",
-                                 "fp": fingerprint,
-                                 "allowInsecure": insecure}
-                    uri = "vmess://" + b64.urlsafe_b64encode(json.dumps(vmess_obj).encode()).decode().rstrip('=')
-                elif ptype == 'vless':
-                    uri = build_uri('vless', password, {
-                        'security': 'reality' if reality_opts else ('tls' if p.get('tls') else 'none'),
-                        'sni': servername,
-                        'flow': p.get('flow', ''),
-                        'type': network,
-                        'path': ws_opts.get('path', ''),
-                        'host': ws_headers.get('Host', ''),
-                        'serviceName': grpc_opts.get('grpc-service-name', ''),
-                        'allowInsecure': insecure,
-                        'fp': fingerprint,
-                        'encryption': p.get('encryption', ''),
-                        'packetEncoding': p.get('packet-encoding', ''),
-                        'pbk': reality_opts.get('public-key', ''),
-                        'sid': reality_opts.get('short-id', ''),
-                    })
-                elif ptype in ('hysteria2', 'hy2', 'hysteria'):
-                    uri = build_uri('hysteria2', password, {
-                        'sni': servername,
-                        'allowInsecure': insecure,
-                        'obfs': p.get('obfs', ''),
-                        'obfs-password': p.get('obfs-password', ''),
-                    })
-                elif ptype == 'tuic':
-                    tuic_uuid = p.get('uuid', '')
-                    uri = build_uri('tuic', f'{tuic_uuid}:{password}', {
-                        'sni': servername,
-                        'allowInsecure': insecure,
-                    })
-                elif ptype in ('ss', 'shadowsocks'):
-                    method = p.get('cipher', 'aes-256-gcm')
-                    import base64 as b64
-                    if str(method).startswith('2022-blake3-'):
-                        userinfo = f"{quote(str(method), safe='')}:{quote(str(password), safe='')}"
-                    else:
-                        userinfo = b64.urlsafe_b64encode(
-                            f"{method}:{password}".encode()
-                        ).decode().rstrip('=')
-                    authority_host = f'[{host}]' if ':' in str(host) else host
-                    ss_query = {}
-                    if p.get('plugin'):
-                        plugin_parts = [_sip002_escape(p['plugin'])]
-                        if isinstance(p.get('plugin-opts'), dict):
-                            for key, value in p['plugin-opts'].items():
-                                if value is True:
-                                    plugin_parts.append(_sip002_escape(key))
-                                elif value not in (None, False):
-                                    plugin_parts.append(
-                                        f"{_sip002_escape(key)}={_sip002_escape(value)}"
-                                    )
-                        ss_query['plugin'] = ';'.join(plugin_parts)
-                    query_suffix = f"/?{urlencode(ss_query)}" if ss_query else ''
-                    uri = f"ss://{userinfo}@{authority_host}:{port}{query_suffix}#{name_fragment}"
-                else:
-                    # 其他类型也导入，保留原始信息
-                    uri = build_uri(ptype, password, {})
-
-                nodes.append({
-                    'name': str(name),
-                    'host': str(host),
-                    'port': port,
-                    'password': str(password),
-                    'raw_uri': uri,
-                    'protocol': 'shadowsocks' if ptype in ('ss', 'shadowsocks') else ptype,
-                    'extra': {k: v for k, v in p.items() if k not in ('name', 'type', 'server', 'port', 'password')},
-                })
-            except (TypeError, ValueError):
-                continue
-    except Exception:
-        pass
-    return nodes
-
-
 def parse_anytls_uri(uri):
     """兼容旧调用"""
     return parse_protocol_uri(uri, 'anytls')
 
-
-def parse_protocol_uri(uri, protocol='anytls'):
-    """通用协议 URI 解析，支持 anytls / trojan / vless / hysteria2 / tuic / ss"""
-    try:
-        uri = uri.strip()
-
-        # vmess 特殊处理（base64 JSON）
-        if protocol == 'vmess':
-            import base64 as b64
-            try:
-                payload = uri.split('://', 1)[1]
-                payload += '=' * (-len(payload) % 4)
-                data = json.loads(b64.urlsafe_b64decode(payload).decode())
-                return {
-                    'name': data.get('ps', data.get('add', 'unknown')),
-                    'host': data.get('add', ''),
-                    'port': int(data.get('port', 443)),
-                    'password': data.get('id', ''),
-                    'raw_uri': uri,
-                    'protocol': 'vmess',
-                    'extra': data,
-                }
-            except Exception:
-                return None
-
-        # ss:// 特殊处理
-        if protocol == 'ss':
-            try:
-                parsed = urlparse(uri)
-                userinfo, separator, _hostport = parsed.netloc.rpartition('@')
-                if separator:
-                    import base64 as b64
-                    try:
-                        padded_userinfo = userinfo + '=' * (-len(userinfo) % 4)
-                        userinfo = b64.urlsafe_b64decode(padded_userinfo).decode()
-                    except Exception:
-                        pass
-                    method, password = map(unquote, userinfo.split(':', 1))
-                    host = parsed.hostname
-                    port = parsed.port
-                    if not host or not port:
-                        return None
-                    return {
-                        'name': unquote(parsed.fragment) if parsed.fragment else f"{host}:{port}",
-                        'host': host,
-                        'port': port,
-                        'password': password,
-                        'raw_uri': uri,
-                        'protocol': 'shadowsocks',
-                        'extra': {'cipher': method},
-                    }
-            except Exception:
-                return None
-
-        # 通用格式：scheme://password@host:port?params#name
-        parsed = urlparse(uri)
-        encoded_password, separator, _hostport = parsed.netloc.rpartition('@')
-        if not separator or not parsed.hostname or parsed.port is None:
-            return None
-        password = unquote(encoded_password)
-        host = parsed.hostname
-        port = parsed.port
-        params = parse_qs(parsed.query)
-        name = unquote(parsed.fragment) if parsed.fragment else f"{host}:{port}"
-
-        return {
-            'name': name,
-            'host': host,
-            'port': port,
-            'password': password,
-            'raw_uri': uri,
-            'protocol': protocol,
-            'extra': params,
-        }
-    except Exception:
-        return None
 
 # ─── 工具函数 ──────────────────────────────────────────────
 
@@ -1055,6 +926,18 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
+
+def single_bulk_operation(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not _BULK_OPERATION_LOCK.acquire(blocking=False):
+            return jsonify({"error": "已有批量任务正在执行，请稍后重试"}), 409
+        try:
+            return f(*args, **kwargs)
+        finally:
+            _BULK_OPERATION_LOCK.release()
+    return decorated
+
 @app.context_processor
 def inject_utils():
     return {
@@ -1067,7 +950,14 @@ def inject_utils():
 # ─── 认证 ──────────────────────────────────────────────
 
 @app.route('/login', methods=['GET', 'POST'])
-@limiter.limit("5 per minute", methods=["POST"], error_message="登录尝试过于频繁，请1分钟后再试")
+@rate_limit(
+    get_db,
+    "login",
+    5,
+    60,
+    methods=["POST"],
+    error_message="登录尝试过于频繁，请1分钟后再试",
+)
 def login():
     if request.method == 'POST':
         username = request.form.get('username', '')
@@ -1088,7 +978,9 @@ def login():
                 db.commit()
             session['logged_in'] = True
             session['username'] = username
+            audit_event('auth.login', 'success', username=username)
             return redirect(url_for('dashboard'))
+        audit_event('auth.login', 'failure', username=username)
         flash('用户名或密码错误', 'error')
     return render_template('login.html')
 
@@ -1157,6 +1049,9 @@ def account_add():
     if not nodes:
         flash('未解析到节点', 'error')
         return redirect(url_for('accounts_list'))
+    if len(nodes) > MAX_NODES_PER_SUBSCRIPTION:
+        flash(f'订阅节点超过安全上限 {MAX_NODES_PER_SUBSCRIPTION}', 'error')
+        return redirect(url_for('accounts_list'))
 
     if not name:
         # 自动用第一个节点名作为账号名
@@ -1213,6 +1108,7 @@ def account_add():
         )
     db.commit()
 
+    audit_event('account.create', 'success', account_id=account_id, node_count=len(nodes))
     flash(f'账号 "{name}" 添加成功，已导入 {len(nodes)} 个节点', 'success')
     return redirect(url_for('account_detail', account_id=account_id))
 
@@ -1245,6 +1141,7 @@ def account_rename(account_id):
         (new_name, account_id)
     )
     db.commit()
+    audit_event('account.rename', 'success', account_id=account_id)
     flash(f'已重命名为 "{new_name}"', 'success')
     return redirect(url_for('account_detail', account_id=account_id))
 
@@ -1269,6 +1166,7 @@ def account_edit(account_id):
         (subscribe_url, traffic_limit, notes, status, account_id)
     )
     db.commit()
+    audit_event('account.update', 'success', account_id=account_id, status=status)
     flash('账号信息已更新', 'success')
     return redirect(url_for('account_detail', account_id=account_id))
 
@@ -1283,6 +1181,7 @@ def account_delete(account_id):
         db.execute('DELETE FROM nodes WHERE account_id=?', (account_id,))
         db.execute('DELETE FROM accounts WHERE id=?', (account_id,))
         db.commit()
+        audit_event('account.delete', 'success', account_id=account_id)
         flash(f'账号 "{account["name"]}" 已删除', 'success')
     return redirect(url_for('accounts_list'))
 
@@ -1300,7 +1199,12 @@ def account_sync(account_id):
         nodes, traffic_info = parse_subscribe_url(account['subscribe_url'])
         if not nodes:
             raise ValueError('订阅中未找到可用节点')
+        if len(nodes) > MAX_NODES_PER_SUBSCRIPTION:
+            raise ValueError(
+                f'订阅节点超过安全上限 {MAX_NODES_PER_SUBSCRIPTION}'
+            )
     except ValueError as e:
+        audit_event('account.sync', 'failure', account_id=account_id, reason='invalid_subscription')
         flash(f'同步失败: {e}', 'error')
         return redirect(url_for('account_detail', account_id=account_id))
 
@@ -1344,6 +1248,7 @@ def account_sync(account_id):
         (len(nodes), *_traffic_update_values(traffic_info), account_id),
     )
     db.commit()
+    audit_event('account.sync', 'success', account_id=account_id, node_count=len(nodes))
     flash(f'同步完成，更新了 {len(nodes)} 个节点', 'success')
     return redirect(url_for('account_detail', account_id=account_id))
 
@@ -1393,6 +1298,12 @@ def node_delete(node_id):
             (node['account_id'],)
         )
         db.commit()
+        audit_event(
+            'node.delete',
+            'success',
+            node_id=node_id,
+            account_id=node['account_id'],
+        )
         flash('节点已删除', 'success')
         return redirect(url_for('account_detail', account_id=node['account_id']))
     flash('节点不存在', 'error')
@@ -1435,7 +1346,7 @@ def _resolve_traffic_account_id(db, item):
 
 @app.route('/api/traffic/report', methods=['POST'])
 @csrf.exempt
-@limiter.limit("60 per minute")
+@rate_limit(get_db, "traffic-report", 60, 60)
 @require_traffic_api_token
 def api_report_traffic():
     """上报流量: {"account_id": 1, "bytes_used": 123} 或 {"password": "xxx", ...}"""
@@ -1487,7 +1398,7 @@ def api_report_traffic():
 
 @app.route('/api/traffic/counter', methods=['POST'])
 @csrf.exempt
-@limiter.limit("60 per minute")
+@rate_limit(get_db, "traffic-counter", 60, 60)
 @require_traffic_api_token
 def api_report_traffic_counter():
     """Idempotently ingest one collector's cumulative raw byte counter."""
@@ -1561,7 +1472,7 @@ def api_report_traffic_counter():
 
 @app.route('/api/traffic/set', methods=['POST'])
 @csrf.exempt
-@limiter.limit("60 per minute")
+@rate_limit(get_db, "traffic-set", 60, 60)
 @require_traffic_api_token
 def api_set_traffic():
     """设置流量绝对值: {"account_id": 1, "total_bytes": 999}"""
@@ -1631,6 +1542,11 @@ def api_check_by_host():
         (1 if result['online'] else 0, result.get('latency', -1), host, port)
     )
     db.commit()
+    audit_event(
+        'node.check_by_host',
+        'success',
+        status='online' if result['online'] else 'offline',
+    )
     return jsonify(result)
 
 @app.route('/api/nodes/<int:node_id>/check', methods=['POST'])
@@ -1650,17 +1566,31 @@ def api_check_node(node_id):
             (1 if result['online'] else 0, result.get('latency', -1), node_id)
         )
         db.commit()
+        audit_event(
+            'node.check',
+            'success',
+            node_id=node_id,
+            account_id=node['account_id'],
+            status='online' if result['online'] else 'offline',
+        )
         return jsonify(result)
     except Exception as e:
+        audit_event('node.check', 'failure', node_id=node_id, reason='probe_error')
         return jsonify({"status": "error", "msg": str(e)})
 
 @app.route('/api/accounts/<int:account_id>/check-all', methods=['POST'])
 @login_required
+@single_bulk_operation
 def api_check_all_nodes(account_id):
     db = get_db()
     nodes = [dict(node) for node in db.execute(
-        'SELECT * FROM nodes WHERE account_id=?', (account_id,)
+        'SELECT * FROM nodes WHERE account_id=? ORDER BY id LIMIT ?',
+        (account_id, MAX_CHECK_NODES + 1),
     ).fetchall()]
+    if len(nodes) > MAX_CHECK_NODES:
+        return jsonify({
+            "error": f"节点批量检测上限为 {MAX_CHECK_NODES}，请拆分账号后重试"
+        }), 413
 
     def check(node):
         try:
@@ -1687,6 +1617,12 @@ def api_check_all_nodes(account_id):
         else:
             results.append({"node_id": node['id'], "name": node['name'], "online": False, "msg": error, "latency": -1})
     db.commit()
+    audit_event(
+        'node.check_all',
+        'success',
+        account_id=account_id,
+        node_count=len(nodes),
+    )
     return jsonify({"results": results})
 
 
@@ -1732,16 +1668,26 @@ def _check_node_connect(host, port, timeout=8):
 
 @app.route('/api/sync-all', methods=['POST'])
 @login_required
+@single_bulk_operation
 def api_sync_all():
     """一键同步所有账号的订阅"""
     db = get_db()
     accounts = [dict(account) for account in db.execute(
-        "SELECT * FROM accounts WHERE status='active' ORDER BY id"
+        "SELECT * FROM accounts WHERE status='active' ORDER BY id LIMIT ?",
+        (MAX_SYNC_ACCOUNTS + 1,),
     ).fetchall()]
+    if len(accounts) > MAX_SYNC_ACCOUNTS:
+        return jsonify({
+            "error": f"单次同步账号上限为 {MAX_SYNC_ACCOUNTS}，请分批同步"
+        }), 413
 
     def fetch(account):
         try:
             nodes, traffic_info = parse_subscribe_url(account['subscribe_url'])
+            if len(nodes) > MAX_NODES_PER_SUBSCRIPTION:
+                raise ValueError(
+                    f'订阅节点超过安全上限 {MAX_NODES_PER_SUBSCRIPTION}'
+                )
             return account, nodes, traffic_info, None
         except Exception as e:
             return account, None, None, str(e)
@@ -1804,6 +1750,11 @@ def api_sync_all():
         else:
             results.append({"id": account['id'], "name": account['name'], "status": "error", "msg": error})
     db.commit()
+    audit_event(
+        'account.sync_all',
+        'success',
+        node_count=sum(item.get('nodes', 0) for item in results),
+    )
     return jsonify({"results": results})
 
 @app.route('/api/subscribe')
@@ -1840,12 +1791,19 @@ def change_password():
         (session.get('username', 'admin'),)
     ).fetchone()
     if not user or not verify_password(user['password_hash'], old_pw)[0]:
+        audit_event(
+            'auth.password_change',
+            'failure',
+            username=session.get('username', 'admin'),
+            reason='invalid_current_password',
+        )
         flash('原密码错误', 'error')
         return redirect(url_for('dashboard'))
 
     new_hash = hash_password(new_pw)
     db.execute('UPDATE admin_users SET password_hash=? WHERE id=?', (new_hash, user['id']))
     db.commit()
+    audit_event('auth.password_change', 'success', username=user['username'])
     flash('密码修改成功', 'success')
     return redirect(url_for('dashboard'))
 
@@ -1899,235 +1857,9 @@ def _nodes_from_db_rows(db_nodes):
     ]
 
 
-def _query_value(params, *names, default=''):
-    for name in names:
-        values = params.get(name)
-        if values:
-            return values[0]
-    return default
-
-
-def _sip002_escape(value):
-    escaped = str(value).replace('\\', '\\\\')
-    for char in (':', ';', '='):
-        escaped = escaped.replace(char, f'\\{char}')
-    return escaped
-
-
-def _sip002_split(value, separator, maxsplit=-1):
-    parts = []
-    current = []
-    escaped = False
-    splits = 0
-    for char in value:
-        if escaped:
-            current.extend(('\\', char))
-            escaped = False
-        elif char == '\\':
-            escaped = True
-        elif char == separator and (maxsplit < 0 or splits < maxsplit):
-            parts.append(''.join(current))
-            current = []
-            splits += 1
-        else:
-            current.append(char)
-    if escaped:
-        current.append('\\')
-    parts.append(''.join(current))
-    return parts
-
-
-def _sip002_unescape(value):
-    result = []
-    escaped = False
-    for char in value:
-        if escaped:
-            result.append(char)
-            escaped = False
-        elif char == '\\':
-            escaped = True
-        else:
-            result.append(char)
-    if escaped:
-        result.append('\\')
-    return ''.join(result)
-
-
-def _is_true(value):
-    return str(value).lower() in ('1', 'true', 'yes')
-
-
-def _safe_int(value, default=0):
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _clash_proxy_from_uri(uri):
-    scheme = uri.split('://', 1)[0].lower()
-    protocol = 'ss' if scheme == 'ss' else scheme
-    node = parse_protocol_uri(uri, protocol)
-    if not node:
-        return None
-
-    proxy = {'name': node['name'], 'server': node['host'], 'port': node['port']}
-    params = parse_qs(urlparse(uri).query)
-    p = node['protocol']
-    if p in ('anytls', 'anytls1'):
-        allow_insecure = _query_value(
-            params,
-            'allowInsecure',
-            'allow-insecure',
-            'insecure',
-            default='0',
-        )
-        proxy.update({
-            'type': 'anytls',
-            'password': node['password'],
-            'udp': True,
-            'sni': _query_value(params, 'sni', default=node['host']) or node['host'],
-            'skip-cert-verify': _is_true(allow_insecure),
-        })
-        fingerprint = _query_value(params, 'fp')
-        if fingerprint:
-            proxy['client-fingerprint'] = fingerprint
-        for query_key, clash_key in (
-            ('idleSessionCheckInterval', 'idle-session-check-interval'),
-            ('idleSessionTimeout', 'idle-session-timeout'),
-            ('minIdleSession', 'min-idle-session'),
-        ):
-            value = _query_value(params, query_key)
-            if value:
-                proxy[clash_key] = _safe_int(value, value)
-    elif p == 'vmess':
-        extra = node.get('extra', {})
-        proxy.update({
-            'type': 'vmess',
-            'uuid': node['password'],
-            'alterId': _safe_int(extra.get('aid', 0) or 0),
-            'cipher': extra.get('scy', 'auto') or 'auto',
-        })
-        network = extra.get('net', 'tcp') or 'tcp'
-        if network != 'tcp':
-            proxy['network'] = network
-        if str(extra.get('tls', '')).lower() in ('tls', '1', 'true'):
-            proxy['tls'] = True
-        if extra.get('sni'):
-            proxy['servername'] = extra['sni']
-        if _is_true(extra.get('allowInsecure', '0')):
-            proxy['skip-cert-verify'] = True
-        if extra.get('fp'):
-            proxy['client-fingerprint'] = extra['fp']
-        if network == 'ws':
-            ws_opts = {'path': extra.get('path', '') or '/'}
-            if extra.get('host'):
-                ws_opts['headers'] = {'Host': extra['host']}
-            proxy['ws-opts'] = ws_opts
-        elif network == 'grpc' and extra.get('serviceName'):
-            proxy['grpc-opts'] = {'grpc-service-name': extra['serviceName']}
-    elif p == 'shadowsocks':
-        proxy.update({
-            'type': 'ss',
-            'cipher': node.get('extra', {}).get('cipher', 'aes-256-gcm'),
-            'password': node['password'],
-        })
-        plugin_argument = _query_value(params, 'plugin')
-        if plugin_argument:
-            plugin_parts = _sip002_split(plugin_argument, ';')
-            proxy['plugin'] = _sip002_unescape(plugin_parts[0])
-            plugin_opts = {}
-            for option in plugin_parts[1:]:
-                key_value = _sip002_split(option, '=', maxsplit=1)
-                if len(key_value) == 2:
-                    key, value = map(_sip002_unescape, key_value)
-                    plugin_opts[key] = value
-                elif option:
-                    plugin_opts[_sip002_unescape(option)] = True
-            if plugin_opts:
-                proxy['plugin-opts'] = plugin_opts
-        encoded_plugin_opts = _query_value(params, 'pluginOpts')
-        if encoded_plugin_opts and 'plugin-opts' not in proxy:
-            try:
-                encoded_plugin_opts += '=' * (-len(encoded_plugin_opts) % 4)
-                proxy['plugin-opts'] = json.loads(
-                    base64.urlsafe_b64decode(encoded_plugin_opts).decode()
-                )
-            except (ValueError, TypeError, UnicodeDecodeError):
-                pass
-    else:
-        proxy['type'] = 'hysteria2' if p in ('hysteria2', 'hy2') else p
-        if p == 'tuic' and ':' in node['password']:
-            tuic_uuid, tuic_password = node['password'].split(':', 1)
-            proxy['uuid'] = tuic_uuid
-            proxy['password'] = tuic_password
-        else:
-            credential_field = 'uuid' if p == 'vless' else 'password'
-            proxy[credential_field] = node['password']
-        sni = _query_value(params, 'sni', 'peer', default=node['host']) or node['host']
-        if p == 'vless':
-            proxy['servername'] = sni
-        elif p in ('trojan', 'hysteria2', 'hy2', 'tuic'):
-            proxy['sni'] = sni
-        allow_insecure = _query_value(
-            params,
-            'allowInsecure',
-            'allow-insecure',
-            'insecure',
-            default='0',
-        )
-        if p in ('trojan', 'vless', 'hysteria2', 'hy2', 'tuic'):
-            proxy['skip-cert-verify'] = _is_true(allow_insecure)
-        if p == 'vless' and _query_value(params, 'security') in ('tls', 'reality'):
-            proxy['tls'] = True
-        if p == 'vless' and _query_value(params, 'security') == 'reality':
-            public_key = _query_value(params, 'pbk')
-            short_id = _query_value(params, 'sid')
-            if public_key or short_id:
-                proxy['reality-opts'] = {}
-                if public_key:
-                    proxy['reality-opts']['public-key'] = public_key
-                if short_id:
-                    proxy['reality-opts']['short-id'] = short_id
-        flow = _query_value(params, 'flow')
-        if p == 'vless' and flow:
-            proxy['flow'] = flow
-        network = _query_value(params, 'type', 'network')
-        if network:
-            proxy['network'] = network
-        fingerprint = _query_value(params, 'fp')
-        if p in ('trojan', 'vless') and fingerprint:
-            proxy['client-fingerprint'] = fingerprint
-        if p in ('trojan', 'vless') and network == 'ws':
-            ws_opts = {'path': _query_value(params, 'path', default='/') or '/'}
-            ws_host = _query_value(params, 'host')
-            if ws_host:
-                ws_opts['headers'] = {'Host': ws_host}
-            proxy['ws-opts'] = ws_opts
-        elif p in ('trojan', 'vless') and network == 'grpc':
-            service_name = _query_value(params, 'serviceName')
-            if service_name:
-                proxy['grpc-opts'] = {'grpc-service-name': service_name}
-        if p == 'vless':
-            packet_encoding = _query_value(params, 'packetEncoding', 'packet-encoding')
-            if packet_encoding:
-                proxy['packet-encoding'] = packet_encoding
-            encryption = _query_value(params, 'encryption')
-            if encryption:
-                proxy['encryption'] = encryption
-        if p in ('hysteria2', 'hy2'):
-            obfs = _query_value(params, 'obfs')
-            obfs_password = _query_value(params, 'obfs-password')
-            if obfs:
-                proxy['obfs'] = obfs
-            if obfs_password:
-                proxy['obfs-password'] = obfs_password
-    return proxy
-
-
 @app.route('/sub/<token>')
 @csrf.exempt
-@limiter.limit("120 per minute")
+@rate_limit(get_db, "public-subscribe", 120, 60)
 def public_subscribe(token):
     """公开订阅端点：只读取最后一次成功同步到本地的节点。"""
     if not token:
@@ -2215,6 +1947,7 @@ def api_generate_token(account_id):
     token = secrets.token_hex(16)
     db.execute('UPDATE accounts SET sub_token=? WHERE id=?', (token, account_id))
     db.commit()
+    audit_event('account.subscription_token.rotate', 'success', account_id=account_id)
     return jsonify({"token": token, "url": url_for('public_subscribe', token=token, _external=True)})
 
 
@@ -2235,8 +1968,12 @@ def rename_rule_add():
         flash('原名称不能为空', 'error')
         return redirect(url_for('rename_rules_page'))
     db = get_db()
-    db.execute('INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)', (old_text, new_text))
+    rule_id = db.execute(
+        'INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)',
+        (old_text, new_text),
+    ).lastrowid
     db.commit()
+    audit_event('rename_rule.create', 'success', rule_id=rule_id)
     flash(f'规则已添加：{old_text} → {new_text}', 'success')
     return redirect(url_for('rename_rules_page'))
 
@@ -2247,6 +1984,7 @@ def rename_rule_toggle(rule_id):
     db = get_db()
     db.execute('UPDATE rename_rules SET enabled = 1 - enabled WHERE id=?', (rule_id,))
     db.commit()
+    audit_event('rename_rule.toggle', 'success', rule_id=rule_id)
     return redirect(url_for('rename_rules_page'))
 
 
@@ -2256,6 +1994,7 @@ def rename_rule_delete(rule_id):
     db = get_db()
     db.execute('DELETE FROM rename_rules WHERE id=?', (rule_id,))
     db.commit()
+    audit_event('rename_rule.delete', 'success', rule_id=rule_id)
     flash('规则已删除', 'success')
     return redirect(url_for('rename_rules_page'))
 

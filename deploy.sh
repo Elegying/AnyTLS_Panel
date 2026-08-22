@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # AnyTLS Panel one-command deployment.
-# Usage: bash deploy.sh [port]
+# Usage: bash deploy.sh [port] | bash deploy.sh --rollback [latest|backup-id]
 set -Eeuo pipefail
 
 PANEL_DIR="${ANYTLS_PANEL_DIR:-/opt/anytls-panel}"
-PORT="${1:-${ANYTLS_PANEL_PORT:-8866}}"
+PORT="${ANYTLS_PANEL_PORT:-8866}"
+if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+    PORT="$1"
+fi
 SERVICE_NAME="${ANYTLS_SERVICE_NAME:-anytls-panel}"
 SERVICE_USER="${ANYTLS_SERVICE_USER:-anytls-panel}"
 BIND_HOST="${ANYTLS_BIND_HOST:-127.0.0.1}"
@@ -17,7 +20,7 @@ REPO_REF="${ANYTLS_REPO_REF:-v1.1.0}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
-RPM_UPDATED=0
+OS_RELEASE_FILE="/etc/os-release"
 DATA_DIR=""
 SECRET_KEY_FILE=""
 TRAFFIC_API_TOKEN_FILE=""
@@ -26,6 +29,10 @@ SYSTEMD_UNIT_DIR="/etc/systemd/system"
 CADDY_CONFIG_DIR="/etc/caddy"
 CADDY_SITES_DIR="$CADDY_CONFIG_DIR/anytls-panel.d"
 CADDYFILE="$CADDY_CONFIG_DIR/Caddyfile"
+CADDY_MIN_VERSION="2.11.4"
+CADDY_KEY_FINGERPRINT="65760C51EDEA2017CEA2CA15155B6D79CA56EA34"
+BACKUP_ROOT="/var/backups/${SERVICE_NAME}"
+MAX_PERSISTENT_BACKUPS=2
 CADDY_INSTALLED_NOW=0
 CADDY_INSTALL_ATTEMPTED=0
 CADDY_STATE_CAPTURED=0
@@ -356,43 +363,30 @@ validate_configuration() {
     CADDY_RESTART_DROPIN="${SYSTEMD_UNIT_DIR}/caddy.service.d/${SERVICE_NAME}-restart.conf"
 }
 
+validate_supported_os() {
+    [[ -r "$OS_RELEASE_FILE" ]] || fail "Ubuntu 24.04 is required"
+    local os_id version_id
+    os_id="$(sed -n 's/^ID=//p' "$OS_RELEASE_FILE" | head -n 1 | tr -d '\"')"
+    version_id="$(sed -n 's/^VERSION_ID=//p' "$OS_RELEASE_FILE" | head -n 1 | tr -d '\"')"
+    if [[ "$os_id" != "ubuntu" || "$version_id" != "24.04" ]]; then
+        fail "Ubuntu 24.04 is the only currently verified deployment target"
+    fi
+}
+
 install_packages() {
-    if command -v apt-get >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
-        if [[ "$APT_UPDATED" -eq 0 ]]; then
-            apt-get update -qq
-            APT_UPDATED=1
-        fi
-        apt-get install -y -qq --no-install-recommends "$@"
-        return
+    command -v apt-get >/dev/null 2>&1 || fail "Ubuntu 24.04 apt-get is required"
+    export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+    if [[ "$APT_UPDATED" -eq 0 ]]; then
+        apt-get update -qq
+        APT_UPDATED=1
     fi
-
-    local rpm_cmd=""
-    if command -v dnf >/dev/null 2>&1; then
-        rpm_cmd="dnf"
-    elif command -v yum >/dev/null 2>&1; then
-        rpm_cmd="yum"
-    fi
-    if [[ -n "$rpm_cmd" ]]; then
-        if [[ "$RPM_UPDATED" -eq 0 ]]; then
-            "$rpm_cmd" makecache -q >/dev/null 2>&1 || true
-            RPM_UPDATED=1
-        fi
-        "$rpm_cmd" install -y -q "$@"
-        return
-    fi
-
-    fail "no supported package manager found; please use Ubuntu/Debian or CentOS/RHEL"
+    apt-get install -y -qq --no-install-recommends "$@"
 }
 
 ensure_service_user() {
     if ! id "$SERVICE_USER" >/dev/null 2>&1; then
         if ! command -v useradd >/dev/null 2>&1; then
-            if command -v apt-get >/dev/null 2>&1; then
-                install_packages passwd
-            else
-                install_packages shadow-utils
-            fi
+            install_packages passwd
         fi
         local nologin_shell
         nologin_shell="$(command -v nologin || printf '/usr/sbin/nologin')"
@@ -407,18 +401,15 @@ ensure_service_user() {
 }
 
 python_venv_packages() {
-    if command -v apt-get >/dev/null 2>&1; then
-        echo "python3-venv python3-pip"
-    else
-        echo "python3-pip python3-virtualenv"
-    fi
+    echo "python3-venv python3-pip"
 }
 
 ensure_runtime() {
     local missing=()
     local cmd_pkg cmd pkg
     for cmd_pkg in \
-        "python3:python3" "git:git" "curl:curl" \
+        "python3:python3" "git:git" "curl:curl" "openssl:openssl" \
+        "sha256sum:coreutils" \
         "systemctl:systemd" "runuser:util-linux" "flock:util-linux"; do
         cmd="${cmd_pkg%%:*}"
         pkg="${cmd_pkg##*:}"
@@ -430,8 +421,8 @@ ensure_runtime() {
         install_packages "${missing[@]}"
     fi
 
-    if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
-        fail "Python 3.10 or newer is required"
+    if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)'; then
+        fail "Python 3.12 or newer is required"
     fi
 
     local probe_dir
@@ -512,21 +503,67 @@ capture_caddy_state() {
     CADDY_STATE_CAPTURED=1
 }
 
+installed_caddy_version() {
+    caddy version 2>/dev/null | sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p'
+}
+
+assert_supported_caddy_version() {
+    local installed_version
+    installed_version="$(installed_caddy_version)"
+    if [[ -z "$installed_version" ]] || \
+       ! dpkg --compare-versions "$installed_version" ge "$CADDY_MIN_VERSION"; then
+        fail "installed Caddy is older than the verified minimum ${CADDY_MIN_VERSION}; upgrade it from the official Caddy repository before deploying"
+    fi
+}
+
+install_caddy_from_official_repository() {
+    install_packages debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+
+    local key_file source_file fingerprint
+    key_file="$(mktemp /tmp/caddy-signing-key.XXXXXX)"
+    source_file="$(mktemp /tmp/caddy-stable-source.XXXXXX)"
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+        --output "$key_file"
+    fingerprint="$(gpg --show-keys --with-colons "$key_file" 2>/dev/null | \
+        awk -F: '$1 == "fpr" {print $10; exit}')"
+    [[ "$fingerprint" == "$CADDY_KEY_FINGERPRINT" ]] || \
+        fail "Caddy repository signing-key fingerprint did not match"
+
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+        --output "$source_file"
+    grep -Fqx \
+        'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main' \
+        "$source_file" || fail "Caddy repository definition was unexpected"
+
+    gpg --batch --yes --dearmor \
+        --output /usr/share/keyrings/caddy-stable-archive-keyring.gpg "$key_file"
+    install -o root -g root -m 644 "$source_file" \
+        /etc/apt/sources.list.d/caddy-stable.list
+    rm -f -- "$key_file" "$source_file"
+    apt-get update -qq
+    APT_UPDATED=1
+    install_packages caddy
+}
+
 ensure_caddy() {
     if command -v caddy >/dev/null 2>&1; then
         systemctl cat caddy.service >/dev/null 2>&1 || \
             fail "the caddy command exists but caddy.service is not installed"
+        assert_supported_caddy_version
         return
     fi
 
-    log "installing Caddy for automatic Let's Encrypt HTTPS"
+    log "installing Caddy for automatic public ACME HTTPS"
     CADDY_INSTALL_ATTEMPTED=1
-    if ! install_packages caddy; then
+    if ! install_caddy_from_official_repository; then
         fail "Caddy is unavailable from the configured package repositories"
     fi
     CADDY_INSTALLED_NOW=1
     command -v caddy >/dev/null 2>&1 || fail "Caddy installation did not provide the caddy command"
     systemctl cat caddy.service >/dev/null 2>&1 || fail "Caddy installation did not provide caddy.service"
+    assert_supported_caddy_version
 }
 
 stop_service_for_update() {
@@ -640,6 +677,166 @@ begin_cutover() {
     backup_database_for_rollback
     prepare_state_directory
     backup_current_release
+}
+
+write_rollback_metadata() {
+    local backup_dir="$1"
+    local metadata="$backup_dir/rollback.meta"
+    umask 077
+    {
+        printf 'format=anytls-panel-rollback-v1\n'
+        printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'repo_ref=%s\n' "$REPO_REF"
+        printf 'OLD_PANEL_UNIT_PRESENT=%s\n' "$OLD_PANEL_UNIT_PRESENT"
+        printf 'OLD_PANEL_ACTIVE=%s\n' "$OLD_PANEL_ACTIVE"
+        printf 'OLD_PANEL_ENABLED=%s\n' "$OLD_PANEL_ENABLED"
+        printf 'OLD_PANEL_ENABLEMENT_MANAGED=%s\n' "$OLD_PANEL_ENABLEMENT_MANAGED"
+        printf 'OLD_CADDY_UNIT_PRESENT=%s\n' "$OLD_CADDY_UNIT_PRESENT"
+        printf 'OLD_CADDY_ACTIVE=%s\n' "$OLD_CADDY_ACTIVE"
+        printf 'OLD_CADDY_ENABLED=%s\n' "$OLD_CADDY_ENABLED"
+        printf 'OLD_CADDY_ENABLEMENT_MANAGED=%s\n' "$OLD_CADDY_ENABLEMENT_MANAGED"
+        printf 'OLD_HEALTH_TIMER_UNIT_PRESENT=%s\n' "$OLD_HEALTH_TIMER_UNIT_PRESENT"
+        printf 'OLD_HEALTH_TIMER_ACTIVE=%s\n' "$OLD_HEALTH_TIMER_ACTIVE"
+        printf 'OLD_HEALTH_TIMER_ENABLED=%s\n' "$OLD_HEALTH_TIMER_ENABLED"
+        printf 'OLD_HEALTH_TIMER_ENABLEMENT_MANAGED=%s\n' \
+            "$OLD_HEALTH_TIMER_ENABLEMENT_MANAGED"
+        printf 'OLD_INSTALL_PRESENT=%s\n' "$OLD_INSTALL_PRESENT"
+        printf 'CODE_BACKED_UP=%s\n' "$CODE_BACKED_UP"
+        printf 'DATABASE_BACKED_UP=%s\n' "$DATABASE_BACKED_UP"
+        printf 'DATABASE_STATE_CAPTURED=%s\n' "$DATABASE_STATE_CAPTURED"
+        printf 'CONFIG_BACKED_UP=%s\n' "$CONFIG_BACKED_UP"
+    } > "$metadata"
+
+    (
+        cd "$backup_dir"
+        : > SHA256SUMS
+        while IFS= read -r -d '' backup_file; do
+            sha256sum "$backup_file" >> SHA256SUMS
+        done < <(find . -type f ! -name SHA256SUMS -print0 | sort -z)
+    )
+    chmod 600 "$metadata" "$backup_dir/SHA256SUMS"
+}
+
+rotate_persistent_backups() {
+    local backups=()
+    local remove_count index
+    mapfile -t backups < <(
+        find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d \
+            -name 'backup-*' -printf '%f\n' | sort
+    )
+    remove_count=$((${#backups[@]} - MAX_PERSISTENT_BACKUPS))
+    if (( remove_count <= 0 )); then
+        return
+    fi
+    for ((index = 0; index < remove_count; index++)); do
+        rm -rf -- "${BACKUP_ROOT:?}/${backups[$index]}"
+    done
+}
+
+persist_rollback_backup() {
+    if [[ "$OLD_INSTALL_PRESENT" -ne 1 || ! -d "$ROLLBACK_DIR/code" ]]; then
+        return
+    fi
+    install -d -o root -g root -m 700 "$BACKUP_ROOT"
+    local backup_id target suffix=0
+    backup_id="backup-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    target="$BACKUP_ROOT/$backup_id"
+    while [[ -e "$target" ]]; do
+        suffix=$((suffix + 1))
+        backup_id="backup-$(date -u +%Y%m%dT%H%M%SZ)-$$-$suffix"
+        target="$BACKUP_ROOT/$backup_id"
+    done
+    install -d -o root -g root -m 700 "$target"
+    cp -a -- "$ROLLBACK_DIR/." "$target/"
+    write_rollback_metadata "$target"
+    printf '%s\n' "$backup_id" > "$BACKUP_ROOT/latest"
+    chmod 600 "$BACKUP_ROOT/latest"
+    rotate_persistent_backups
+    log "last-known-good backup saved: $backup_id"
+}
+
+resolve_persistent_backup() {
+    local requested="$1"
+    if [[ "$requested" == "latest" ]]; then
+        [[ -f "$BACKUP_ROOT/latest" && ! -L "$BACKUP_ROOT/latest" ]] || \
+            fail "no last-known-good backup is available"
+        read -r requested < "$BACKUP_ROOT/latest"
+    fi
+    [[ "$requested" =~ ^backup-[0-9]{8}T[0-9]{6}Z-[0-9]+(-[0-9]+)?$ ]] || \
+        fail "invalid rollback backup id"
+    local selected="$BACKUP_ROOT/$requested"
+    [[ -d "$selected" && ! -L "$selected" ]] || \
+        fail "rollback backup does not exist: $requested"
+    printf '%s\n' "$selected"
+}
+
+verify_rollback_backup() {
+    local backup_dir="$1"
+    [[ -f "$backup_dir/rollback.meta" && ! -L "$backup_dir/rollback.meta" ]] || \
+        fail "rollback metadata is missing or unsafe"
+    [[ -f "$backup_dir/SHA256SUMS" && ! -L "$backup_dir/SHA256SUMS" ]] || \
+        fail "rollback checksums are missing or unsafe"
+    grep -Fqx 'format=anytls-panel-rollback-v1' "$backup_dir/rollback.meta" || \
+        fail "unsupported rollback backup format"
+    (cd "$backup_dir" && sha256sum --check --quiet SHA256SUMS) || \
+        fail "rollback backup checksum verification failed"
+}
+
+load_rollback_metadata() {
+    local metadata="$ROLLBACK_DIR/rollback.meta"
+    local variable value
+    for variable in \
+        OLD_PANEL_UNIT_PRESENT OLD_PANEL_ACTIVE OLD_PANEL_ENABLED \
+        OLD_PANEL_ENABLEMENT_MANAGED OLD_CADDY_UNIT_PRESENT OLD_CADDY_ACTIVE \
+        OLD_CADDY_ENABLED OLD_CADDY_ENABLEMENT_MANAGED \
+        OLD_HEALTH_TIMER_UNIT_PRESENT OLD_HEALTH_TIMER_ACTIVE \
+        OLD_HEALTH_TIMER_ENABLED OLD_HEALTH_TIMER_ENABLEMENT_MANAGED \
+        OLD_INSTALL_PRESENT CODE_BACKED_UP DATABASE_BACKED_UP \
+        DATABASE_STATE_CAPTURED CONFIG_BACKED_UP; do
+        value="$(sed -n "s/^${variable}=//p" "$metadata")"
+        [[ "$value" =~ ^[01]$ ]] || fail "invalid rollback metadata: $variable"
+        printf -v "$variable" '%s' "$value"
+    done
+}
+
+list_persistent_backups() {
+    if [[ ! -d "$BACKUP_ROOT" ]]; then
+        log "no persistent backups"
+        return
+    fi
+    find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d \
+        -name 'backup-*' -printf '%f\n' | sort -r
+}
+
+delayed_rollback() {
+    local requested="${1:-latest}"
+    validate_configuration
+    validate_supported_os
+    validate_install_target
+    validate_service_target
+    ensure_runtime
+    ensure_service_user
+
+    local selected selected_copy current_snapshot
+    selected="$(resolve_persistent_backup "$requested")"
+    selected_copy="$(mktemp -d "${PANEL_DIR%/*}/.${SERVICE_NAME}-delayed-rollback.XXXXXX")"
+    chmod 700 "$selected_copy"
+    cp -a -- "$selected/." "$selected_copy/"
+    verify_rollback_backup "$selected_copy"
+
+    begin_cutover
+    current_snapshot="$ROLLBACK_DIR"
+    persist_rollback_backup
+    ROLLBACK_DIR="$selected_copy"
+    load_rollback_metadata
+    CUTOVER_STARTED=1
+    ROLLBACK_FINISHED=0
+    if ! rollback_deployment; then
+        fail "delayed rollback failed; the pre-rollback snapshot remains in $BACKUP_ROOT"
+    fi
+    rm -rf -- "$current_snapshot"
+    DEPLOY_SUCCEEDED=1
+    log "delayed rollback completed from ${selected##*/}"
 }
 
 rollback_step() {
@@ -1195,12 +1392,25 @@ Restart=always
 RestartSec=5
 UMask=0077
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
+ProtectHome=true
 ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
 ProtectControlGroups=true
+RestrictNamespaces=true
 RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=4096
 ReadWritePaths=${DATA_DIR}
 Environment=PYTHONUNBUFFERED=1
 Environment=ANYTLS_DATABASE=${DATA_DIR}/anytls.db
@@ -1230,10 +1440,52 @@ set -u
 exec 9>/run/lock/${SERVICE_NAME}-healthcheck.lock
 flock -n 9 || exit 0
 
+STATE_DIR=/run/${SERVICE_NAME}-healthcheck
+FAILURE_THRESHOLD=3
+RECOVERY_COOLDOWN_SECONDS=300
+install -d -o root -g root -m 700 "\$STATE_DIR"
+
+record_probe_failure() {
+    local component="\$1"
+    local state_file="\$STATE_DIR/\${component}.failures"
+    local count=0
+    if [[ -r "\$state_file" ]]; then
+        read -r count < "\$state_file" || count=0
+    fi
+    [[ "\$count" =~ ^[0-9]+$ ]] || count=0
+    count=\$((count + 1))
+    printf '%s\n' "\$count" > "\$state_file"
+    logger -p daemon.warning -t ${SERVICE_NAME}-healthcheck \\
+        "event=health_probe_failure component=\$component consecutive_failures=\$count"
+    printf '%s\n' "\$count"
+}
+
+reset_probe_failures() {
+    rm -f -- "\$STATE_DIR/\$1.failures"
+}
+
+recovery_is_suppressed() {
+    local component="\$1"
+    local state_file="\$STATE_DIR/\${component}.last_recovery"
+    local now last_recovery=0
+    now="\$(date +%s)"
+    if [[ -r "\$state_file" ]]; then
+        read -r last_recovery < "\$state_file" || last_recovery=0
+    fi
+    [[ "\$last_recovery" =~ ^[0-9]+$ ]] || last_recovery=0
+    if (( now - last_recovery < RECOVERY_COOLDOWN_SECONDS )); then
+        logger -p daemon.warning -t ${SERVICE_NAME}-healthcheck \\
+            "event=health_recovery_suppressed component=\$component cooldown_seconds=\$RECOVERY_COOLDOWN_SECONDS"
+        return 0
+    fi
+    printf '%s\n' "\$now" > "\$state_file"
+    return 1
+}
+
 probe_backend() {
     curl --fail --silent --show-error --output /dev/null \\
         --connect-timeout 3 --max-time 8 \\
-        http://127.0.0.1:${PORT}/login
+        http://127.0.0.1:${PORT}/readyz
 }
 
 probe_https() {
@@ -1243,20 +1495,51 @@ probe_https() {
         https://${PANEL_DOMAIN}/login
 }
 
+certificate_expiring() {
+    ! timeout 8 openssl s_client \\
+        -connect 127.0.0.1:443 -servername ${PANEL_DOMAIN} </dev/null 2>/dev/null | \\
+        openssl x509 -checkend 1814400 -noout >/dev/null 2>&1
+}
+
 if ! systemctl is-active --quiet ${SERVICE_NAME} || ! probe_backend; then
-    logger -p daemon.warning -t ${SERVICE_NAME}-healthcheck \\
-        'panel health probe failed; restarting ${SERVICE_NAME}'
+    panel_failures="\$(record_probe_failure panel)"
+    if (( panel_failures < FAILURE_THRESHOLD )); then
+        exit 1
+    fi
+    recovery_is_suppressed panel && exit 1
+    logger -p daemon.err -t ${SERVICE_NAME}-healthcheck \\
+        'event=health_recovery component=panel action=restart'
     systemctl restart ${SERVICE_NAME}
     sleep 3
-    probe_backend || exit 1
+    if ! probe_backend; then
+        exit 1
+    fi
+    reset_probe_failures panel
+else
+    reset_probe_failures panel
 fi
 
 if ! systemctl is-active --quiet caddy || ! probe_https; then
-    logger -p daemon.warning -t ${SERVICE_NAME}-healthcheck \\
-        'HTTPS health probe failed; recovering Caddy'
+    caddy_failures="\$(record_probe_failure caddy)"
+    if (( caddy_failures < FAILURE_THRESHOLD )); then
+        exit 1
+    fi
+    recovery_is_suppressed caddy && exit 1
+    logger -p daemon.err -t ${SERVICE_NAME}-healthcheck \\
+        'event=health_recovery component=caddy action=reload-or-restart'
     systemctl reload-or-restart caddy
     sleep 3
-    probe_https || exit 1
+    if ! probe_https; then
+        exit 1
+    fi
+    reset_probe_failures caddy
+else
+    reset_probe_failures caddy
+fi
+
+if certificate_expiring; then
+    logger -p daemon.warning -t ${SERVICE_NAME}-healthcheck \\
+        'event=certificate_expiring threshold_days=21'
 fi
 EOF
 
@@ -1335,9 +1618,6 @@ PY
 render_caddy_site() {
     cat <<EOF
 ${PANEL_DOMAIN} {
-    tls {
-        ca https://acme-v02.api.letsencrypt.org/directory
-    }
     reverse_proxy 127.0.0.1:${PORT}
 }
 EOF
@@ -1347,8 +1627,7 @@ caddyfile_contains_only_panel_site() {
     [[ -f "$CADDYFILE" ]] || return 1
     local compact
     compact="$(sed '/^[[:space:]]*#/d' "$CADDYFILE" | tr -d '[:space:]')"
-    [[ "$compact" == "${PANEL_DOMAIN}{reverse_proxy127.0.0.1:${PORT}}" || \
-       "$compact" == "${PANEL_DOMAIN}{tls{cahttps://acme-v02.api.letsencrypt.org/directory}reverse_proxy127.0.0.1:${PORT}}" ]]
+    [[ "$compact" == "${PANEL_DOMAIN}{reverse_proxy127.0.0.1:${PORT}}" ]]
 }
 
 write_caddy_config() {
@@ -1433,7 +1712,7 @@ start_https_proxy() {
     done
 
     journalctl -u caddy -n 80 --no-pager || true
-    fail "Let's Encrypt certificate verification timed out; check DNS and public ports 80/443"
+    fail "automatic HTTPS certificate verification timed out; check DNS and public ports 80/443"
 }
 
 start_keepalive() {
@@ -1445,10 +1724,12 @@ start_keepalive() {
 }
 
 print_summary() {
+    logger -p daemon.notice -t "$SERVICE_NAME-deploy" \
+        "event=deployment_success repo_ref=$REPO_REF" || true
     echo
     log "deployment succeeded"
     echo "  Panel URL:  https://${PANEL_DOMAIN}"
-    echo "  HTTPS:      Let's Encrypt certificate managed and renewed by Caddy"
+    echo "  HTTPS:      certificate managed and renewed automatically by Caddy"
     if [[ "$FRESH_DB" -eq 1 ]]; then
         echo "  Username:   ${ADMIN_USER}"
         if [[ "${ANYTLS_SHOW_SECRETS:-0}" = "1" ]]; then
@@ -1469,6 +1750,7 @@ print_summary() {
 
 main() {
     validate_configuration
+    validate_supported_os
     validate_install_target
     validate_service_target
     prepare_panel_domain
@@ -1495,11 +1777,26 @@ main() {
     write_caddy_config
     start_https_proxy
     start_keepalive
+    persist_rollback_backup
     DEPLOY_SUCCEEDED=1
     CUTOVER_STARTED=0
     print_summary
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    main
+    case "${1:-}" in
+        --rollback)
+            delayed_rollback "${2:-latest}"
+            ;;
+        --list-backups)
+            [[ "${EUID:-$(id -u)}" -eq 0 ]] || fail "please run as root"
+            list_persistent_backups
+            ;;
+        --*)
+            fail "unknown option: $1"
+            ;;
+        *)
+            main
+            ;;
+    esac
 fi

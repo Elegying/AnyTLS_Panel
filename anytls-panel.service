@@ -13,12 +13,25 @@ Restart=always
 RestartSec=5
 UMask=0077
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
+ProtectHome=true
 ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
 ProtectControlGroups=true
+RestrictNamespaces=true
 RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=4096
 ReadWritePaths=/opt/anytls-panel/data
 Environment=PYTHONUNBUFFERED=1
 Environment=ANYTLS_DATABASE=/opt/anytls-panel/data/anytls.db
