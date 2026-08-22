@@ -20,6 +20,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+wait_for_endpoint() {
+    local url="$1"
+    if curl --fail --silent --show-error --retry 10 --retry-delay 1 \
+        --retry-connrefused "$url"; then
+        return
+    fi
+    systemctl status "$SERVICE_NAME" --no-pager || true
+    journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true
+    return 1
+}
+
 # shellcheck source=/dev/null
 source /etc/os-release
 [[ "$ID" == "ubuntu" && "$VERSION_ID" == "24.04" ]]
@@ -112,9 +123,9 @@ write_service
 systemd-analyze verify "$UNIT_FILE"
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
-curl --fail --retry 10 --retry-delay 1 http://127.0.0.1:18866/readyz
+wait_for_endpoint http://127.0.0.1:18866/readyz
 systemctl restart "$SERVICE_NAME"
-curl --fail --retry 10 --retry-delay 1 http://127.0.0.1:18866/healthz
+wait_for_endpoint http://127.0.0.1:18866/healthz
 curl --fail --silent --dump-header - --output /dev/null \
     http://127.0.0.1:18866/login | grep -qi '^Content-Security-Policy:'
 
