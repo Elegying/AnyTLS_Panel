@@ -17,6 +17,10 @@
 - systemd 增加 capability、内核、命名空间、地址族和资源上限；批量任务增加数量上限和单任务互斥。
 - Caddy 只从官方签名的稳定仓库安装，并强制最低受支持版本。
 
+### Fixed
+
+- 发布标签验证步骤显式注入最小权限 GitHub Token，确保 CI 来源校验可执行。
+
 ### Changed
 
 - 正式部署目标收敛为 Ubuntu 24.04、Python 3.12+ 与 systemd；CI 增加 Ubuntu 24.04 真实部署集成门禁及分支覆盖率下限。
