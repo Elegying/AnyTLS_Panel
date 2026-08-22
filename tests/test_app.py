@@ -2791,6 +2791,32 @@ proxies:
         self.assertIn("dpkg --compare-versions", content)
         self.assertIn("installed Caddy is older than the verified minimum", content)
 
+    def test_deploy_upgrades_existing_caddy_below_the_verified_minimum(self):
+        script = REPO_ROOT / "deploy.sh"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{script}"; '
+                'UPGRADED=0; caddy() { :; }; systemctl() { return 0; }; '
+                'dpkg() { [[ "$2" == "2.11.4" ]]; }; '
+                'installed_caddy_version() { '
+                '[[ "$UPGRADED" -eq 1 ]] && printf "2.11.4\\n" || '
+                'printf "2.6.2\\n"; }; '
+                'install_caddy_from_official_repository() { '
+                'UPGRADED=1; printf "upgrade-called\\n"; }; '
+                'ensure_caddy; printf "version=%s installed_now=%s '
+                'attempted=%s\\n" "$(installed_caddy_version)" '
+                '"$CADDY_INSTALLED_NOW" "$CADDY_INSTALL_ATTEMPTED"',
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("upgrade-called", result.stdout)
+        self.assertIn("version=2.11.4 installed_now=0 attempted=1", result.stdout)
+
     def test_release_requires_main_head_and_successful_ci_for_exact_sha(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
@@ -3848,7 +3874,7 @@ proxies:
         self.assertIn("python3.12 -m venv .venv", operations)
         self.assertIn("brew install python@3.12 shellcheck actionlint", operations)
         self.assertIn("--require-hashes -r requirements-dev.txt", operations)
-        self.assertIn("git clone --depth 1 --branch v1.2.0", operations)
+        self.assertIn("git clone --depth 1 --branch v1.2.1", operations)
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
@@ -3941,8 +3967,8 @@ proxies:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.2.0}"', deploy)
-        self.assertIn("AnyTLS_Panel/v1.2.0/deploy.sh", readme)
+        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.2.1}"', deploy)
+        self.assertIn("AnyTLS_Panel/v1.2.1/deploy.sh", readme)
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)

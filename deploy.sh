@@ -16,7 +16,7 @@ TRUST_PROXY="${ANYTLS_TRUST_PROXY:-1}"
 ALLOW_PRIVATE_SUBSCRIPTIONS="${ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS:-0}"
 PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
-REPO_REF="${ANYTLS_REPO_REF:-v1.2.0}"
+REPO_REF="${ANYTLS_REPO_REF:-v1.2.1}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
@@ -507,13 +507,16 @@ installed_caddy_version() {
     caddy version 2>/dev/null | sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p'
 }
 
-assert_supported_caddy_version() {
+caddy_version_is_supported() {
     local installed_version
     installed_version="$(installed_caddy_version)"
-    if [[ -z "$installed_version" ]] || \
-       ! dpkg --compare-versions "$installed_version" ge "$CADDY_MIN_VERSION"; then
-        fail "installed Caddy is older than the verified minimum ${CADDY_MIN_VERSION}; upgrade it from the official Caddy repository before deploying"
-    fi
+    [[ -n "$installed_version" ]] && \
+        dpkg --compare-versions "$installed_version" ge "$CADDY_MIN_VERSION"
+}
+
+assert_supported_caddy_version() {
+    caddy_version_is_supported || \
+        fail "installed Caddy is older than the verified minimum ${CADDY_MIN_VERSION} after installing from the official repository"
 }
 
 install_caddy_from_official_repository() {
@@ -548,19 +551,26 @@ install_caddy_from_official_repository() {
 }
 
 ensure_caddy() {
+    local caddy_preexisting=0
     if command -v caddy >/dev/null 2>&1; then
+        caddy_preexisting=1
         systemctl cat caddy.service >/dev/null 2>&1 || \
             fail "the caddy command exists but caddy.service is not installed"
-        assert_supported_caddy_version
-        return
+        if caddy_version_is_supported; then
+            return
+        fi
+        log "upgrading Caddy from the verified official repository"
+    else
+        log "installing Caddy for automatic public ACME HTTPS"
     fi
 
-    log "installing Caddy for automatic public ACME HTTPS"
     CADDY_INSTALL_ATTEMPTED=1
     if ! install_caddy_from_official_repository; then
         fail "Caddy is unavailable from the configured package repositories"
     fi
-    CADDY_INSTALLED_NOW=1
+    if [[ "$caddy_preexisting" -eq 0 ]]; then
+        CADDY_INSTALLED_NOW=1
+    fi
     command -v caddy >/dev/null 2>&1 || fail "Caddy installation did not provide the caddy command"
     systemctl cat caddy.service >/dev/null 2>&1 || fail "Caddy installation did not provide caddy.service"
     assert_supported_caddy_version

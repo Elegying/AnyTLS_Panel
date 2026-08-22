@@ -129,8 +129,14 @@ wait_for_endpoint http://127.0.0.1:18866/healthz
 curl --fail --silent --dump-header - --output /dev/null \
     http://127.0.0.1:18866/login | grep -qi '^Content-Security-Policy:'
 
-# Validate the supported Caddy source/minimum and a real reverse-proxy config.
+# Start from Ubuntu's older Caddy package, prove the deployment upgrades it
+# from the verified official repository, then validate a real proxy config.
 ensure_runtime
+install_packages caddy
+distro_caddy_version="$(installed_caddy_version)"
+if dpkg --compare-versions "$distro_caddy_version" ge "$CADDY_MIN_VERSION"; then
+    fail "Ubuntu Caddy fixture is no longer older than the verified minimum"
+fi
 capture_caddy_state
 ensure_caddy
 assert_supported_caddy_version
