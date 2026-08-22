@@ -2791,6 +2791,31 @@ proxies:
         self.assertIn("dpkg --compare-versions", content)
         self.assertIn("installed Caddy is older than the verified minimum", content)
 
+    def test_deploy_upgrades_existing_caddy_below_the_verified_minimum(self):
+        script = REPO_ROOT / "deploy.sh"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{script}"; '
+                'UPGRADED=0; caddy() { :; }; systemctl() { return 0; }; '
+                'dpkg() { [[ "$2" == "2.11.4" ]]; }; '
+                'installed_caddy_version() { '
+                '[[ "$UPGRADED" -eq 1 ]] && printf "2.11.4\\n" || '
+                'printf "2.6.2\\n"; }; '
+                'install_caddy_from_official_repository() { '
+                'UPGRADED=1; printf "upgrade-called\\n"; }; '
+                'ensure_caddy; printf "version=%s\\n" '
+                '"$(installed_caddy_version)"',
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("upgrade-called", result.stdout)
+        self.assertIn("version=2.11.4", result.stdout)
+
     def test_release_requires_main_head_and_successful_ci_for_exact_sha(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
