@@ -20,6 +20,13 @@ venv/
 # Logs
 *.log
 
+# Test & coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+
 # OS
 .DS_Store
 Thumbs.db

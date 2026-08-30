@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用文档
+    url: https://github.com/Elegying/AnyTLS_Panel/blob/main/docs/README.md
+    about: 从快速开始、常见问题、配置和运维文档查找答案
+  - name: 私下报告安全漏洞
+    url: https://github.com/Elegying/AnyTLS_Panel/security/advisories/new
+    about: 不要在公开 Issue 中披露漏洞细节或敏感信息

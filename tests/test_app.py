@@ -426,6 +426,7 @@ ensure_iptables
         probe = f"""
 COLLECTOR_ID=collector-test-raw
 source "{script}"
+validate_configuration() {{ :; }}
 acquire_collector_lock() {{ :; }}
 ensure_iptables() {{ :; }}
 get_traffic_bytes() {{ printf '%s\\n' "$CURRENT_BYTES"; }}
@@ -477,6 +478,7 @@ report_traffic 30
         probe = f"""
 COLLECTOR_ID=collector-test-failure
 source "{script}"
+validate_configuration() {{ :; }}
 acquire_collector_lock() {{ :; }}
 ensure_iptables() {{ :; }}
 iptables() {{ return 1; }}
@@ -496,6 +498,7 @@ main
 COLLECTOR_ID=collector-test-rule-failure
 FAILED_CHAIN={failed_chain}
 source "{script}"
+validate_configuration() {{ :; }}
 acquire_collector_lock() {{ :; }}
 iptables() {{
     if [[ "$1" == "-C" ]]; then return 1; fi
@@ -517,6 +520,7 @@ main
 COLLECTOR_ID=
 COLLECTOR_ID_FILE=/dev/null/collector.id
 source "{script}"
+validate_configuration() {{ :; }}
 acquire_collector_lock() {{ :; }}
 ensure_iptables() {{ :; }}
 get_traffic_bytes() {{ printf '25\n'; }}
@@ -536,6 +540,7 @@ main
 COLLECTOR_ID=collector-test-locked
 COLLECTOR_LOCK_FILE="{lock_file}"
 source "{script}"
+validate_configuration() {{ :; }}
 flock() {{ return 1; }}
 validate_collector_path_parent() {{ :; }}
 ensure_iptables() {{ :; }}
@@ -583,6 +588,59 @@ printf 'accepted\n'
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "accepted")
+
+    def test_traffic_collector_requires_explicit_safe_configuration(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        probe = f'''
+source "{script}"
+current_euid() {{ printf '0\n'; }}
+command_is_available() {{ return 0; }}
+PANEL_URL=
+API_TOKEN=
+ACCOUNT_ID=
+PASSWORD=
+validate_configuration
+'''
+        missing_url = subprocess.run(
+            ["bash", "-c", probe], capture_output=True, text=True
+        )
+
+        self.assertNotEqual(missing_url.returncode, 0)
+        self.assertIn("PANEL_URL is required", missing_url.stderr)
+
+        configured_probe = f'''
+source "{script}"
+current_euid() {{ printf '0\n'; }}
+command_is_available() {{ return 0; }}
+PANEL_URL=https://panel.example.com/
+API_TOKEN=test-token
+ACCOUNT_ID=7
+ANYTLS_PORT=8443
+validate_configuration
+printf 'url=%s\\n' "$PANEL_URL"
+'''
+        configured = subprocess.run(
+            ["bash", "-c", configured_probe], capture_output=True, text=True
+        )
+
+        self.assertEqual(configured.returncode, 0, msg=configured.stderr)
+        self.assertEqual(configured.stdout.strip(), "url=https://panel.example.com")
+
+    def test_traffic_collector_rejects_insecure_remote_panel_url(self):
+        script = REPO_ROOT / "traffic_collector.sh"
+        probe = f'''
+source "{script}"
+PANEL_URL=http://panel.example.com
+API_TOKEN=test-token
+ACCOUNT_ID=7
+validate_configuration
+'''
+        result = subprocess.run(
+            ["bash", "-c", probe], capture_output=True, text=True
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be an HTTPS origin", result.stderr)
 
     def test_clash_yaml_subscription_returns_nodes_and_traffic_tuple(self):
         with tempfile.TemporaryDirectory() as tmp:

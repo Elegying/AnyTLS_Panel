@@ -4,6 +4,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+      timezone: "Asia/Shanghai"
     groups:
       github-actions:
         patterns:
@@ -17,6 +18,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+      timezone: "Asia/Shanghai"
     groups:
       python:
         patterns:

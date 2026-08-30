@@ -1,258 +1,205 @@
-# AnyTLS 节点统一管理面板
+# AnyTLS Panel
 
-[GitHub Actions](https://github.com/Elegying/AnyTLS_Panel/actions)
+[![CI](https://github.com/Elegying/AnyTLS_Panel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Elegying/AnyTLS_Panel/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/Elegying/AnyTLS_Panel?display_name=tag&sort=semver)](https://github.com/Elegying/AnyTLS_Panel/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
+[![Ubuntu 24.04](https://img.shields.io/badge/production-Ubuntu%2024.04-E95420.svg)](docs/OPERATIONS.md#支持环境)
 
-轻量级 Web 面板，通过订阅导入统一管理多个代理节点账号。支持 anytls / trojan / vmess / vless / hysteria2 / tuic / shadowsocks 等多种协议。
+一个轻量、安全、可自托管的代理订阅与节点管理面板。它把分散的订阅账号、节点状态、流量配额和分享链接集中到一个清晰的 Web 界面中，适合个人或小团队统一管理。
 
-## 📚 运维文档
+![AnyTLS Panel 仪表盘](docs/assets/dashboard.jpg)
 
-- [生产部署、更新、卸载与排障手册](docs/OPERATIONS.md)
-- 每次 push / pull request 会通过 GitHub Actions 自动运行单元测试、编译检查和 shell 语法检查。
+> 当前正式版本：`v1.2.2`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
 
-## ✨ 功能特性
+## 你可以用它做什么
 
-- 📥 **订阅导入** — 默认支持 HTTPS 订阅地址，以及 Clash YAML、Base64 编码、单链接等多种格式
-- 👤 **多账号管理** — 每个订阅对应一个账号，支持重命名、编辑、删除
-- 🔄 **一键同步** — 单账号或全部账号一键更新订阅，自动解析流量信息
-- 📊 **流量监控** — 自动获取已用流量、总流量、到期时间，进度条可视化
-- 📡 **节点检测** — TLS CONNECT 方式检测节点可用性，显示延迟
-- 🔗 **节点分享** — 一键复制节点链接
-- 🔐 **安全加固** — CSRF 保护、登录速率限制、Session 安全配置
-- 🎨 **暗黑主题** — 现代化深色 UI，响应式布局
+| 能力 | 通俗说明 |
+| --- | --- |
+| 多协议订阅导入 | 支持 AnyTLS、Trojan、VMess、VLESS、Hysteria2、TUIC、Shadowsocks，以及 Clash YAML、Base64 和多行链接 |
+| 多账号统一管理 | 一个账号对应一个订阅来源，可独立设置名称、状态、流量上限、备注和到期日 |
+| 一键同步 | 单独同步一个账号，或并发更新全部活跃账号；失败不会覆盖上一次可用节点 |
+| 节点健康检测 | 检测节点是否在线并记录延迟，同时限制探测目标，避免访问内网敏感服务 |
+| 流量统计 | 显示上传、下载、累计使用量、配额占比和到期状态，可接入节点侧采集脚本 |
+| 安全分享 | 为账号生成独立订阅链接，停用账号后链接立即失效，Token 可随时轮换 |
+| 生产级运维 | 自动配置 Caddy HTTPS、systemd 沙箱、健康检查、数据库迁移、失败回滚和最近两份可用备份 |
 
-## 🚀 一键部署
+## 开始之前
 
-### 方式一：在线部署
+生产部署需要：
+
+- 一台全新的或用途明确的 **Ubuntu 24.04 LTS** 服务器；
+- 一个已经解析到服务器公网 IP 的域名，例如 `panel.example.com`；
+- 云安全组和主机防火墙已放行 TCP `80`、`443`；
+- 具备 `root` 权限，并能访问 GitHub、Python 包索引和 Caddy 官方软件源；
+- 至少 512 MiB 内存。
+
+如果只是本地体验，请跳到[本地开发](#本地开发)，不要在个人电脑上运行生产部署脚本。
+
+## 5 分钟部署
+
+### 1. 下载并检查固定版本的脚本
+
+```bash
+curl -fL \
+  https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh \
+  -o /tmp/anytls-panel-deploy.sh
+less /tmp/anytls-panel-deploy.sh
+```
+
+确认脚本来源和内容后，以 `root` 运行：
+
+```bash
+bash /tmp/anytls-panel-deploy.sh
+```
+
+脚本会依次询问管理员用户名、管理员密码和面板域名。密码输入不会显示在终端中。
+
+如果你已经审查过脚本，也可以使用一行命令：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh)
 ```
 
-首次部署会依次提示输入面板管理员用户名、隐藏输入并确认密码，以及面板域名。请先把域名的 A/AAAA 记录指向服务器，并在云安全组/防火墙放行 TCP 80 和 443。脚本会从 Caddy 官方稳定仓库安装受支持版本，由 Caddy 自动选择公开 ACME 签发方、启用 HTTP→HTTPS 跳转并自动续签证书。
+### 2. 打开面板
 
-部署会先在独立暂存目录下载锁定依赖、创建测试环境并完成应用初始化验证，之后才短暂停止线上服务进行切换。切换、数据库迁移、Caddy 或健康检查失败时会自动恢复旧代码、数据库和系统配置。不要直接修改 `requirements.txt`；调整依赖时更新 `requirements.in` 并重新生成带哈希的锁文件。
+部署成功后访问：
 
-无人值守部署可预先设置 `ANYTLS_ADMIN_USER`、`ANYTLS_ADMIN_PASS` 和 `ANYTLS_PANEL_DOMAIN`；已有数据库更新时保留原管理员账号，只需输入域名。
-
-正式 Release 同时提供版本化源码归档、SHA-256 和 Sigstore bundle。下载三个同名资产后可验证：
-
-```bash
-gh release verify v1.2.2 --repo Elegying/AnyTLS_Panel
-gh release verify-asset v1.2.2 AnyTLS_Panel-v1.2.2.tar.gz \
-  --repo Elegying/AnyTLS_Panel
-sha256sum -c AnyTLS_Panel-v1.2.2.tar.gz.sha256
-cosign verify-blob \
-  --bundle AnyTLS_Panel-v1.2.2.tar.gz.sigstore.json \
-  --certificate-identity "https://github.com/Elegying/AnyTLS_Panel/.github/workflows/release.yml@refs/tags/v1.2.2" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  AnyTLS_Panel-v1.2.2.tar.gz
+```text
+https://你的域名/login
 ```
 
-### 方式二：克隆部署
+Caddy 会自动申请受信任的 HTTPS 证书、将 HTTP 跳转到 HTTPS，并在证书到期前自动续签。
+
+### 3. 完成首次设置
+
+1. 使用部署时设置的管理员账号登录；
+2. 进入「账号」，点击「导入订阅」；
+3. 填写订阅内容、流量上限和备注；
+4. 在「监控」中检测节点，在「重命名规则」中统一整理节点名称；
+5. 如果需要分发订阅，在账号详情页生成独立分享链接。
+
+更细的图文式步骤见[快速开始](docs/QUICKSTART.md)。
+
+## 界面预览
+
+| 账号管理 | 节点监控 |
+| --- | --- |
+| ![账号管理页面](docs/assets/accounts.jpg) | ![节点监控页面](docs/assets/monitor.jpg) |
+
+移动端同样支持完整的查看和管理操作：
+
+<img src="docs/assets/mobile-dashboard.jpg" alt="AnyTLS Panel 移动端仪表盘" width="360">
+
+## 文档导航
+
+| 文档 | 适合谁 | 内容 |
+| --- | --- | --- |
+| [快速开始](docs/QUICKSTART.md) | 第一次使用的人 | 从准备域名到导入第一个订阅 |
+| [配置参考](docs/CONFIGURATION.md) | 部署和维护人员 | 所有环境变量、默认值、边界和使用场景 |
+| [API 参考](docs/API.md) | 接入脚本的开发者 | 鉴权方式、请求示例、返回值和错误处理 |
+| [运维手册](docs/OPERATIONS.md) | 服务器管理员 | HTTPS、备份、更新、回滚、卸载和排障 |
+| [架构说明](docs/ARCHITECTURE.md) | 贡献者和维护者 | 模块职责、数据流、安全边界和发布流程 |
+| [常见问题](docs/FAQ.md) | 所有用户 | 登录、订阅、证书、监控和流量统计问题 |
+| [贡献指南](CONTRIBUTING.md) | 准备提交代码的人 | 开发环境、测试、提交和 Pull Request 规范 |
+| [安全策略](SECURITY.md) | 安全研究者 | 支持版本、安全问题报告方式和披露原则 |
+
+也可以从[文档中心](docs/README.md)按任务查找内容。
+
+## 安全设计
+
+AnyTLS Panel 默认采用“拒绝高风险行为，需要时显式放开”的策略：
+
+- 订阅默认只允许 HTTPS，并拒绝回环、内网、链路本地和保留地址；
+- 节点检测默认只连接 DNS 解析出的公网地址；
+- 浏览器管理操作使用登录会话和 CSRF 防护；流量上报使用独立 Bearer Token；
+- 密码使用带随机盐的 PBKDF2-SHA256，登录限流跨进程和重启生效；
+- Session 使用 Secure、HttpOnly、SameSite，并有固定有效期和主动撤销机制；
+- 响应启用严格 CSP、HSTS、点击劫持防护和请求 ID；
+- 生产进程使用低权限用户和 systemd 沙箱，只能写入数据目录；
+- 更新前会验证依赖和数据库副本，切换失败自动恢复旧版本；
+- 健康检查同时验证应用、数据库、HTTPS 和证书有效期。
+
+涉及公网暴露前，请先阅读[安全策略](SECURITY.md)和[生产运维手册](docs/OPERATIONS.md)。本项目不会替代防火墙、异机备份、主机补丁和组织自身的访问控制。
+
+## 常用管理命令
 
 ```bash
-git clone --depth 1 --branch v1.2.2 https://github.com/Elegying/AnyTLS_Panel.git
+# 服务状态
+systemctl status anytls-panel caddy
+
+# 应用日志
+journalctl -u anytls-panel -n 100 --no-pager
+
+# 健康检查记录
+journalctl -u anytls-panel-healthcheck.service -n 30 --no-pager
+
+# 列出自动保留的可回滚版本
+/opt/anytls-panel/deploy.sh --list-backups
+
+# 回滚到最近一份可用备份
+/opt/anytls-panel/deploy.sh --rollback latest
+```
+
+更新、数据库备份、恢复演练和卸载步骤请直接参考[运维手册](docs/OPERATIONS.md)，不要凭经验删除 `/opt/anytls-panel`。
+
+## 本地开发
+
+```bash
+git clone https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
-bash deploy.sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --require-hashes -r requirements-dev.txt
+python -m unittest discover -s tests -q
+./start.sh
 ```
 
-### 方式三：自定义端口
+默认地址为 `http://127.0.0.1:8866`。首次启动生成的管理员密码保存在数据库旁的 `.initial_admin_password` 文件中。`start.sh` 只用于本地开发；生产环境必须使用 `deploy.sh`、Gunicorn、systemd 和 Caddy。
+
+常用质量检查可以统一运行：
 
 ```bash
-bash deploy.sh 9090
+make check
 ```
 
-## 📸 界面预览
+## 项目结构
 
-| 仪表盘 | 账号管理 | 节点检测 |
-|--------|---------|---------|
-| 流量总览、一键同步 | 订阅导入、卡片展示 | 延迟检测、状态监控 |
-
-## 📖 使用说明
-
-### 导入订阅
-
-1. 点击「账号管理」→「导入订阅」
-2. 粘贴订阅链接（支持以下格式）：
-   - HTTPS 订阅地址（自动拉取，兼容 Clash / Shadowrocket 格式）
-   - `anytls://` / `trojan://` / `vmess://` 等单链接
-   - 多行链接（每行一个）
-   - Base64 编码的订阅内容
-3. 点击导入，自动解析节点和流量信息
-
-### 节点检测
-
-1. 点击「节点检测」导航项
-2. 点击「一键检测全部」或单独检测某个节点
-3. 显示状态（在线/离线）和延迟（ms）
-
-### 流量同步
-
-- 仪表盘点击「一键同步全部」更新所有账号
-- 或进入账号详情点击「同步订阅」更新单个账号
-
-订阅抓取默认只允许 HTTPS，并拒绝回环、内网、链路本地和保留地址；每次重定向都会重新校验目标，DNS 解析、所有 User-Agent 尝试、重定向和正文读取共享 10 秒绝对期限，响应上限为 2 MiB。确实需要明文 HTTP 时必须显式设置 `ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS=1`；只有需要访问可信内网订阅源时，才应在隔离网络中设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。两个例外开关相互独立，均不建议用于可导入不可信订阅的公网面板。停用账号后，已有公开订阅链接立即失效并返回 404。
-
-节点检测同样只探测 DNS 当前解析出的公网地址，以避免面板被用于访问内网服务；可信隔离网络可显式设置 `ANYTLS_ALLOW_PRIVATE_NODE_PROBES=1`。所有请求体默认限制为 4 MiB，YAML 别名、嵌套深度、节点数以及流量批量上报数量也有独立上限。
-
-## 🔌 API 接口
-
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/api/traffic/report` | POST | 上报流量 |
-| `/api/traffic/counter` | POST | 幂等上报采集器累计计数 |
-| `/api/traffic/set` | POST | 单调设置流量绝对值（不会降低已有总量） |
-| `/api/accounts` | GET | 获取所有账号 |
-| `/api/accounts/<id>/nodes` | GET | 获取账号下所有节点 |
-| `/api/check-by-host` | POST | 按地址检测节点 |
-| `/api/nodes/<id>/check` | POST | 检测指定节点 |
-| `/api/accounts/<id>/check-all` | POST | 批量检测账号节点 |
-| `/api/sync-all` | POST | 同步所有账号订阅 |
-| `/api/subscribe` | GET | 获取所有节点订阅链接 |
-
-### 流量上报示例
-
-```bash
-# 面板管理员使用主 Token 按账号 ID 上报（不要把主 Token 分发到节点）
-curl -X POST https://面板域名/api/traffic/report \
-  -H "Authorization: Bearer YOUR_TRAFFIC_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"account_id": 1, "bytes_used": 1073741824}'
-
-# 主 Token 兼容按密码定位账号
-curl -X POST https://面板域名/api/traffic/report \
-  -H "Authorization: Bearer YOUR_TRAFFIC_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"password": "xxx", "bytes_used": 1073741824}'
-```
-
-流量上报接口使用 Bearer token 鉴权。部署脚本生成的 `data/.traffic_api_token` 是可操作全部账号的主 Token，只应留在面板服务器，不能复制到节点。自定义 `ANYTLS_TRAFFIC_API_TOKEN_FILE` 时只允许使用 `/etc/anytls-panel/<文件名>`，并要求目录由 root 所有且不可组/全局写。
-
-为节点生成只绑定单个账号的采集 Token（将 `1` 替换为账号 ID）：
-
-```bash
-sudo -u anytls-panel /opt/anytls-panel/venv/bin/python \
-  /opt/anytls-panel/traffic_token.py 1
-```
-
-该命令不依赖当前工作目录，也不会启动面板或执行数据库迁移。若部署时把主 Token 文件自定义到 `/etc/anytls-panel/<文件名>`，追加 `--token-file /etc/anytls-panel/<文件名>`。
-
-账号级 Token 必须与 JSON 中同一个 `account_id` 一起使用；它不能按密码定位，也不能修改其他账号。轮换面板主 Token 会同时使所有账号级 Token 失效。
-
-节点上的 `traffic_collector.sh` 使用 `/api/traffic/counter`：每个采集器持久化独立 ID，服务端按原始计数差值幂等入账，网络重试不会重复计费，iptables 计数重置也能继续累计。节点必须配置明确的 `ACCOUNT_ID` 和对应的账号级 Token。仅用密码定位是主 Token 的兼容模式；如果同一密码属于多个账号，接口会返回 409 而不会静默错账。
-
-采集器最小配置示例：
-
-```bash
-PANEL_URL="https://panel.example.com" \
-ACCOUNT_ID="1" \
-API_TOKEN="YOUR_ACCOUNT_SCOPED_TOKEN" \
-ANYTLS_PORT="443" \
-bash traffic_collector.sh
-```
-
-默认采集器 ID 保存在 `/var/lib/anytls-panel-traffic.id`。该文件必须跨更新持久保留，并且每个节点/采集实例使用不同文件；可用 `COLLECTOR_ID_FILE` 自定义。首次接入只登记当前计数为基线，不会把旧版已入账流量重复计算，从下一次采样开始累计差值。
-
-采集脚本依赖 util-linux 的 `flock`，并默认使用 `/run/anytls-panel-traffic.lock` 防止 cron 与手工执行并发造成重复规则或重复计费；可用 `COLLECTOR_LOCK_FILE` 自定义锁文件。自定义 `COLLECTOR_ID_FILE` 或 `COLLECTOR_LOCK_FILE` 必须使用绝对路径，父目录需预先创建，并保证整条目录链由 root 所有且不可组/全局写；不要放在 `/tmp` 或普通用户目录。
-
-当前 iptables 方案只统计 IPv4 的整个 `ANYTLS_PORT`，不能统计 IPv6，也不能区分同端口内的不同 AnyTLS 用户。因此一个采集实例只适用于“一个 IPv4 独占端口对应一个面板账号”，同一端口也只能运行一个 collector。双栈/纯 IPv6或共享端口场景必须改用 AnyTLS/进程提供的用户级指标，不能用此脚本做账号级计费。
-
-首次输入的管理员密码会暂存到仅 root 可读的 `data/.initial_admin_password`，用于数据库初始化；管理员首次修改密码后，默认数据目录中的引导文件会自动删除。部署输出默认隐藏密码和流量 API token。如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
-
-## 🛠️ 管理命令
-
-```bash
-# 服务管理
-systemctl status anytls-panel    # 查看状态
-systemctl restart anytls-panel   # 重启
-systemctl stop anytls-panel      # 停止
-
-# 查看日志
-journalctl -u anytls-panel -f    # 实时日志
-journalctl -u anytls-panel -n 50 # 最近50条
-
-# 修改密码
-# 登录后点击左下角「修改密码」
-
-# 修改后端端口（会同步更新 Caddy 反向代理）
-ANYTLS_PANEL_DOMAIN="panel.example.com" bash deploy.sh 9090
-```
-
-## 📁 项目结构
-
-```
+```text
 AnyTLS_Panel/
-├── app.py                  # 主程序（Flask 应用）
-├── database_maintenance.py # 流量日志清理与 SQLite 维护指标
-├── db_migrations.py        # 版本化数据库迁移
-├── input_limits.py         # 请求字段和资源上限
-├── node_probe.py           # 带地址边界校验的节点探测
-├── protocol_codecs.py      # 订阅协议解析与转换
-├── security_utils.py       # 密码哈希与兼容校验
-├── traffic_token.py        # 账号级流量 Token 生成器
-├── templates/              # HTML 模板
-│   ├── base.html          # 基础布局
-│   ├── login.html         # 登录页
-│   ├── dashboard.html     # 仪表盘
-│   ├── accounts.html      # 账号管理
-│   ├── account_detail.html # 账号详情
-│   └── monitor.html       # 节点检测
-├── requirements.txt       # Python 依赖
-├── deploy.sh              # 一键部署脚本
-├── start.sh               # 开发启动脚本
-├── anytls-panel.service   # Systemd 服务文件
-├── traffic_collector.sh   # 流量采集脚本（部署在节点上）
-└── README.md              # 项目说明
+├── app.py                    # Flask 应用、页面路由和 API
+├── db_migrations.py          # SQLite 版本化迁移
+├── database_maintenance.py   # 数据保留与维护检查
+├── protocol_codecs.py        # 多协议解析和格式转换
+├── node_probe.py             # 带网络边界校验的节点探测
+├── templates/                # 服务端 HTML 模板
+├── static/                   # 样式、图标与字体
+├── docs/                     # 用户、配置、API、架构和运维文档
+├── tests/                    # 单元测试与 Ubuntu 部署集成测试
+├── deploy.sh                 # 生产部署、更新和回滚入口
+├── traffic_collector.sh      # 节点侧 IPv4 端口流量采集器
+└── release-files.txt         # 生产发布文件白名单
 ```
 
-## 🔒 安全特性
+更详细的模块和数据流说明见[架构说明](docs/ARCHITECTURE.md)。
 
-- ✅ 浏览器管理 POST 接口验证 CSRF Token；流量 API 使用独立 Bearer Token
-- ✅ SQLite 持久化登录速率限制（5次/分钟，跨进程和重启生效）
-- ✅ 流量上报 API 支持账号级 Bearer token，节点不能跨账号写入
-- ✅ Session HttpOnly + SameSite=Lax
-- ✅ 管理会话固定 24 小时期限；每次请求校验账号会话版本，修改密码会撤销其他已登录会话
-- ✅ 退出登录只接受带 CSRF Token 的 POST 请求，动态响应默认禁止缓存
-- ✅ 生产进程使用专用低权限用户和 systemd 沙箱
-- ✅ 密码使用带随机盐的 PBKDF2-SHA256，并兼容旧 SHA256 哈希自动升级
-- ✅ Secret Key 原子持久化，避免并发启动产生不同会话密钥
-- ✅ 订阅拉取拒绝常规内网/回环目标，并限制重定向和响应体大小
-- ✅ 订阅连接固定到已验证的公网 IP，阻断 DNS 重绑定到内网地址
-- ✅ 默认仅拉取 HTTPS 订阅；节点探测默认只允许公网解析地址
-- ✅ 请求体、字段长度、整数范围、流量批量数量及 YAML 复杂度均有明确上限
-- ✅ 流量明细默认保留 90 天，并周期清理；累计流量总数不受日志清理影响
-- ✅ 严格 CSP、无内联事件处理器、请求 ID 与不记录秘密的结构化审计日志
-- ✅ systemd 自动拉起面板与 Caddy；每分钟检查就绪性、HTTPS 与证书剩余有效期，连续三次失败才恢复服务，并用五分钟冷却抑制重启风暴
-- ✅ 更新前预构建依赖并验证应用，切换失败自动恢复上一版本和数据库；成功更新保留两份带校验和的 LKG 备份
+## 支持范围与限制
 
-生产部署会自动把 Gunicorn 绑定到 `127.0.0.1`，并写入独立的 Caddy 站点片段 `/etc/caddy/anytls-panel.d/anytls-panel.caddy`。Caddy 使用默认公开 ACME 签发方签发受信任证书并自动续签；这里不会使用自签证书。部署服务限制为 256 MiB 内存、64 个任务和 4096 个文件描述符；批量同步/检测设有数量上限，且同一时刻只允许一个批处理，避免失控并发耗尽服务资源。
+- 当前唯一经过端到端验证的生产系统是 Ubuntu 24.04 LTS；
+- `traffic_collector.sh` 基于 iptables，只统计 IPv4 且按端口计数；共享端口或 IPv6 场景需要其他用户级指标；
+- AnyTLS Panel 是管理面板，不提供代理服务端本身，也不会自动创建节点；
+- 公开订阅链接相当于访问凭据，应通过 HTTPS 传输并按需轮换；
+- 对 Debian、旧版 Ubuntu、RHEL、容器平台和多机高可用目前不作生产兼容承诺。
 
-自动化部署示例：
+完整边界见[支持说明](SUPPORT.md)。
 
-```bash
-ANYTLS_ADMIN_USER="admin" \
-ANYTLS_ADMIN_PASS="replace-with-a-strong-password" \
-ANYTLS_PANEL_DOMAIN="panel.example.com" \
-bash deploy.sh
-```
+## 参与贡献
 
-若服务器已有 Caddy 配置，脚本只添加一次 `import anytls-panel.d/*.caddy`，并在重启前运行配置校验。完整的 HTTPS、备份、更新和回滚步骤见[运维手册](docs/OPERATIONS.md)。
+欢迎提交问题、改进文档或贡献代码。开始之前请阅读[贡献指南](CONTRIBUTING.md)和[社区行为准则](CODE_OF_CONDUCT.md)。安全漏洞不要发布到公开 Issue，应按[安全策略](SECURITY.md)私下报告。
 
-## 📋 环境要求
+## 合规使用
 
-- Ubuntu 24.04 LTS（当前唯一经过端到端验证的生产目标）
-- Python 3.12+
-- systemd 与 `apt-get`
-- 可解析到服务器的公网域名，且 TCP 80/443 可从公网访问
-- 可访问 Caddy 官方 Cloudsmith 稳定仓库和 Python 包索引
-- 512MB+ 内存
+请仅在你有权管理的服务器、订阅和网络环境中使用本项目，并遵守所在地法律、服务条款和组织安全要求。项目维护者不对未经授权的访问、滥用或由错误配置造成的损失负责。
 
-## 📄 开源协议
+## 开源协议
 
-MIT License
-
-## 🙏 致谢
-
-- [Flask](https://flask.palletsprojects.com/)
-- [Gunicorn](https://gunicorn.org/)
-- [PyYAML](https://pyyaml.org/)
+本项目采用 [MIT License](LICENSE)。项目内置的 Bootstrap Icons 资源遵循其随附的 [MIT 许可证](static/vendor/LICENSE.bootstrap-icons)。
