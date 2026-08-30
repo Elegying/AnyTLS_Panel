@@ -101,4 +101,45 @@ jobs:
             "${archive}.sha256" \
             "${archive}.sigstore.json"
           draft_created=0
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+
+      - name: Deploy the tagged release to production
+        if: ${{ vars.PROD_HOST != '' }}
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          [[ -n "$PROD_HOST" && -n "$PROD_SSH_PRIVATE_KEY" && -n "$PROD_SSH_KNOWN_HOSTS" ]]
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > ~/.ssh/production_key
+          printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/production_key ~/.ssh/known_hosts
+          ssh -i ~/.ssh/production_key \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "${PROD_USER:-anytls-deploy}@${PROD_HOST}" \
+            "sudo -n /usr/local/sbin/deploy-anytls-panel '$RELEASE_TAG'"
+
+      - name: Verify the public production endpoint
+        if: ${{ vars.PROD_HOST != '' }}
+        env:
+          PROD_URL: ${{ vars.PROD_URL }}
+        run: |
+          [[ "$PROD_URL" == https://* ]]
+          headers="$(mktemp)"
+          body="$(mktemp)"
+          trap 'rm -f -- "$headers" "$body"' EXIT
+          curl --fail --silent --show-error --location \
+            --connect-timeout 5 --max-time 20 \
+            --dump-header "$headers" --output "$body" \
+            "${PROD_URL%/}/login"
+          grep -Fqi 'strict-transport-security:' "$headers"
+          grep -Fqi 'content-security-policy:' "$headers"
+          grep -Fq 'AnyTLS' "$body"
+
+      - name: Publish the verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest

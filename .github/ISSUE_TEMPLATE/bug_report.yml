@@ -26,7 +26,7 @@ body:
     attributes:
       label: AnyTLS Panel 版本
       description: 填写 Release 标签和提交 SHA，不要只写“最新版”
-      placeholder: "v1.2.2 / a28a661"
+      placeholder: "v1.3.0 / 提交哈希"
     validations:
       required: true
   - type: dropdown

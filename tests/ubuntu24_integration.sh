@@ -11,9 +11,13 @@ BACKUP_ROOT="/var/backups/$SERVICE_NAME"
 UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 
 cleanup() {
+    systemctl disable --now "${SERVICE_NAME}-backup.timer" >/dev/null 2>&1 || true
+    systemctl stop "${SERVICE_NAME}-backup.service" >/dev/null 2>&1 || true
     systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
     systemctl stop caddy >/dev/null 2>&1 || true
-    rm -f -- "$UNIT_FILE"
+    rm -f -- "$UNIT_FILE" \
+        "/etc/systemd/system/${SERVICE_NAME}-backup.service" \
+        "/etc/systemd/system/${SERVICE_NAME}-backup.timer"
     systemctl daemon-reload >/dev/null 2>&1 || true
     rm -rf -- "${PANEL_DIR:?}" "${BACKUP_ROOT:?}"
     userdel "$SERVICE_USER" >/dev/null 2>&1 || true
@@ -117,6 +121,8 @@ BACKUP_ROOT="/var/backups/$SERVICE_NAME"
 HEALTHCHECK_SCRIPT="/usr/local/sbin/${SERVICE_NAME}-healthcheck"
 HEALTHCHECK_SERVICE="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-healthcheck.service"
 HEALTHCHECK_TIMER="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-healthcheck.timer"
+BACKUP_SERVICE="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-backup.service"
+BACKUP_TIMER="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-backup.timer"
 CADDY_RESTART_DROPIN="${SYSTEMD_UNIT_DIR}/caddy.service.d/${SERVICE_NAME}-restart.conf"
 
 write_service
@@ -128,6 +134,15 @@ systemctl restart "$SERVICE_NAME"
 wait_for_endpoint http://127.0.0.1:18866/healthz
 curl --fail --silent --dump-header - --output /dev/null \
     http://127.0.0.1:18866/login | grep -qi '^Content-Security-Policy:'
+
+# Install the production backup units and prove the archive and SQLite snapshot verify.
+write_backup_config
+start_backups
+systemd-analyze verify "$BACKUP_SERVICE" "$BACKUP_TIMER"
+systemctl is-active --quiet "${SERVICE_NAME}-backup.timer"
+latest_daily_backup="$($PANEL_DIR/backup.sh --list | head -n 1)"
+[[ "$latest_daily_backup" =~ ^backup-[0-9]{8}T[0-9]{6}Z\.tar\.gz$ ]]
+"$PANEL_DIR/backup.sh" --verify latest
 
 # Start from Ubuntu's older Caddy package, prove the deployment upgrades it
 # from the verified official repository, then validate a real proxy config.

@@ -3325,6 +3325,9 @@ proxies:
         self.assertIn("--require-hashes", content)
         self.assertIn("--no-index", content)
         self.assertIn("write_keepalive_config", content)
+        self.assertIn("write_backup_config", content)
+        self.assertIn("start_backups", content)
+        self.assertIn('OnCalendar=*-*-* 03:15:00', content)
         self.assertIn('Restart=on-failure', content)
         self.assertIn('OnUnitActiveSec=1min', content)
         self.assertIn("sys.version_info >= (3, 12)", content)
@@ -4518,7 +4521,7 @@ proxies:
         self.assertIn("python3.12 -m venv .venv", operations)
         self.assertIn("brew install python@3.12 shellcheck actionlint", operations)
         self.assertIn("--require-hashes -r requirements-dev.txt", operations)
-        self.assertIn("git clone --depth 1 --branch v1.2.2", operations)
+        self.assertIn("git clone --depth 1 --branch v1.3.0", operations)
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
@@ -4604,6 +4607,7 @@ proxies:
         self.assertIn("/etc/caddy/anytls-panel.d/", content)
         self.assertIn("removing managed Caddy site", content)
         self.assertIn('"${SERVICE_NAME}-healthcheck.timer"', content)
+        self.assertIn('"${SERVICE_NAME}-backup.timer"', content)
         self.assertIn('"$HEALTHCHECK_SCRIPT"', content)
         self.assertIn('"$CADDY_RESTART_DROPIN"', content)
         self.assertIn(
@@ -4617,8 +4621,8 @@ proxies:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.2.2}"', deploy)
-        self.assertIn("AnyTLS_Panel/v1.2.2/deploy.sh", readme)
+        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.3.0}"', deploy)
+        self.assertIn("AnyTLS_Panel/v1.3.0/deploy.sh", readme)
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)

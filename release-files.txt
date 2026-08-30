@@ -1,5 +1,6 @@
 app.py
 anytls-panel.service
+backup.sh
 CHANGELOG.md
 CONTRIBUTING.md
 CODE_OF_CONDUCT.md
@@ -46,3 +47,4 @@ traffic_token.py
 SUPPORT.md
 uninstall.sh
 release-files.txt
+VERSION

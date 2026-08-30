@@ -16,6 +16,8 @@ class RepositoryQualityTests(unittest.TestCase):
             "SUPPORT.md",
             "LICENSE",
             "CHANGELOG.md",
+            "VERSION",
+            "backup.sh",
             ".editorconfig",
             ".github/pull_request_template.md",
             ".github/workflows/codeql.yml",
@@ -53,7 +55,8 @@ class RepositoryQualityTests(unittest.TestCase):
         markdown_files = [
             path
             for path in REPO_ROOT.rglob("*.md")
-            if ".git" not in path.parts and path.name != "design-qa.md"
+            if not {".git", ".venv", "venv"}.intersection(path.parts)
+            and path.name != "design-qa.md"
         ]
 
         for document in markdown_files:
@@ -101,6 +104,23 @@ class RepositoryQualityTests(unittest.TestCase):
             with self.subTest(document=document):
                 content = (REPO_ROOT / document).read_text(encoding="utf-8")
                 self.assertIn(release, content)
+
+        version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(version, release[1:])
+
+    def test_release_workflow_deploys_before_publishing(self):
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        deploy = workflow.index("Deploy the tagged release to production")
+        smoke = workflow.index("Verify the public production endpoint")
+        publish = workflow.index("Publish the verified release")
+        self.assertLess(deploy, smoke)
+        self.assertLess(smoke, publish)
+        self.assertIn("StrictHostKeyChecking=yes", workflow)
+        self.assertIn("deploy-anytls-panel", workflow)
+        self.assertIn("strict-transport-security", workflow)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@
 
 ![AnyTLS Panel 仪表盘](docs/assets/dashboard.jpg)
 
-> 当前正式版本：`v1.2.2`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
+> 当前正式版本：`v1.3.0`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
 
 ## 你可以用它做什么
 
@@ -21,7 +21,7 @@
 | 节点健康检测 | 检测节点是否在线并记录延迟，同时限制探测目标，避免访问内网敏感服务 |
 | 流量统计 | 显示上传、下载、累计使用量、配额占比和到期状态，可接入节点侧采集脚本 |
 | 安全分享 | 为账号生成独立订阅链接，停用账号后链接立即失效，Token 可随时轮换 |
-| 生产级运维 | 自动配置 Caddy HTTPS、systemd 沙箱、健康检查、数据库迁移、失败回滚和最近两份可用备份 |
+| 生产级运维 | 自动配置 Caddy HTTPS、systemd 沙箱、健康检查、每日数据备份、数据库迁移和失败回滚 |
 
 ## 开始之前
 
@@ -41,7 +41,7 @@
 
 ```bash
 curl -fL \
-  https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh \
+  https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.3.0/deploy.sh \
   -o /tmp/anytls-panel-deploy.sh
 less /tmp/anytls-panel-deploy.sh
 ```
@@ -57,7 +57,7 @@ bash /tmp/anytls-panel-deploy.sh
 如果你已经审查过脚本，也可以使用一行命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.3.0/deploy.sh)
 ```
 
 ### 2. 打开面板
@@ -135,6 +135,10 @@ journalctl -u anytls-panel-healthcheck.service -n 30 --no-pager
 
 # 列出自动保留的可回滚版本
 /opt/anytls-panel/deploy.sh --list-backups
+
+# 创建并验证每日灾难恢复备份
+sudo /opt/anytls-panel/backup.sh
+sudo /opt/anytls-panel/backup.sh --verify latest
 
 # 回滚到最近一份可用备份
 /opt/anytls-panel/deploy.sh --rollback latest
