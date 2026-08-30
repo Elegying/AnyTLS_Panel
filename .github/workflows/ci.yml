@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12"]
+        python-version: ["3.12", "3.13"]
 
     steps:
       - name: Checkout
@@ -29,23 +29,27 @@ jobs:
           python -m pip install --require-hashes -r requirements-dev.txt
 
       - name: Lint
-        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        run: >-
+          flake8 . --count --select=E9,F63,F7,F82,F401,F811
+          --show-source --statistics
 
       - name: Run unit tests with branch coverage
         run: |
           python -m coverage run --branch -m unittest discover -s tests -q
           python -m coverage report \
-            --include='app.py,db_migrations.py,protocol_codecs.py,security_utils.py,sqlite_rate_limit.py,traffic_token.py' \
-            --fail-under=74
+            --include='app.py,database_maintenance.py,db_migrations.py,input_limits.py,node_probe.py,protocol_codecs.py,security_utils.py,sqlite_rate_limit.py,traffic_token.py' \
+            --fail-under=80
 
       - name: Compile app
         run: >-
-          python -m py_compile app.py db_migrations.py protocol_codecs.py
-          security_utils.py sqlite_rate_limit.py traffic_token.py
+          python -m py_compile app.py database_maintenance.py db_migrations.py
+          input_limits.py node_probe.py protocol_codecs.py security_utils.py
+          sqlite_rate_limit.py traffic_token.py
 
       - name: Scan Python security issues
         run: >-
-          python -m bandit -q -ll -r app.py db_migrations.py protocol_codecs.py
+          python -m bandit -q -ll -r app.py database_maintenance.py
+          db_migrations.py input_limits.py node_probe.py protocol_codecs.py
           security_utils.py sqlite_rate_limit.py traffic_token.py
 
       - name: Check shell syntax

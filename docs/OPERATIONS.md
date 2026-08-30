@@ -55,7 +55,7 @@ ANYTLS_PANEL_DOMAIN="panel.example.com" \
 bash deploy.sh
 ```
 
-首次安装时脚本会初始化管理员账号；如果数据库已存在，会保留原有账号，不会用环境变量覆盖。首次密码会保存到面板 `data/.initial_admin_password`，文件仅 root 可读。部署输出默认隐藏密码和流量 API token；如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
+首次安装时脚本会初始化管理员账号；如果数据库已存在，会保留原有账号，不会用环境变量覆盖。首次密码会暂存到面板 `data/.initial_admin_password`，文件仅 root 可读，并在管理员首次修改密码后自动删除。若通过 `ANYTLS_ADMIN_PASSWORD_FILE` 把文件放在受保护的 `/etc/anytls-panel/`，systemd 沙箱不允许应用删除它；首次改密后应由 root 手工删除该自定义文件。部署输出默认隐藏密码和流量 API token；如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
 
 部署目录必须是 `/opt/<专用名称>` 或 `/srv/<专用名称>`，且父目录由 root 所有并不可组/全局写。脚本会拒绝符号链接路径以及没有 AnyTLS 安装标记的非空目录；卸载时也会在停止服务前验证同一标记。代码和每次重建的 venv 由 root 所有且服务只读，数据库、WAL 和运行密钥位于服务可写的 `data/` 子目录。旧版根目录状态会在停服后通过 SQLite backup/安全复制迁入 `data/`。
 
@@ -82,7 +82,9 @@ panel.example.com {
 
 Caddy 常驻服务会在证书到期前自动续签，不使用 cron，也不是自签证书。健康检查会在证书剩余有效期不足 21 天或无法读取证书时写入 `certificate_expiring` 警告。部署脚本强制启用 Secure Cookie 与可信代理处理，并拒绝把 Gunicorn 改为公网监听。若端口 80/443 已被其他服务占用、域名尚未生效或云安全组阻断 ACME 验证，部署会显示 Caddy 日志并失败退出。
 
-HTTP(S) 订阅默认禁止访问内网、回环、链路本地和保留地址。确需拉取可信内网订阅时，可在隔离环境中设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1` 后重新部署；不要在可导入不可信订阅的面板上开启。
+订阅默认只允许 HTTPS，并禁止访问内网、回环、链路本地和保留地址。确需明文 HTTP 时设置 `ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS=1`；确需拉取可信内网订阅时设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。节点检测默认也只连接公网地址，可信隔离网络可通过 `ANYTLS_ALLOW_PRIVATE_NODE_PROBES=1` 放开。三个开关互相独立，取值只能为 `0` 或 `1`；不要在可接收不可信输入的面板上开启例外。
+
+面板默认拒绝超过 4 MiB 的请求体，可用 `ANYTLS_MAX_REQUEST_BYTES` 在 64 KiB 到 16 MiB 之间调整。流量明细默认保留 90 天，可用 `ANYTLS_TRAFFIC_LOG_RETENTION_DAYS` 设置为 1–3650 天；后台按小时检查并清理过期明细，但账号累计流量不会被扣减。修改这些值后需重新运行部署脚本，使 systemd 环境与应用配置保持一致。
 
 ## 节点流量采集
 
@@ -110,7 +112,7 @@ curl --fail http://127.0.0.1:8866/healthz
 curl --fail http://127.0.0.1:8866/readyz
 ```
 
-`/healthz` 只证明应用进程响应；`/readyz` 还检查数据库完整性、迁移版本、可写锁和剩余磁盘空间。两个端点仅允许回环访问。部署脚本会从服务器本机验证证书与登录页；仍建议从独立客户端验证域名、证书、登录和订阅同步，并确认响应包含 HSTS、安全 Cookie 和 CSP 等安全头。`systemctl active` 只能证明进程存活，不能替代真实业务验收。
+`/healthz` 只证明应用进程响应；`/readyz` 还检查数据库完整性、迁移版本、可写锁、数据库/WAL 体积和剩余磁盘空间。两个端点仅允许回环访问。部署脚本会从服务器本机验证证书与登录页；仍建议从独立客户端验证域名、证书、登录和订阅同步，并确认响应包含 HSTS、安全 Cookie 和 CSP 等安全头。`systemctl active` 只能证明进程存活，不能替代真实业务验收。
 
 ## 更新
 
@@ -141,6 +143,17 @@ install -m 600 "$staging_dir/anytls.db" "$backup_dir/anytls.db"
 rm -rf -- "$staging_dir"
 trap - EXIT
 ```
+
+这份备份包含管理员哈希、订阅凭据、公开订阅 token、面板密钥和流量主 Token，不能以明文长期留在同一台服务器。生产环境应使用组织批准的备份系统把整个目录加密后复制到异机/对象存储，并至少保留一份不可变版本；例如已配置 `age` 公钥时可执行：
+
+```bash
+tar -C "$(dirname "$backup_dir")" -czf - "$(basename "$backup_dir")" \
+  | age -r 'age1替换为备份公钥' \
+  > "${backup_dir}.tar.gz.age"
+sha256sum "${backup_dir}.tar.gz.age" > "${backup_dir}.tar.gz.age.sha256"
+```
+
+加密文件和校验文件上传异机后，应删除本机长期明文副本。至少每季度在隔离的 Ubuntu 24.04 主机执行一次恢复演练：校验 SHA-256、解密归档、对数据库运行 `PRAGMA quick_check`，将数据库和三个密钥文件恢复到全新安装的 `data/`，校正为服务用户所有且权限 `600`，启动服务后验证 `/readyz`、管理员登录、订阅输出和账号累计流量。演练记录应包含备份时间、恢复耗时、数据库版本和验证结果。
 
 重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库。脚本先完成源码暂存、带哈希依赖下载和现有数据库副本迁移测试，再停止服务进行短切换；切换后任一步失败都会自动恢复旧代码、数据库、systemd 和 Caddy 配置。成功更新还会在 `/var/backups/<服务名>/` 保留最近两份带 SHA-256 校验的上一版本快照：
 
@@ -198,21 +211,24 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
 .venv/bin/python -m unittest discover -s tests -q
 .venv/bin/python -m coverage run --branch -m unittest discover -s tests -q
-.venv/bin/python -m coverage report --fail-under=74
-.venv/bin/python -m py_compile app.py db_migrations.py protocol_codecs.py \
-  security_utils.py sqlite_rate_limit.py traffic_token.py
-.venv/bin/python -m flake8 app.py db_migrations.py protocol_codecs.py \
+.venv/bin/python -m coverage report --include='app.py,database_maintenance.py,db_migrations.py,input_limits.py,node_probe.py,protocol_codecs.py,security_utils.py,sqlite_rate_limit.py,traffic_token.py' --fail-under=80
+.venv/bin/python -m py_compile app.py database_maintenance.py db_migrations.py \
+  input_limits.py node_probe.py protocol_codecs.py security_utils.py \
+  sqlite_rate_limit.py traffic_token.py
+.venv/bin/python -m flake8 app.py database_maintenance.py db_migrations.py \
+  input_limits.py node_probe.py protocol_codecs.py \
   security_utils.py sqlite_rate_limit.py traffic_token.py tests \
-  --select=E9,F63,F7,F82
+  --select=E9,F63,F7,F82,F401,F811
 bash -n deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh
 shellcheck deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh
 actionlint
-.venv/bin/python -m bandit -q -ll -r app.py db_migrations.py protocol_codecs.py \
+.venv/bin/python -m bandit -q -ll -r app.py database_maintenance.py \
+  db_migrations.py input_limits.py node_probe.py protocol_codecs.py \
   security_utils.py sqlite_rate_limit.py traffic_token.py
 .venv/bin/python -m pip_audit -r requirements.txt
 ```
 
-以上命令固定使用 Python 3.12 和带哈希的开发依赖锁，适用于 macOS 本地质量门禁。GitHub Actions 会在 push 和 pull request 时使用 Python 3.12 运行同等检查，并在干净的 Ubuntu 24.04 runner 上完成旧数据库迁移、真实 systemd 服务、Caddy 配置与 LKG 校验集成测试。
+以上命令固定使用带哈希的开发依赖锁，适用于 macOS 本地质量门禁。GitHub Actions 会在 push 和 pull request 时使用 Python 3.12、3.13 运行同等检查，并在干净的 Ubuntu 24.04 runner 上完成旧数据库迁移、真实 systemd 服务、Caddy 配置与 LKG 校验集成测试。
 
 ## 常见排障
 
@@ -222,4 +238,6 @@ actionlint
 - ACME 证书签发失败：确认 A/AAAA 记录指向当前服务器，Caddy 可以占用 80/443，且这两个端口能从公网访问。
 - 订阅导入失败：先确认订阅内容是否是 Clash YAML、Base64 或支持的单链接格式。
 - 内网订阅被拒绝：这是默认 SSRF 防护；仅在订阅源完全可信且网络隔离时启用 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。
+- HTTP 订阅被拒绝：改用 HTTPS；只有无法升级的可信源才启用 `ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS=1`。
+- 内网节点检测被拒绝：这是节点探测边界；仅在可信隔离网络启用 `ANYTLS_ALLOW_PRIVATE_NODE_PROBES=1`。
 - HTTPS 下反复跳回登录：确认当前 Caddy 站点仍反向代理到面板端口，且 systemd 服务中的 `ANYTLS_TRUST_PROXY=1`、`ANYTLS_SESSION_COOKIE_SECURE=1` 未被手工覆盖。

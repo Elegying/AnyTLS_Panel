@@ -81,7 +81,7 @@ chmod 600 "$DATA_DIR/anytls.db"
         ANYTLS_SECRET_KEY_FILE="$DATA_DIR/.secret_key" \
         ANYTLS_TRAFFIC_API_TOKEN_FILE="$DATA_DIR/.traffic_api_token" \
         ANYTLS_ADMIN_PASSWORD_FILE="$DATA_DIR/.initial_admin_password" \
-        "$PANEL_DIR/venv/bin/python" -c 'import app'
+        "$PANEL_DIR/venv/bin/python" -c 'import app; app.init_db()'
 )
 
 "$PANEL_DIR/venv/bin/python" - "$DATA_DIR/anytls.db" <<'PY'
@@ -90,7 +90,7 @@ import sys
 
 with sqlite3.connect(sys.argv[1]) as db:
     assert db.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
-    assert db.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 2
+    assert db.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 4
     columns = {row[1] for row in db.execute('PRAGMA table_info(accounts)')}
     assert {'sub_token', 'traffic_upload_bytes', 'traffic_download_bytes'} <= columns
 PY

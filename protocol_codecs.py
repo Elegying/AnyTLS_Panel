@@ -10,6 +10,32 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import yaml
 
+from input_limits import MAX_SUBSCRIPTION_TEXT_CHARS
+
+
+_MAX_YAML_NODES = 10_000
+_MAX_YAML_DEPTH = 100
+_MAX_YAML_ALIAS_REFERENCES = 100
+
+
+class _BoundedSafeLoader(yaml.SafeLoader):
+    def __init__(self, stream):
+        super().__init__(stream)
+        self._node_count = 0
+        self._node_depth = 0
+
+    def compose_node(self, parent, index):
+        self._node_count += 1
+        self._node_depth += 1
+        try:
+            if self._node_count > _MAX_YAML_NODES:
+                raise yaml.YAMLError('YAML node limit exceeded')
+            if self._node_depth > _MAX_YAML_DEPTH:
+                raise yaml.YAMLError('YAML nesting limit exceeded')
+            return super().compose_node(parent, index)
+        finally:
+            self._node_depth -= 1
+
 
 def _query_value(params, *names, default=''):
     for name in names:
@@ -284,8 +310,20 @@ def _from_unknown(context):
 
 def parse_clash_yaml(content):
     """Convert all valid Clash proxies using the registered protocol codec."""
+    if not isinstance(content, str) or len(content) > MAX_SUBSCRIPTION_TEXT_CHARS:
+        return []
     try:
-        data = yaml.safe_load(content)
+        alias_count = sum(
+            isinstance(token, yaml.tokens.AliasToken)
+            for token in yaml.scan(content)
+        )
+        if alias_count > _MAX_YAML_ALIAS_REFERENCES:
+            return []
+        loader = _BoundedSafeLoader(content)
+        try:
+            data = loader.get_single_data()
+        finally:
+            loader.dispose()
     except Exception:
         return []
     if not isinstance(data, dict):
