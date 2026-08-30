@@ -16,6 +16,11 @@ security_utils.py
 sqlite_rate_limit.py
 start.sh
 static/favicon.svg
+static/app.css
+static/vendor/LICENSE.bootstrap-icons
+static/vendor/bootstrap-icons.min.css
+static/vendor/fonts/bootstrap-icons.woff
+static/vendor/fonts/bootstrap-icons.woff2
 templates/account_detail.html
 templates/accounts.html
 templates/base.html

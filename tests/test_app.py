@@ -3375,6 +3375,31 @@ proxies:
         self.assertIn("event=push", workflow)
         self.assertIn("status=success", workflow)
 
+    def test_release_manifest_includes_frontend_assets(self):
+        manifest = {
+            line.strip()
+            for line in (REPO_ROOT / "release-files.txt").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        }
+        required_assets = {
+            "static/favicon.svg",
+            "static/app.css",
+            "static/vendor/LICENSE.bootstrap-icons",
+            "static/vendor/bootstrap-icons.min.css",
+            "static/vendor/fonts/bootstrap-icons.woff",
+            "static/vendor/fonts/bootstrap-icons.woff2",
+        }
+
+        self.assertTrue(
+            required_assets <= manifest,
+            msg=f"release manifest is missing: {sorted(required_assets - manifest)}",
+        )
+        for asset in required_assets:
+            with self.subTest(asset=asset):
+                self.assertTrue((REPO_ROOT / asset).is_file())
+
     def test_deploy_stages_source_before_replacing_the_installed_directory(self):
         script = REPO_ROOT / "deploy.sh"
         with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
