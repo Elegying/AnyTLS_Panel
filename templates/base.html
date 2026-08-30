@@ -2,346 +2,194 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0e131d">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap-icons.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
     <title>{% block title %}AnyTLS Panel{% endblock %}</title>
-    <style nonce="{{ g.csp_nonce }}">
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
-            --text: #e4e6f0; --text2: #8b8fa3; --accent: #6c5ce7;
-            --accent2: #a29bfe; --green: #00b894; --red: #ff6b6b;
-            --orange: #fdcb6e; --blue: #74b9ff;
-        }
-        body { font-family: -apple-system, 'Segoe UI', 'PingFang SC', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
-
-        /* ===== Sidebar ===== */
-        .sidebar {
-            position: fixed; left: 0; top: 0; bottom: 0; width: 220px;
-            background: var(--card); border-right: 1px solid var(--border); padding: 20px 0; z-index: 100;
-            transition: transform 0.3s ease;
-            box-shadow: 2px 0 20px rgba(0,0,0,0.4);
-        }
-        .sidebar .logo { text-align: center; padding: 10px 20px 30px; }
-        .sidebar .logo .title { font-size: 22px; font-weight: 700; color: var(--accent2); }
-        .sidebar .logo .sub { color: var(--text2); font-size: 12px; margin-top: 4px; }
-        .sidebar a {
-            display: flex; align-items: center; gap: 10px; padding: 12px 24px;
-            color: var(--text2); text-decoration: none; font-size: 14px;
-            transition: all 0.2s; border-left: 3px solid transparent;
-        }
-        .sidebar a:hover, .sidebar a.active { color: var(--text); background: rgba(108,92,231,0.1); border-left-color: var(--accent); }
-        .sidebar .bottom { position: absolute; bottom: 20px; left: 0; right: 0; }
-        .sidebar-logout-form { margin: 0; }
-        .sidebar-logout-button {
-            display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 24px;
-            color: var(--text2); background: transparent; border: 0; border-left: 3px solid transparent;
-            font: inherit; font-size: 14px; cursor: pointer; text-align: left; transition: all 0.2s;
-        }
-        .sidebar-logout-button:hover { color: var(--text); background: rgba(108,92,231,0.1); border-left-color: var(--accent); }
-
-        .main { margin-left: 220px; padding: 24px 32px; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
-        .header h1 { font-size: 24px; font-weight: 600; }
-
-        /* ===== Mobile hamburger ===== */
-        .mobile-header {
-            display: none; position: fixed; top: 0; left: 0; right: 0; height: 52px;
-            background: var(--card); border-bottom: 1px solid var(--border); z-index: 90;
-            align-items: center; padding: 0 16px; justify-content: space-between;
-            box-shadow: 0 2px 16px rgba(0,0,0,0.4);
-        }
-        .mobile-header .logo-text { font-size: 18px; font-weight: 700; color: var(--accent2); }
-        .hamburger {
-            display: none; background: none; border: none; color: var(--text); font-size: 24px;
-            cursor: pointer; padding: 4px 8px; border-radius: 6px; line-height: 1;
-        }
-        .hamburger:hover { background: rgba(108,92,231,0.15); }
-        .sidebar-overlay {
-            display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
-            z-index: 99; opacity: 0; transition: opacity 0.3s;
-        }
-        .sidebar-overlay.show { display: block; opacity: 1; }
-
-        /* ===== Stats ===== */
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
-        .stat-card {
-            background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-            padding: 20px; transition: transform 0.2s;
-            box-shadow: 0 2px 16px rgba(0,0,0,0.3);
-        }
-        .stat-card:hover { transform: translateY(-2px); }
-        .stat-card .label { font-size: 13px; color: var(--text2); margin-bottom: 8px; }
-        .stat-card .value { font-size: 28px; font-weight: 700; }
-        .stat-card .value.green { color: var(--green); }
-        .stat-card .value.blue { color: var(--blue); }
-        .stat-card .value.orange { color: var(--orange); }
-
-        .card {
-            background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-            padding: 20px; margin-bottom: 20px;
-            box-shadow: 0 2px 20px rgba(0,0,0,0.3);
-        }
-        .card h2 { font-size: 16px; margin-bottom: 16px; color: var(--text2); }
-
-        /* ===== Table ===== */
-        table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        th { text-align: left; padding: 10px 12px; color: var(--text2); border-bottom: 1px solid var(--border); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
-        td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-        tr:hover { background: rgba(108,92,231,0.05); }
-        tr.clickable { cursor: pointer; }
-        tr.clickable:hover { background: rgba(108,92,231,0.1); }
-
-        .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; white-space: nowrap; }
-        .badge-green { background: rgba(0,184,148,0.15); color: var(--green); }
-        .badge-red { background: rgba(255,107,107,0.15); color: var(--red); }
-        .badge-orange { background: rgba(253,203,110,0.15); color: var(--orange); }
-        .badge-blue { background: rgba(116,185,255,0.15); color: var(--blue); }
-
-        .progress { background: var(--border); border-radius: 4px; height: 6px; overflow: hidden; margin-top: 6px; }
-        .progress-bar { height: 100%; border-radius: 4px; transition: width 0.3s; }
-        .progress-bar.green { background: var(--green); }
-        .progress-bar.orange { background: var(--orange); }
-        .progress-bar.red { background: var(--red); }
-
-        .btn {
-            display: inline-flex; align-items: center; gap: 6px;
-            padding: 8px 16px; border-radius: 8px; font-size: 13px;
-            border: none; cursor: pointer; transition: all 0.2s; text-decoration: none;
-            white-space: nowrap;
-        }
-        .btn-primary { background: var(--accent); color: white; }
-        .btn-primary:hover { background: var(--accent2); }
-        .btn-danger { background: rgba(255,107,107,0.15); color: var(--red); }
-        .btn-danger:hover { background: rgba(255,107,107,0.3); }
-        .btn-sm { padding: 5px 10px; font-size: 12px; }
-        .btn-ghost { background: transparent; color: var(--text2); border: 1px solid var(--border); }
-        .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
-        .btn-green { background: rgba(0,184,148,0.15); color: var(--green); }
-        .btn-green:hover { background: rgba(0,184,148,0.3); }
-
-        input, textarea, select {
-            background: var(--bg); border: 1px solid var(--border); color: var(--text);
-            padding: 8px 12px; border-radius: 8px; font-size: 14px; width: 100%;
-            outline: none; transition: border-color 0.2s;
-        }
-        input:focus, textarea:focus, select:focus { border-color: var(--accent); }
-        label { display: block; font-size: 13px; color: var(--text2); margin-bottom: 6px; }
-        .form-group { margin-bottom: 14px; }
-        .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
-
-        .modal-overlay {
-            display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-            z-index: 200; justify-content: center; align-items: center; padding: 16px;
-        }
-        .modal-overlay.show { display: flex; }
-        .modal {
-            background: var(--card); border: 1px solid var(--border); border-radius: 16px;
-            padding: 24px; width: 90%; max-width: 560px; max-height: 85vh; overflow-y: auto;
-            box-shadow: 0 8px 40px rgba(0,0,0,0.6);
-        }
-        .modal h3 { margin-bottom: 16px; }
-        .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; flex-wrap: wrap; }
-
-        .flash { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; box-shadow: 0 2px 10px rgba(0,0,0,0.25); }
-        .flash-success { background: rgba(0,184,148,0.15); color: var(--green); border: 1px solid rgba(0,184,148,0.3); }
-        .flash-error { background: rgba(255,107,107,0.15); color: var(--red); border: 1px solid rgba(255,107,107,0.3); }
-
-        .breadcrumb { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; font-size: 13px; color: var(--text2); }
-        .breadcrumb a { color: var(--accent); text-decoration: none; }
-        .breadcrumb a:hover { text-decoration: underline; }
-        .breadcrumb .sep { color: var(--border); }
-
-        .empty-state { text-align: center; padding: 48px 20px; color: var(--text2); }
-        .empty-state .icon { font-size: 48px; margin-bottom: 16px; }
-        .empty-state p { margin-bottom: 16px; }
-
-        .account-card {
-            background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-            padding: 20px; cursor: pointer; transition: all 0.2s;
-            box-shadow: 0 2px 16px rgba(0,0,0,0.3);
-        }
-        .account-card:hover { border-color: var(--accent); transform: translateY(-2px); }
-        .account-card .name { font-size: 18px; font-weight: 600; margin-bottom: 8px; word-break: break-all; }
-        .account-card .meta { font-size: 13px; color: var(--text2); margin-bottom: 12px; }
-        .account-card .footer { display: flex; justify-content: space-between; align-items: center; }
-
-        .accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
-
-        /* ===== Mobile Responsive ===== */
-        @media (max-width: 768px) {
-            .sidebar {
-                transform: translateX(-100%);
-                width: 260px;
-                box-shadow: 4px 0 24px rgba(0,0,0,0.5);
-            }
-            .sidebar.open { transform: translateX(0); }
-            .mobile-header { display: flex; }
-            .hamburger { display: block; }
-            .main { margin-left: 0; padding: 68px 16px 24px; }
-
-            .header { flex-direction: column; align-items: stretch; }
-            .header h1 { font-size: 20px; }
-            .header > div { display: flex; gap: 8px; flex-wrap: wrap; }
-            .header .btn { flex: 1; justify-content: center; min-width: 0; }
-
-            .stats { grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
-            .stat-card { padding: 14px; border-radius: 10px; }
-            .stat-card .value { font-size: 22px; }
-
-            .card { padding: 14px; margin-bottom: 12px; border-radius: 10px; }
-            .card h2 { font-size: 15px; margin-bottom: 12px; }
-
-            .accounts-grid { grid-template-columns: 1fr; gap: 12px; }
-            .account-card { padding: 16px; border-radius: 10px; }
-            .account-card .name { font-size: 16px; }
-
-            .modal { width: 95%; padding: 20px; border-radius: 14px; max-height: 90vh; }
-            .modal h3 { font-size: 16px; }
-            .modal-actions { flex-direction: column-reverse; }
-            .modal-actions .btn { width: 100%; justify-content: center; padding: 12px; }
-
-            .breadcrumb { font-size: 12px; margin-bottom: 14px; }
-            .detail-header { flex-direction: column; align-items: stretch !important; }
-            .detail-header > div { justify-content: flex-start !important; flex-wrap: wrap; }
-            .detail-header .btn { font-size: 12px; padding: 6px 12px; }
-
-            .flash { font-size: 13px; padding: 10px 14px; }
-            .form-row { grid-template-columns: 1fr; }
-
-            /* ===== Table → Card on mobile ===== */
-            .rwd-table thead { display: none; }
-            .rwd-table, .rwd-table tbody, .rwd-table tr, .rwd-table td {
-                display: block;
-                width: 100% !important;
-            }
-            .rwd-table tr {
-                background: var(--card);
-                border: 1px solid var(--border);
-                border-radius: 10px;
-                padding: 12px 14px;
-                margin-bottom: 10px;
-                box-shadow: 0 2px 12px rgba(0,0,0,0.3);
-            }
-            .rwd-table tr:hover { background: var(--card); border-color: var(--accent); }
-            .rwd-table td {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                padding: 6px 0;
-                border-bottom: 1px solid rgba(42,45,58,0.5);
-                font-size: 13px;
-                gap: 12px;
-            }
-            .rwd-table td:last-child { border-bottom: none; }
-            .rwd-table td[data-label]::before {
-                content: attr(data-label);
-                color: var(--text2);
-                font-size: 12px;
-                font-weight: 500;
-                min-width: 50px;
-                flex-shrink: 0;
-            }
-            .rwd-table td.hide-mobile { display: none !important; }
-            .rwd-table td .m-traffic {
-                display: flex; flex-direction: column; align-items: flex-end; gap: 2px; width: 100%;
-            }
-        }
-
-        @media (max-width: 380px) {
-            .stats { grid-template-columns: 1fr; }
-            .stat-card .value { font-size: 20px; }
-            .header h1 { font-size: 18px; }
-        }
-    </style>
 </head>
 <body>
-    <div class="mobile-header">
-        <button class="hamburger" data-action="toggle-sidebar">☰</button>
-        <span class="logo-text">⚡ AnyTLS</span>
-        <div style="width:32px"></div>
-    </div>
-    <div class="sidebar-overlay" id="sidebarOverlay" data-action="toggle-sidebar"></div>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
 
-    <div class="sidebar" id="sidebar">
-        <div class="logo">
-            <div class="title">⚡ AnyTLS</div>
-            <div class="sub">节点统一管理面板</div>
+    <header class="mobile-header">
+        <button class="icon-button" type="button" data-action="toggle-sidebar" aria-label="打开导航菜单" aria-expanded="false" aria-controls="sidebar">
+            <i class="bi bi-list" aria-hidden="true"></i>
+        </button>
+        <div class="mobile-brand"><i class="bi bi-lightning-charge-fill" aria-hidden="true"></i><span>AnyTLS Panel</span></div>
+        <span class="icon-button" aria-hidden="true" style="visibility:hidden"></span>
+    </header>
+    <div class="sidebar-overlay" id="sidebarOverlay" data-action="toggle-sidebar" aria-hidden="true"></div>
+
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
+        <div class="brand">
+            <span class="brand-mark"><i class="bi bi-lightning-charge-fill" aria-hidden="true"></i></span>
+            <div class="brand-copy">
+                <div class="brand-title">AnyTLS Panel</div>
+                <div class="brand-subtitle">节点统一管理面板</div>
+            </div>
         </div>
-        <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' }}">📊 仪表盘</a>
-        <a href="{{ url_for('accounts_list') }}" class="{{ 'active' if request.endpoint in ['accounts_list', 'account_detail'] }}">👤 账号管理</a>
-        <a href="{{ url_for('nodes_monitor') }}" class="{{ 'active' if request.endpoint == 'nodes_monitor' }}">📡 节点检测</a>
-        <a href="{{ url_for('rename_rules_page') }}" class="{{ 'active' if request.endpoint == 'rename_rules_page' }}">🔄 重命名规则</a>
-        <div class="bottom">
-            <a href="#" data-action="open-modal" data-modal="pwModal">🔑 修改密码</a>
-            <form method="POST" action="{{ url_for('logout') }}" class="sidebar-logout-form">
+        <nav class="sidebar-nav">
+            <a href="{{ url_for('dashboard') }}" class="nav-link {{ 'active' if request.endpoint == 'dashboard' }}" {% if request.endpoint == 'dashboard' %}aria-current="page"{% endif %}>
+                <i class="bi bi-grid-1x2" aria-hidden="true"></i><span>仪表盘</span>
+            </a>
+            <a href="{{ url_for('accounts_list') }}" class="nav-link {{ 'active' if request.endpoint in ['accounts_list', 'account_detail'] }}" {% if request.endpoint in ['accounts_list', 'account_detail'] %}aria-current="page"{% endif %}>
+                <i class="bi bi-people" aria-hidden="true"></i><span>账号</span>
+            </a>
+            <a href="{{ url_for('nodes_monitor') }}" class="nav-link {{ 'active' if request.endpoint == 'nodes_monitor' }}" {% if request.endpoint == 'nodes_monitor' %}aria-current="page"{% endif %}>
+                <i class="bi bi-activity" aria-hidden="true"></i><span>监控</span>
+            </a>
+            <a href="{{ url_for('rename_rules_page') }}" class="nav-link {{ 'active' if request.endpoint == 'rename_rules_page' }}" {% if request.endpoint == 'rename_rules_page' %}aria-current="page"{% endif %}>
+                <i class="bi bi-signpost-split" aria-hidden="true"></i><span>重命名规则</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <button class="sidebar-action" type="button" data-action="open-modal" data-modal="pwModal">
+                <i class="bi bi-key" aria-hidden="true"></i><span>修改密码</span>
+            </button>
+            <form method="POST" action="{{ url_for('logout') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <button type="submit" class="sidebar-logout-button">🚪 退出登录</button>
+                <button type="submit" class="sidebar-action">
+                    <i class="bi bi-box-arrow-right" aria-hidden="true"></i><span>退出登录</span>
+                </button>
             </form>
         </div>
-    </div>
+    </aside>
 
-    <div class="main">
-        {% with messages = get_flashed_messages(with_categories=true) %}
-        {% for category, message in messages %}
-        <div class="flash flash-{{ category }}">{{ message }}</div>
-        {% endfor %}
-        {% endwith %}
-
-        {% block content %}{% endblock %}
-    </div>
-
-    <div class="modal-overlay" id="pwModal">
-        <div class="modal" style="max-width:400px">
-            <h3>🔑 修改密码</h3>
-            <form method="POST" action="{{ url_for('change_password') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <div class="form-group">
-                    <label>原密码</label>
-                    <input type="password" name="old_password" required>
-                </div>
-                <div class="form-group">
-                    <label>新密码</label>
-                    <input type="password" name="new_password" required>
-                </div>
-                <div class="form-group">
-                    <label>确认新密码</label>
-                    <input type="password" name="confirm_password" required>
-                </div>
-                <div class="modal-actions">
-                    <button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="pwModal">取消</button>
-                    <button type="submit" class="btn btn-primary">保存</button>
-                </div>
-            </form>
+    <main class="main" id="main-content" tabindex="-1">
+        <div class="content-shell">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% for category, message in messages %}
+            <div class="flash flash-{{ category }}" role="status">
+                <i class="bi {{ 'bi-check-circle' if category == 'success' else 'bi-exclamation-circle' }}" aria-hidden="true"></i>
+                <span>{{ message }}</span>
+            </div>
+            {% endfor %}
+            {% endwith %}
+            {% block content %}{% endblock %}
         </div>
+    </main>
+
+    <div class="modal-overlay" id="pwModal" aria-hidden="true">
+        <section class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="pwModalTitle">
+            <div class="modal-header">
+                <div>
+                    <h2 class="modal-title" id="pwModalTitle"><i class="bi bi-shield-lock" aria-hidden="true"></i>修改密码</h2>
+                    <p class="modal-description">更新当前管理员的登录凭据。</p>
+                </div>
+                <button type="button" class="icon-button modal-close" data-action="close-modal" data-modal="pwModal" aria-label="关闭修改密码弹窗"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
+            </div>
+            <div class="modal-body">
+                <form method="POST" action="{{ url_for('change_password') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <div class="form-group">
+                        <label for="old-password">原密码</label>
+                        <input id="old-password" type="password" name="old_password" autocomplete="current-password" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="new-password">新密码</label>
+                        <input id="new-password" type="password" name="new_password" autocomplete="new-password" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="confirm-password">确认新密码</label>
+                        <input id="confirm-password" type="password" name="confirm_password" autocomplete="new-password" required>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="pwModal">取消</button>
+                        <button type="submit" class="btn btn-primary"><i class="bi bi-check2" aria-hidden="true"></i>保存密码</button>
+                    </div>
+                </form>
+            </div>
+        </section>
     </div>
 
     <script nonce="{{ g.csp_nonce }}">
         const CSRF_TOKEN = "{{ csrf_token() }}";
+        let lastFocusedElement = null;
+
         function csrfHeaders(extra) {
             return Object.assign({'X-CSRFToken': CSRF_TOKEN}, extra || {});
         }
+
         function toggleSidebar() {
             const sidebar = document.getElementById('sidebar');
             const overlay = document.getElementById('sidebarOverlay');
-            sidebar.classList.toggle('open');
-            overlay.classList.toggle('show');
+            const toggle = document.querySelector('.mobile-header [data-action="toggle-sidebar"]');
+            const isOpen = sidebar.classList.toggle('open');
+            overlay.classList.toggle('show', isOpen);
+            toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+            document.body.style.overflow = isOpen ? 'hidden' : '';
         }
-        document.querySelectorAll('.sidebar a').forEach(a => {
-            a.addEventListener('click', () => {
-                if (window.innerWidth <= 768) {
-                    document.getElementById('sidebar').classList.remove('open');
-                    document.getElementById('sidebarOverlay').classList.remove('show');
-                }
+
+        function openModal(id) {
+            const modal = document.getElementById(id);
+            if (!modal) return;
+            lastFocusedElement = document.activeElement;
+            modal.classList.add('show');
+            modal.setAttribute('aria-hidden', 'false');
+            document.body.style.overflow = 'hidden';
+            const first = modal.querySelector('input:not([type="hidden"]), textarea, select, button');
+            if (first) window.setTimeout(() => first.focus(), 0);
+        }
+
+        function closeModal(id) {
+            const modal = document.getElementById(id);
+            if (!modal) return;
+            modal.classList.remove('show');
+            modal.setAttribute('aria-hidden', 'true');
+            document.body.style.overflow = '';
+            if (lastFocusedElement) lastFocusedElement.focus();
+        }
+
+        function showToast(message, success) {
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+            toast.setAttribute('role', 'status');
+            const icon = document.createElement('i');
+            icon.className = 'bi ' + (success ? 'bi-check-circle' : 'bi-exclamation-circle');
+            icon.style.color = success ? 'var(--green)' : 'var(--red)';
+            const text = document.createElement('span');
+            text.textContent = message;
+            toast.append(icon, text);
+            document.body.appendChild(toast);
+            window.setTimeout(() => toast.remove(), 1800);
+        }
+
+        function copyText(text) {
+            const fallbackCopy = () => {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0';
+                document.body.appendChild(textarea);
+                textarea.select();
+                const copied = document.execCommand('copy');
+                textarea.remove();
+                return copied;
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text)
+                    .then(() => showToast('已复制到剪贴板', true))
+                    .catch(() => {
+                        const copied = fallbackCopy();
+                        showToast(copied ? '已复制到剪贴板' : '复制失败', copied);
+                    });
+            } else {
+                const copied = fallbackCopy();
+                showToast(copied ? '已复制到剪贴板' : '复制失败', copied);
+            }
+        }
+
+        document.querySelectorAll('.sidebar a').forEach(link => {
+            link.addEventListener('click', () => {
+                if (window.innerWidth <= 768 && document.getElementById('sidebar').classList.contains('open')) toggleSidebar();
             });
         });
-        function openModal(id) { document.getElementById(id).classList.add('show'); }
-        function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+
         document.addEventListener('click', event => {
             const target = event.target.closest('[data-action]');
             if (!target) return;
-            event.preventDefault();
             const action = target.dataset.action;
+            if (action !== 'navigate') event.preventDefault();
             if (action === 'toggle-sidebar') toggleSidebar();
             else if (action === 'open-modal') openModal(target.dataset.modal);
             else if (action === 'close-modal') closeModal(target.dataset.modal);
@@ -350,50 +198,37 @@
             else if (action === 'check-all') window.checkAll();
             else if (action === 'open-share') window.openShareModal();
             else if (action === 'copy-value') copyText(target.dataset.copyValue);
-            else if (action === 'copy-input') {
-                copyText(document.getElementById(target.dataset.inputId).value);
-            } else if (action === 'toggle-password') {
-                window.togglePw(Number(target.dataset.nodeId), target.dataset.password);
-            } else if (action === 'check-node') {
-                window.checkNode(Number(target.dataset.nodeId));
-            } else if (action === 'share-node') window.shareNode(target);
+            else if (action === 'copy-input') copyText(document.getElementById(target.dataset.inputId).value);
+            else if (action === 'toggle-password') window.togglePw(Number(target.dataset.nodeId), target.dataset.password, target);
+            else if (action === 'check-node') window.checkNode(Number(target.dataset.nodeId));
+            else if (action === 'share-node') window.shareNode(target);
             else if (action === 'regenerate-token') window.regenerateToken();
-            else if (action === 'delete-account') {
-                if (confirm(target.dataset.confirm)) {
-                    document.getElementById(target.dataset.formId).submit();
-                }
-            } else if (action === 'check-host') {
-                window.checkOne(target.dataset.host, Number(target.dataset.port));
+            else if (action === 'delete-account' && confirm(target.dataset.confirm)) document.getElementById(target.dataset.formId).submit();
+            else if (action === 'check-host') window.checkOne(target.dataset.host, Number(target.dataset.port));
+        });
+
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape') {
+                const open = document.querySelector('.modal-overlay.show');
+                if (open) closeModal(open.id);
+                else if (document.getElementById('sidebar').classList.contains('open')) toggleSidebar();
+            }
+            if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[data-action="navigate"]')) {
+                event.preventDefault();
+                location.href = event.target.dataset.href;
             }
         });
+
         document.addEventListener('submit', event => {
             const message = event.target.dataset.confirm;
             if (message && !confirm(message)) event.preventDefault();
         });
-        document.querySelectorAll('.modal-overlay').forEach(m => {
-            m.addEventListener('click', e => { if (e.target === m) m.classList.remove('show'); });
+
+        document.querySelectorAll('.modal-overlay').forEach(modal => {
+            modal.addEventListener('click', event => {
+                if (event.target === modal) closeModal(modal.id);
+            });
         });
-        function copyText(text) {
-            var ok = false;
-            try {
-                var ta = document.createElement('textarea');
-                ta.value = text;
-                ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0';
-                document.body.appendChild(ta);
-                ta.focus();
-                ta.select();
-                ok = document.execCommand('copy');
-                ta.remove();
-            } catch(e) {}
-            if (!ok && navigator.clipboard) {
-                navigator.clipboard.writeText(text).then(function(){ok=true}).catch(function(){});
-            }
-            var t = document.createElement('div');
-            t.textContent = ok ? '✅ 已复制' : '❌ 复制失败';
-            t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:' + (ok ? '#00b894' : '#ff6b6b') + ';color:#fff;padding:8px 16px;border-radius:8px;z-index:999;font-size:13px;';
-            document.body.appendChild(t);
-            setTimeout(function(){ t.remove(); }, 1500);
-        }
     </script>
 </body>
 </html>

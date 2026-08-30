@@ -1,73 +1,57 @@
 {% extends "base.html" %}
 {% block title %}重命名规则 - AnyTLS Panel{% endblock %}
 {% block content %}
-<div class="header">
-    <h1>🔄 重命名规则</h1>
-</div>
-
-<div class="card" style="margin-bottom:16px">
-    <p style="color:var(--text2);font-size:13px;margin-bottom:12px">
-        分享订阅会原样保留上游节点；重命名规则仅用于订阅显示名称，不会改写节点协议或节点名称。
-    </p>
-</div>
-
-<div class="card">
-    <h2>📋 现有规则</h2>
-    {% if rules %}
-    <table>
-        <thead>
-        <tr>
-            <th>#</th><th>原名称</th><th>新名称</th><th>状态</th><th>操作</th>
-        </tr>
-        </thead>
-        {% for r in rules %}
-        <tr>
-            <td style="color:var(--text2)">{{ loop.index }}</td>
-            <td><code style="background:var(--bg);padding:2px 8px;border-radius:4px">{{ r.old_text }}</code></td>
-            <td><code style="background:rgba(0,184,148,0.1);padding:2px 8px;border-radius:4px;color:var(--green)">{{ r.new_text }}</code></td>
-            <td>
-                {% if r.enabled %}
-                <span class="badge badge-green">启用</span>
-                {% else %}
-                <span class="badge" style="background:rgba(139,143,163,0.15);color:var(--text2)">禁用</span>
-                {% endif %}
-            </td>
-            <td>
-                <div style="display:flex;gap:6px">
-                    <form method="POST" action="{{ url_for('rename_rule_toggle', rule_id=r.id) }}" style="display:inline">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <button class="btn btn-sm btn-ghost" type="submit">{{ '禁用' if r.enabled else '启用' }}</button>
-                    </form>
-                    <form method="POST" action="{{ url_for('rename_rule_delete', rule_id=r.id) }}" style="display:inline" data-confirm="确认删除？">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <button class="btn btn-sm btn-danger" type="submit">删除</button>
-                    </form>
-                </div>
-            </td>
-        </tr>
-        {% endfor %}
-    </table>
-    {% else %}
-    <div class="empty-state" style="padding:24px">
-        <p>暂无规则，请添加</p>
+<header class="page-header">
+    <div class="page-heading">
+        <p class="eyebrow">显示设置</p>
+        <h1 class="page-title">重命名规则</h1>
+        <p class="page-description">统一替换订阅显示名称，保持节点协议、连接地址和上游名称不变。</p>
     </div>
-    {% endif %}
+</header>
+
+<div class="info-banner" role="note">
+    <i class="bi bi-info-circle" aria-hidden="true"></i>
+    <div><strong>规则只影响订阅显示名称</strong>分享订阅仍会原样保留已同步的真实节点，不会改写协议或连接信息。</div>
 </div>
 
-<div class="card">
-    <h2>➕ 添加规则</h2>
-    <form method="POST" action="{{ url_for('rename_rule_add') }}" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <div class="form-group" style="flex:1;min-width:150px;margin-bottom:0">
-            <label>原名称（如 NTHU.CC）</label>
-            <input name="old_text" placeholder="NTHU.CC" required>
+<div class="rules-layout">
+    <section class="panel">
+        <header class="panel-header"><h2 class="panel-title"><i class="bi bi-list-check" aria-hidden="true"></i>现有规则</h2><span class="panel-meta">{{ rules | length }} 条</span></header>
+        {% if rules %}
+        <div class="table-scroll">
+            <table class="rwd-table">
+                <thead><tr><th>#</th><th>原名称</th><th>新名称</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody>
+                {% for r in rules %}
+                <tr>
+                    <td data-label="#"><span class="cell-subtitle">{{ loop.index }}</span></td>
+                    <td data-label="原名称"><code class="code-value">{{ r.old_text }}</code></td>
+                    <td data-label="新名称"><code class="code-value" style="color:var(--green)">{{ r.new_text or '移除' }}</code></td>
+                    <td data-label="状态"><span class="badge {{ 'badge-green' if r.enabled else 'badge-neutral' }}">{{ '启用' if r.enabled else '禁用' }}</span></td>
+                    <td data-label="操作"><div class="cell-actions"><form method="POST" action="{{ url_for('rename_rule_toggle', rule_id=r.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-ghost" type="submit">{{ '禁用' if r.enabled else '启用' }}</button></form><form method="POST" action="{{ url_for('rename_rule_delete', rule_id=r.id) }}" data-confirm="确认删除规则 {{ r.old_text | e }}？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-danger" type="submit">删除</button></form></div></td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
         </div>
-        <div style="color:var(--text2);font-size:20px;padding-bottom:8px">→</div>
-        <div class="form-group" style="flex:1;min-width:150px;margin-bottom:0">
-            <label>新名称（如 SSRVPN.VIP）</label>
-            <input name="new_text" placeholder="SSRVPN.VIP">
+        {% else %}
+        <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-signpost-split" aria-hidden="true"></i></span><h3>暂无重命名规则</h3><p>添加规则后，匹配到的显示名称会自动替换。</p></div></div>
+        {% endif %}
+    </section>
+
+    <section class="panel">
+        <header class="panel-header"><h2 class="panel-title"><i class="bi bi-plus-circle" aria-hidden="true"></i>添加规则</h2></header>
+        <div class="panel-body">
+            <form method="POST" action="{{ url_for('rename_rule_add') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="rule-preview">
+                    <div class="form-group"><label for="old-text">查找名称</label><input id="old-text" name="old_text" placeholder="例如：HK-" required></div>
+                    <div class="rule-arrow"><i class="bi bi-arrow-right" aria-hidden="true"></i></div>
+                    <div class="form-group"><label for="new-text">替换为</label><input id="new-text" name="new_text" placeholder="例如：香港-"><p class="field-help">留空表示移除匹配文本。</p></div>
+                </div>
+                <button class="btn btn-primary" type="submit"><i class="bi bi-plus-lg" aria-hidden="true"></i>添加规则</button>
+            </form>
         </div>
-        <button class="btn btn-primary" type="submit" style="margin-bottom:0">添加</button>
-    </form>
+    </section>
 </div>
 {% endblock %}

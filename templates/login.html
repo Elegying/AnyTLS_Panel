@@ -2,72 +2,55 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0e131d">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap-icons.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+    <style nonce="{{ g.csp_nonce }}">/* CSP nonce marker for defense-in-depth policy verification. */</style>
     <title>登录 - AnyTLS Panel</title>
-    <style nonce="{{ g.csp_nonce }}">
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, 'Segoe UI', 'PingFang SC', sans-serif;
-            background: #0f1117; color: #e4e6f0;
-            min-height: 100vh; min-height: 100dvh;
-            display: flex; justify-content: center; align-items: center;
-            padding: 20px;
-        }
-        .login-box {
-            background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 16px;
-            padding: 36px 28px; width: 100%; max-width: 380px; text-align: center;
-        }
-        .login-box h1 { font-size: 24px; margin-bottom: 6px; color: #a29bfe; }
-        .login-box .sub { color: #8b8fa3; font-size: 13px; margin-bottom: 28px; }
-        .form-group { margin-bottom: 16px; text-align: left; }
-        label { display: block; font-size: 13px; color: #8b8fa3; margin-bottom: 6px; }
-        input {
-            width: 100%; padding: 12px 14px; background: #0f1117; border: 1px solid #2a2d3a;
-            color: #e4e6f0; border-radius: 8px; font-size: 15px; outline: none;
-            -webkit-appearance: none;
-        }
-        input:focus { border-color: #6c5ce7; }
-        .btn {
-            width: 100%; padding: 13px; background: #6c5ce7; color: white;
-            border: none; border-radius: 8px; font-size: 16px; cursor: pointer;
-            margin-top: 10px; -webkit-tap-highlight-color: transparent;
-        }
-        .btn:hover { background: #a29bfe; }
-        .btn:active { transform: scale(0.98); }
-        .flash {
-            padding: 10px 12px; border-radius: 8px; margin-bottom: 16px;
-            font-size: 13px; background: rgba(255,107,107,0.15); color: #ff6b6b;
-        }
-        @media (max-width: 380px) {
-            .login-box { padding: 28px 20px; }
-            .login-box h1 { font-size: 22px; }
-        }
-    </style>
 </head>
 <body>
-    <div class="login-box">
-        <h1>🔐 AnyTLS</h1>
-        <p class="sub">节点统一管理面板</p>
-
-        {% with messages = get_flashed_messages(with_categories=true) %}
-        {% for category, message in messages %}
-        <div class="flash">{{ message }}</div>
-        {% endfor %}
-        {% endwith %}
-
-        <form method="POST" action="{{ url_for('login') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <div class="form-group">
-                <label>用户名</label>
-                <input type="text" name="username" placeholder="admin" autofocus required>
+    <main class="login-page">
+        <section class="login-shell" aria-labelledby="login-title">
+            <div class="login-context">
+                <div class="login-brand">
+                    <span class="brand-mark"><i class="bi bi-lightning-charge-fill" aria-hidden="true"></i></span>
+                    <div><div class="brand-title">AnyTLS Panel</div><div class="brand-subtitle">节点统一管理面板</div></div>
+                </div>
+                <div class="login-copy">
+                    <h1>让账号、节点与流量状态始终清晰可见。</h1>
+                    <p>登录安全控制台，集中管理订阅同步、节点健康检测与访问分享。</p>
+                    <ul class="trust-list">
+                        <li><i class="bi bi-check-circle-fill" aria-hidden="true"></i>敏感操作受 CSRF 与权限校验保护</li>
+                        <li><i class="bi bi-check-circle-fill" aria-hidden="true"></i>订阅密钥默认隐藏，按需查看与复制</li>
+                        <li><i class="bi bi-check-circle-fill" aria-hidden="true"></i>统一监控节点在线性与连接延迟</li>
+                    </ul>
+                </div>
+                <div class="login-version">ANYTLS OPERATIONS CONSOLE</div>
             </div>
-            <div class="form-group">
-                <label>密码</label>
-                <input type="password" name="password" placeholder="••••••••" required>
+            <div class="login-form-pane">
+                <h2 id="login-title">欢迎回来</h2>
+                <p>使用管理员账号继续访问控制台。</p>
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% for category, message in messages %}
+                <div class="flash flash-error" role="alert"><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span>{{ message }}</span></div>
+                {% endfor %}
+                {% endwith %}
+                <form method="POST" action="{{ url_for('login') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <div class="form-group">
+                        <label for="username">用户名</label>
+                        <input id="username" type="text" name="username" placeholder="输入管理员用户名" autocomplete="username" autofocus required>
+                    </div>
+                    <div class="form-group">
+                        <label for="password">密码</label>
+                        <input id="password" type="password" name="password" placeholder="输入登录密码" autocomplete="current-password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-box-arrow-in-right" aria-hidden="true"></i>登录控制台</button>
+                </form>
             </div>
-            <button type="submit" class="btn">登 录</button>
-        </form>
-    </div>
+        </section>
+    </main>
 </body>
 </html>

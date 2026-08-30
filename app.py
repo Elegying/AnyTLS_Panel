@@ -1098,12 +1098,35 @@ def dashboard():
     total_nodes = sum(a['node_count'] or 0 for a in accounts)
     total_traffic_used = sum(a['traffic_used_bytes'] or 0 for a in accounts)
     total_traffic_limit = sum((a['traffic_limit_gb'] or 0) * 1024**3 for a in accounts)
+    node_health = db.execute('''
+        SELECT
+            SUM(CASE WHEN is_online = 1 THEN 1 ELSE 0 END) AS online_nodes,
+            SUM(CASE WHEN is_online = 0 THEN 1 ELSE 0 END) AS offline_nodes,
+            SUM(CASE WHEN is_online NOT IN (0, 1) OR is_online IS NULL THEN 1 ELSE 0 END) AS unknown_nodes
+        FROM nodes
+    ''').fetchone()
+    online_nodes = int(node_health['online_nodes'] or 0)
+    offline_nodes = int(node_health['offline_nodes'] or 0)
+    unknown_nodes = int(node_health['unknown_nodes'] or 0)
+    last_synced_at = max(
+        (a['last_synced_at'] for a in accounts if a['last_synced_at']),
+        default=None,
+    )
 
     warning_accounts = []
     for a in accounts:
         pct = calc_traffic_percent(a['traffic_used_bytes'] or 0, a['traffic_limit_gb'] or 250)
         if pct >= 80:
             warning_accounts.append({**dict(a), 'usage_pct': pct})
+    attention_nodes = db.execute('''
+        SELECT id, account_id, name, host, port, is_online, last_checked_at
+        FROM nodes
+        WHERE is_online != 1 OR is_online IS NULL
+        ORDER BY CASE WHEN is_online = 0 THEN 0 ELSE 1 END,
+                 last_checked_at DESC,
+                 id DESC
+        LIMIT 3
+    ''').fetchall()
 
     return render_template('dashboard.html',
         accounts=accounts,
@@ -1113,6 +1136,12 @@ def dashboard():
         total_traffic_used=total_traffic_used,
         total_traffic_limit=total_traffic_limit,
         warning_accounts=warning_accounts,
+        attention_nodes=attention_nodes,
+        attention_total=len(warning_accounts) + offline_nodes + unknown_nodes,
+        online_nodes=online_nodes,
+        offline_nodes=offline_nodes,
+        unknown_nodes=unknown_nodes,
+        last_synced_at=last_synced_at,
     )
 
 # ─── 账号管理 ──────────────────────────────────────────────
