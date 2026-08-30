@@ -2,6 +2,9 @@ app.py
 anytls-panel.service
 CHANGELOG.md
 db_migrations.py
+database_maintenance.py
+input_limits.py
+node_probe.py
 deploy.sh
 docs/OPERATIONS.md
 LICENSE

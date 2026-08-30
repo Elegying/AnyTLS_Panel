@@ -14,6 +14,10 @@ BIND_HOST="${ANYTLS_BIND_HOST:-127.0.0.1}"
 SESSION_COOKIE_SECURE="${ANYTLS_SESSION_COOKIE_SECURE:-1}"
 TRUST_PROXY="${ANYTLS_TRUST_PROXY:-1}"
 ALLOW_PRIVATE_SUBSCRIPTIONS="${ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS:-0}"
+ALLOW_HTTP_SUBSCRIPTIONS="${ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS:-0}"
+ALLOW_PRIVATE_NODE_PROBES="${ANYTLS_ALLOW_PRIVATE_NODE_PROBES:-0}"
+TRAFFIC_LOG_RETENTION_DAYS="${ANYTLS_TRAFFIC_LOG_RETENTION_DAYS:-90}"
+MAX_REQUEST_BYTES="${ANYTLS_MAX_REQUEST_BYTES:-4194304}"
 PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
 REPO_REF="${ANYTLS_REPO_REF:-v1.2.2}"
@@ -346,7 +350,9 @@ validate_configuration() {
     if ! [[ "$BIND_HOST" =~ ^[0-9a-fA-F:.]+$ ]]; then
         fail "invalid bind host: $BIND_HOST"
     fi
-    for flag_value in "$SESSION_COOKIE_SECURE" "$TRUST_PROXY" "$ALLOW_PRIVATE_SUBSCRIPTIONS"; do
+    for flag_value in "$SESSION_COOKIE_SECURE" "$TRUST_PROXY" \
+        "$ALLOW_PRIVATE_SUBSCRIPTIONS" "$ALLOW_HTTP_SUBSCRIPTIONS" \
+        "$ALLOW_PRIVATE_NODE_PROBES"; do
         if ! [[ "$flag_value" =~ ^[01]$ ]]; then
             fail "security flags must be 0 or 1"
         fi
@@ -356,6 +362,14 @@ validate_configuration() {
     fi
     if [[ "$SESSION_COOKIE_SECURE" != "1" || "$TRUST_PROXY" != "1" ]]; then
         fail "automatic HTTPS requires secure cookies and trusted proxy handling"
+    fi
+    if ! [[ "$TRAFFIC_LOG_RETENTION_DAYS" =~ ^[0-9]+$ ]] || \
+       (( TRAFFIC_LOG_RETENTION_DAYS < 1 || TRAFFIC_LOG_RETENTION_DAYS > 3650 )); then
+        fail "ANYTLS_TRAFFIC_LOG_RETENTION_DAYS must be between 1 and 3650"
+    fi
+    if ! [[ "$MAX_REQUEST_BYTES" =~ ^[0-9]+$ ]] || \
+       (( MAX_REQUEST_BYTES < 65536 || MAX_REQUEST_BYTES > 16777216 )); then
+        fail "ANYTLS_MAX_REQUEST_BYTES must be between 65536 and 16777216"
     fi
     HEALTHCHECK_SCRIPT="/usr/local/sbin/${SERVICE_NAME}-healthcheck"
     HEALTHCHECK_SERVICE="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-healthcheck.service"
@@ -1152,7 +1166,10 @@ prepare_release_source() {
         copy_release_files "$source_dir" "$RELEASE_SOURCE"
     fi
 
-    for required_file in app.py security_utils.py traffic_token.py requirements.txt; do
+    for required_file in \
+        app.py database_maintenance.py db_migrations.py input_limits.py \
+        node_probe.py protocol_codecs.py security_utils.py sqlite_rate_limit.py \
+        traffic_token.py requirements.txt; do
         [[ -f "$RELEASE_SOURCE/$required_file" ]] || \
             fail "staged project is missing $required_file"
     done
@@ -1397,7 +1414,7 @@ Type=simple
 User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
 WorkingDirectory=${PANEL_DIR}
-ExecStart=${PANEL_DIR}/venv/bin/gunicorn --workers 1 --threads 4 --no-control-socket --bind ${BIND_HOST}:${PORT} --timeout 120 app:app
+ExecStart=${PANEL_DIR}/venv/bin/gunicorn --workers 1 --threads 4 --no-control-socket --bind ${BIND_HOST}:${PORT} --timeout 120 app:create_app()
 Restart=always
 RestartSec=5
 UMask=0077
@@ -1429,6 +1446,10 @@ Environment=ANYTLS_TRAFFIC_API_TOKEN_FILE=${TRAFFIC_API_TOKEN_FILE}
 Environment=ANYTLS_SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE}
 Environment=ANYTLS_TRUST_PROXY=${TRUST_PROXY}
 Environment=ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=${ALLOW_PRIVATE_SUBSCRIPTIONS}
+Environment=ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS=${ALLOW_HTTP_SUBSCRIPTIONS}
+Environment=ANYTLS_ALLOW_PRIVATE_NODE_PROBES=${ALLOW_PRIVATE_NODE_PROBES}
+Environment=ANYTLS_TRAFFIC_LOG_RETENTION_DAYS=${TRAFFIC_LOG_RETENTION_DAYS}
+Environment=ANYTLS_MAX_REQUEST_BYTES=${MAX_REQUEST_BYTES}
 
 [Install]
 WantedBy=multi-user.target

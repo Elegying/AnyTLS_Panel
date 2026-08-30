@@ -13,7 +13,6 @@ import hmac
 import math
 import ipaddress
 import logging
-import shutil
 import socket
 import ssl
 import http.client
@@ -22,7 +21,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import wraps
-from urllib.parse import quote, urlencode, urljoin, urlparse, parse_qs, unquote
+from urllib.parse import urljoin, urlparse
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +34,23 @@ from flask_wtf.csrf import CSRFProtect
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from db_migrations import SCHEMA_VERSION, apply_schema_migrations
+from database_maintenance import (
+    checkpoint_database,
+    database_metrics,
+    prune_traffic_logs,
+)
+from input_limits import (
+    DEFAULT_MAX_REQUEST_BYTES,
+    MAX_HOST_CHARS,
+    MAX_NAME_CHARS,
+    MAX_NOTES_CHARS,
+    MAX_RENAME_TEXT_CHARS,
+    MAX_SUBSCRIPTION_TEXT_CHARS,
+    MAX_TRAFFIC_BATCH_ITEMS,
+    SQLITE_INTEGER_MAX,
+    bounded_env_int,
+    validate_text,
+)
 from protocol_codecs import (
     clash_proxy_from_uri as _clash_proxy_from_uri,
     parse_clash_yaml as _parse_clash_yaml,
@@ -43,6 +59,7 @@ from protocol_codecs import (
 from security_utils import hash_password, verify_password
 from sqlite_rate_limit import enforce_rate_limit, rate_limit
 from traffic_token import make_account_traffic_token
+from node_probe import check_node_connect
 
 
 def _env_flag(name, default=False):
@@ -70,7 +87,15 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = _env_flag('ANYTLS_SESSION_COOKIE_SECURE')
 app.config['PERMANENT_SESSION_LIFETIME'] = 86400  # 24小时
+app.config['SESSION_REFRESH_EACH_REQUEST'] = False
 app.config['WTF_CSRF_TIME_LIMIT'] = 3600  # CSRF token 1小时有效
+app.config['MAX_CONTENT_LENGTH'] = bounded_env_int(
+    'ANYTLS_MAX_REQUEST_BYTES',
+    DEFAULT_MAX_REQUEST_BYTES,
+    64 * 1024,
+    16 * 1024 * 1024,
+)
+app.config['MAX_FORM_MEMORY_SIZE'] = app.config['MAX_CONTENT_LENGTH']
 
 if _env_flag('ANYTLS_TRUST_PROXY'):
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
@@ -138,7 +163,17 @@ def add_security_headers(response):
     if request.is_secure:
         response.headers['Strict-Transport-Security'] = 'max-age=31536000'
     response.headers['X-Request-ID'] = getattr(g, 'request_id', secrets.token_hex(16))
+    if request.endpoint != 'static':
+        response.headers['Cache-Control'] = 'no-store'
     return response
+
+
+@app.errorhandler(413)
+def request_too_large(_error):
+    audit_event('request.rejected', 'failure', reason='payload_too_large')
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'request payload is too large'}), 413
+    return '请求内容过大', 413
 
 
 def _read_or_create_private_file(path, value_factory, trailing_newline=False):
@@ -232,19 +267,23 @@ def readyz():
         version_row = db.execute(
             'SELECT MAX(version) FROM schema_migrations'
         ).fetchone()
-        free_bytes = shutil.disk_usage(Path(app.config['DATABASE']).parent).free
+        metrics = database_metrics(app.config['DATABASE'])
         if (
             not result
             or result[0] != 'ok'
             or version_row[0] != SCHEMA_VERSION
-            or free_bytes < _READINESS_MIN_FREE_BYTES
+            or metrics['free_bytes'] < _READINESS_MIN_FREE_BYTES
         ):
             raise sqlite3.DatabaseError('database readiness check failed')
         db.execute('BEGIN IMMEDIATE')
         db.rollback()
-    except sqlite3.Error:
+    except (sqlite3.Error, OSError):
         return jsonify({'status': 'unavailable'}), 503
-    return jsonify({'status': 'ok', 'schema_version': SCHEMA_VERSION})
+    return jsonify({
+        'status': 'ok',
+        'schema_version': SCHEMA_VERSION,
+        **metrics,
+    })
 
 
 def get_initial_admin_credentials():
@@ -257,11 +296,11 @@ def get_initial_admin_credentials():
         os.environ.get('ANYTLS_ADMIN_PASSWORD_FILE')
         or Path(app.config['DATABASE']).with_name('.initial_admin_password')
     )
+    app.config['INITIAL_ADMIN_PASSWORD_FILE'] = str(password_file)
     try:
         if password_file.exists():
             password = password_file.read_text(encoding='utf-8').strip()
             if password:
-                app.config['INITIAL_ADMIN_PASSWORD_FILE'] = str(password_file)
                 return admin_user, password, str(password_file)
 
         alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
@@ -270,7 +309,6 @@ def get_initial_admin_credentials():
             lambda: ''.join(secrets.choice(alphabet) for _ in range(18)),
             trailing_newline=True,
         )
-        app.config['INITIAL_ADMIN_PASSWORD_FILE'] = str(password_file)
         return admin_user, password, str(password_file)
     except OSError:
         password = secrets.token_urlsafe(18)
@@ -338,7 +376,7 @@ def _validate_traffic_api_token(supplied, master_token):
 def _payload_matches_traffic_scope(account_id):
     payload = request.get_json(silent=True)
     items = payload if isinstance(payload, list) else [payload]
-    if not items:
+    if not items or len(items) > MAX_TRAFFIC_BATCH_ITEMS:
         return False
     for item in items:
         if not isinstance(item, dict):
@@ -430,6 +468,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
+            session_version INTEGER NOT NULL DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -457,6 +496,8 @@ def init_db():
     db.commit()
 
     apply_schema_migrations(db)
+    prune_traffic_logs(db)
+    checkpoint_database(db)
 
     db.close()
     try:
@@ -542,6 +583,8 @@ def _resolve_public_subscription_url(raw_url, deadline=None):
         port = parsed.port or (443 if parsed.scheme == 'https' else 80)
     except (TypeError, ValueError):
         raise ValueError("订阅地址必须是有效的 HTTP(S) URL") from None
+    if parsed.scheme == 'http' and not _env_flag('ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS'):
+        raise ValueError('默认只允许 HTTPS 上游订阅')
 
     addresses = _resolve_subscription_addresses(
         parsed.hostname,
@@ -903,6 +946,8 @@ def parse_nonnegative_float(value, field_name):
         raise ValueError(f"{field_name}必须是有效数字")
     if not math.isfinite(parsed) or parsed < 0:
         raise ValueError(f"{field_name}不能为负数")
+    if parsed > SQLITE_INTEGER_MAX:
+        raise ValueError(f"{field_name}数值过大")
     return parsed
 
 
@@ -917,6 +962,8 @@ def parse_nonnegative_int(value, field_name):
         raise ValueError(f"{field_name}必须是非负整数")
     if parsed < 0:
         raise ValueError(f"{field_name}不能为负数")
+    if parsed > SQLITE_INTEGER_MAX:
+        raise ValueError(f"{field_name}数值过大")
     return parsed
 
 
@@ -939,6 +986,22 @@ def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not session.get('logged_in'):
+            return redirect(url_for('login'))
+        user_id = session.get('admin_user_id')
+        session_version = session.get('session_version')
+        if not isinstance(user_id, int) or not isinstance(session_version, int):
+            session.clear()
+            return redirect(url_for('login'))
+        user = get_db().execute(
+            'SELECT username, session_version FROM admin_users WHERE id=?',
+            (user_id,),
+        ).fetchone()
+        if (
+            not user
+            or user['username'] != session.get('username')
+            or user['session_version'] != session_version
+        ):
+            session.clear()
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated
@@ -977,8 +1040,17 @@ def inject_utils():
 )
 def login():
     if request.method == 'POST':
-        username = request.form.get('username', '')
-        password = request.form.get('password', '')
+        try:
+            username = validate_text(
+                request.form.get('username', ''), '用户名', MAX_NAME_CHARS, required=True
+            )
+            password = validate_text(
+                request.form.get('password', ''), '密码', 128, required=True
+            )
+        except ValueError:
+            audit_event('auth.login', 'failure', reason='invalid_input')
+            flash('用户名或密码错误', 'error')
+            return render_template('login.html')
         db = get_db()
         user = db.execute(
             'SELECT * FROM admin_users WHERE username=?', (username,)
@@ -993,17 +1065,24 @@ def login():
                     (hash_password(password), user['id'])
                 )
                 db.commit()
+            session.clear()
+            session.permanent = True
             session['logged_in'] = True
             session['username'] = username
+            session['admin_user_id'] = user['id']
+            session['session_version'] = user['session_version']
             audit_event('auth.login', 'success', username=username)
             return redirect(url_for('dashboard'))
         audit_event('auth.login', 'failure', username=username)
         flash('用户名或密码错误', 'error')
     return render_template('login.html')
 
-@app.route('/logout')
+@app.route('/logout', methods=['POST'])
+@login_required
 def logout():
+    username = session.get('username', '')
     session.clear()
+    audit_event('auth.logout', 'success', username=username)
     return redirect(url_for('login'))
 
 # ─── 仪表盘 ──────────────────────────────────────────────
@@ -1048,14 +1127,19 @@ def accounts_list():
 @app.route('/accounts/add', methods=['POST'])
 @login_required
 def account_add():
-    name = request.form.get('name', '').strip()
-    subscribe_url = request.form.get('subscribe_url', '').strip()
-    traffic_limit = request.form.get('traffic_limit_gb', '250').strip()
-    notes = request.form.get('notes', '').strip()
-
-    if not subscribe_url:
-        flash('请输入订阅链接', 'error')
+    try:
+        name = validate_text(request.form.get('name', ''), '账号名称', MAX_NAME_CHARS)
+        subscribe_url = validate_text(
+            request.form.get('subscribe_url', ''),
+            '订阅内容',
+            MAX_SUBSCRIPTION_TEXT_CHARS,
+            required=True,
+        )
+        notes = validate_text(request.form.get('notes', ''), '备注', MAX_NOTES_CHARS)
+    except ValueError as e:
+        flash(str(e), 'error')
         return redirect(url_for('accounts_list'))
+    traffic_limit = request.form.get('traffic_limit_gb', '250').strip()
 
     try:
         nodes, traffic_info = parse_subscribe_url(subscribe_url)
@@ -1147,9 +1231,12 @@ def account_detail(account_id):
 @app.route('/accounts/<int:account_id>/rename', methods=['POST'])
 @login_required
 def account_rename(account_id):
-    new_name = request.form.get('name', '').strip()
-    if not new_name:
-        flash('名称不能为空', 'error')
+    try:
+        new_name = validate_text(
+            request.form.get('name', ''), '名称', MAX_NAME_CHARS, required=True
+        )
+    except ValueError as e:
+        flash(str(e), 'error')
         return redirect(url_for('account_detail', account_id=account_id))
 
     db = get_db()
@@ -1165,10 +1252,22 @@ def account_rename(account_id):
 @app.route('/accounts/<int:account_id>/edit', methods=['POST'])
 @login_required
 def account_edit(account_id):
-    subscribe_url = request.form.get('subscribe_url', '').strip()
+    try:
+        subscribe_url = validate_text(
+            request.form.get('subscribe_url', ''),
+            '订阅内容',
+            MAX_SUBSCRIPTION_TEXT_CHARS,
+            required=True,
+        )
+        notes = validate_text(request.form.get('notes', ''), '备注', MAX_NOTES_CHARS)
+    except ValueError as e:
+        flash(str(e), 'error')
+        return redirect(url_for('account_detail', account_id=account_id))
     traffic_limit = request.form.get('traffic_limit_gb', '250').strip()
-    notes = request.form.get('notes', '').strip()
     status = request.form.get('status', 'active')
+    if status not in {'active', 'suspended', 'disabled'}:
+        flash('账号状态无效', 'error')
+        return redirect(url_for('account_detail', account_id=account_id))
 
     try:
         traffic_limit = parse_nonnegative_float(traffic_limit, '流量限制')
@@ -1375,8 +1474,13 @@ def api_report_traffic():
         data = [data]
     elif not isinstance(data, list):
         return jsonify({"error": "Invalid JSON"}), 400
+    if len(data) > MAX_TRAFFIC_BATCH_ITEMS:
+        return jsonify({
+            "error": f"traffic batch may contain at most {MAX_TRAFFIC_BATCH_ITEMS} items"
+        }), 413
 
     db = get_db()
+    prune_traffic_logs(db)
     results = []
     for item in data:
         if not isinstance(item, dict):
@@ -1544,7 +1648,10 @@ def api_check_by_host():
     if not data or not data.get('host') or not data.get('port'):
         return jsonify({"error": "missing host/port"}), 400
 
-    host = data['host']
+    try:
+        host = validate_text(data['host'], 'host', MAX_HOST_CHARS, required=True)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     try:
         port = parse_nonnegative_int(data['port'], 'port')
     except ValueError as e:
@@ -1569,8 +1676,6 @@ def api_check_by_host():
 @app.route('/api/nodes/<int:node_id>/check', methods=['POST'])
 @login_required
 def api_check_node(node_id):
-    import socket
-    import ssl
     db = get_db()
     node = db.execute('SELECT * FROM nodes WHERE id=?', (node_id,)).fetchone()
     if not node:
@@ -1651,37 +1756,14 @@ def _bounded_parallel_map(function, items, max_workers=8):
         return list(executor.map(function, items))
 
 def _check_node_connect(host, port, timeout=8):
-    """通过 TLS CONNECT 检测节点可用性，返回延迟"""
-    import socket
-    import ssl
-    import time
-    sock = None
-    start = time.time()
-    try:
-        sock = socket.create_connection((host, port), timeout=timeout)
-        # 尝试 TLS 握手
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        tls_sock = ctx.wrap_socket(sock, server_hostname=host)
-        tls_sock.close()
-        latency = int((time.time() - start) * 1000)
-        return {"online": True, "status": "online", "msg": "TLS 连接成功", "latency": latency}
-    except ssl.SSLError:
-        latency = int((time.time() - start) * 1000)
-        return {"online": True, "status": "online", "msg": "TCP 连接成功 (TLS 异常)", "latency": latency}
-    except socket.timeout:
-        return {"online": False, "status": "offline", "msg": "连接超时", "latency": -1}
-    except ConnectionRefusedError:
-        return {"online": False, "status": "offline", "msg": "连接被拒绝", "latency": -1}
-    except Exception as e:
-        return {"online": False, "status": "offline", "msg": str(e), "latency": -1}
-    finally:
-        try:
-            if sock is not None:
-                sock.close()
-        except Exception:
-            pass
+    """通过受限、固定 IP 的 TLS CONNECT 检测节点可用性。"""
+    return check_node_connect(
+        host,
+        port,
+        timeout,
+        _resolve_subscription_addresses,
+        allow_private=_env_flag('ANYTLS_ALLOW_PRIVATE_NODE_PROBES'),
+    )
 
 @app.route('/api/sync-all', methods=['POST'])
 @login_required
@@ -1818,11 +1900,26 @@ def change_password():
         return redirect(url_for('dashboard'))
 
     new_hash = hash_password(new_pw)
-    db.execute('UPDATE admin_users SET password_hash=? WHERE id=?', (new_hash, user['id']))
+    db.execute(
+        'UPDATE admin_users SET password_hash=?, '
+        'session_version=session_version + 1 WHERE id=?',
+        (new_hash, user['id']),
+    )
     db.commit()
     audit_event('auth.password_change', 'success', username=user['username'])
-    flash('密码修改成功', 'success')
-    return redirect(url_for('dashboard'))
+    password_file = app.config.get('INITIAL_ADMIN_PASSWORD_FILE')
+    if password_file:
+        try:
+            Path(password_file).unlink(missing_ok=True)
+        except OSError:
+            audit_event(
+                'auth.initial_password_file_cleanup',
+                'failure',
+                reason='permission_denied',
+            )
+    session.clear()
+    flash('密码修改成功，请重新登录；其他设备上的旧会话已失效', 'success')
+    return redirect(url_for('login'))
 
 # ─── 订阅转换（二次转链）──────────────────────────────────────
 
@@ -1902,10 +1999,10 @@ def public_subscribe(token):
         }
 
     # 构建订阅配置名称（profile-title）
-    sub_name = 'SSRVPN.VIP'  # 默认名
+    sub_name = account['name'] or 'subscription'
     if rules:
         sub_name = _apply_rename(sub_name, rules)
-    header_sub_name = sanitize_header_value(sub_name, 'SSRVPN.VIP')
+    header_sub_name = sanitize_header_value(sub_name, 'subscription')
 
     # 公共响应头：profile-title 设置订阅名 + 流量信息
     resp_headers = {
@@ -1979,10 +2076,20 @@ def rename_rules_page():
 @app.route('/settings/rename-rules/add', methods=['POST'])
 @login_required
 def rename_rule_add():
-    old_text = request.form.get('old_text', '').strip()
-    new_text = request.form.get('new_text', '').strip()
-    if not old_text:
-        flash('原名称不能为空', 'error')
+    try:
+        old_text = validate_text(
+            request.form.get('old_text', ''),
+            '原名称',
+            MAX_RENAME_TEXT_CHARS,
+            required=True,
+        )
+        new_text = validate_text(
+            request.form.get('new_text', ''),
+            '新名称',
+            MAX_RENAME_TEXT_CHARS,
+        )
+    except ValueError as e:
+        flash(str(e), 'error')
         return redirect(url_for('rename_rules_page'))
     db = get_db()
     rule_id = db.execute(
@@ -2034,9 +2141,13 @@ def _development_server_options():
     return host, port, debug
 
 
-init_db()
+def create_app():
+    """Initialize persistent state explicitly and return the Flask application."""
+    init_db()
+    return app
 
 if __name__ == '__main__':
+    create_app()
     host, port, debug = _development_server_options()
     print(f"\n  AnyTLS Panel running at http://{host}:{port}")
     if app.config.get('INITIAL_ADMIN_PASSWORD_FILE'):

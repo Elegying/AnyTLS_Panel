@@ -11,7 +11,7 @@
 
 ## ✨ 功能特性
 
-- 📥 **订阅导入** — 支持 HTTP 订阅地址、Clash YAML、Base64 编码、单链接等多种格式
+- 📥 **订阅导入** — 默认支持 HTTPS 订阅地址，以及 Clash YAML、Base64 编码、单链接等多种格式
 - 👤 **多账号管理** — 每个订阅对应一个账号，支持重命名、编辑、删除
 - 🔄 **一键同步** — 单账号或全部账号一键更新订阅，自动解析流量信息
 - 📊 **流量监控** — 自动获取已用流量、总流量、到期时间，进度条可视化
@@ -74,7 +74,7 @@ bash deploy.sh 9090
 
 1. 点击「账号管理」→「导入订阅」
 2. 粘贴订阅链接（支持以下格式）：
-   - HTTP(S) 订阅地址（自动拉取，兼容 Clash / Shadowrocket 格式）
+   - HTTPS 订阅地址（自动拉取，兼容 Clash / Shadowrocket 格式）
    - `anytls://` / `trojan://` / `vmess://` 等单链接
    - 多行链接（每行一个）
    - Base64 编码的订阅内容
@@ -91,7 +91,9 @@ bash deploy.sh 9090
 - 仪表盘点击「一键同步全部」更新所有账号
 - 或进入账号详情点击「同步订阅」更新单个账号
 
-HTTP(S) 订阅默认拒绝回环、内网、链路本地和保留地址，并会逐次校验重定向目标；DNS 解析、所有 User-Agent 尝试、重定向和正文读取共享 10 秒绝对期限，响应上限为 2 MiB。只有确实需要从可信内网订阅源导入时，才应在隔离网络中设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。停用账号后，已有公开订阅链接立即失效并返回 404。
+订阅抓取默认只允许 HTTPS，并拒绝回环、内网、链路本地和保留地址；每次重定向都会重新校验目标，DNS 解析、所有 User-Agent 尝试、重定向和正文读取共享 10 秒绝对期限，响应上限为 2 MiB。确实需要明文 HTTP 时必须显式设置 `ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS=1`；只有需要访问可信内网订阅源时，才应在隔离网络中设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。两个例外开关相互独立，均不建议用于可导入不可信订阅的公网面板。停用账号后，已有公开订阅链接立即失效并返回 404。
+
+节点检测同样只探测 DNS 当前解析出的公网地址，以避免面板被用于访问内网服务；可信隔离网络可显式设置 `ANYTLS_ALLOW_PRIVATE_NODE_PROBES=1`。所有请求体默认限制为 4 MiB，YAML 别名、嵌套深度、节点数以及流量批量上报数量也有独立上限。
 
 ## 🔌 API 接口
 
@@ -112,13 +114,13 @@ HTTP(S) 订阅默认拒绝回环、内网、链路本地和保留地址，并会
 
 ```bash
 # 面板管理员使用主 Token 按账号 ID 上报（不要把主 Token 分发到节点）
-curl -X POST http://面板地址:8866/api/traffic/report \
+curl -X POST https://面板域名/api/traffic/report \
   -H "Authorization: Bearer YOUR_TRAFFIC_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"account_id": 1, "bytes_used": 1073741824}'
 
 # 主 Token 兼容按密码定位账号
-curl -X POST http://面板地址:8866/api/traffic/report \
+curl -X POST https://面板域名/api/traffic/report \
   -H "Authorization: Bearer YOUR_TRAFFIC_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"password": "xxx", "bytes_used": 1073741824}'
@@ -155,7 +157,7 @@ bash traffic_collector.sh
 
 当前 iptables 方案只统计 IPv4 的整个 `ANYTLS_PORT`，不能统计 IPv6，也不能区分同端口内的不同 AnyTLS 用户。因此一个采集实例只适用于“一个 IPv4 独占端口对应一个面板账号”，同一端口也只能运行一个 collector。双栈/纯 IPv6或共享端口场景必须改用 AnyTLS/进程提供的用户级指标，不能用此脚本做账号级计费。
 
-首次输入的管理员密码会保存到仅 root 可读的 `data/.initial_admin_password`，用于数据库初始化；部署输出默认隐藏密码和流量 API token。如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
+首次输入的管理员密码会暂存到仅 root 可读的 `data/.initial_admin_password`，用于数据库初始化；管理员首次修改密码后，默认数据目录中的引导文件会自动删除。部署输出默认隐藏密码和流量 API token。如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
 
 ## 🛠️ 管理命令
 
@@ -181,6 +183,11 @@ ANYTLS_PANEL_DOMAIN="panel.example.com" bash deploy.sh 9090
 ```
 AnyTLS_Panel/
 ├── app.py                  # 主程序（Flask 应用）
+├── database_maintenance.py # 流量日志清理与 SQLite 维护指标
+├── db_migrations.py        # 版本化数据库迁移
+├── input_limits.py         # 请求字段和资源上限
+├── node_probe.py           # 带地址边界校验的节点探测
+├── protocol_codecs.py      # 订阅协议解析与转换
 ├── security_utils.py       # 密码哈希与兼容校验
 ├── traffic_token.py        # 账号级流量 Token 生成器
 ├── templates/              # HTML 模板
@@ -204,11 +211,16 @@ AnyTLS_Panel/
 - ✅ SQLite 持久化登录速率限制（5次/分钟，跨进程和重启生效）
 - ✅ 流量上报 API 支持账号级 Bearer token，节点不能跨账号写入
 - ✅ Session HttpOnly + SameSite=Lax
+- ✅ 管理会话固定 24 小时期限；每次请求校验账号会话版本，修改密码会撤销其他已登录会话
+- ✅ 退出登录只接受带 CSRF Token 的 POST 请求，动态响应默认禁止缓存
 - ✅ 生产进程使用专用低权限用户和 systemd 沙箱
 - ✅ 密码使用带随机盐的 PBKDF2-SHA256，并兼容旧 SHA256 哈希自动升级
 - ✅ Secret Key 原子持久化，避免并发启动产生不同会话密钥
 - ✅ 订阅拉取拒绝常规内网/回环目标，并限制重定向和响应体大小
 - ✅ 订阅连接固定到已验证的公网 IP，阻断 DNS 重绑定到内网地址
+- ✅ 默认仅拉取 HTTPS 订阅；节点探测默认只允许公网解析地址
+- ✅ 请求体、字段长度、整数范围、流量批量数量及 YAML 复杂度均有明确上限
+- ✅ 流量明细默认保留 90 天，并周期清理；累计流量总数不受日志清理影响
 - ✅ 严格 CSP、无内联事件处理器、请求 ID 与不记录秘密的结构化审计日志
 - ✅ systemd 自动拉起面板与 Caddy；每分钟检查就绪性、HTTPS 与证书剩余有效期，连续三次失败才恢复服务，并用五分钟冷却抑制重启风暴
 - ✅ 更新前预构建依赖并验证应用，切换失败自动恢复上一版本和数据库；成功更新保留两份带校验和的 LKG 备份

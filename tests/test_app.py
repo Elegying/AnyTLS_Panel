@@ -1,9 +1,11 @@
 import base64
+from contextlib import closing, redirect_stderr, redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 import importlib.util
 import inspect
+import io
 import json
 import os
 import re
@@ -28,6 +30,7 @@ def load_app(database_path):
     module = importlib.util.module_from_spec(spec)
     with mock.patch.dict(os.environ, {"ANYTLS_DATABASE": str(database_path)}, clear=False):
         spec.loader.exec_module(module)
+        module.init_db()
     return module
 
 
@@ -38,7 +41,204 @@ def extract_csrf_token(html):
     return match.group(1)
 
 
+def authenticate_session(app, client, username="admin", base_url=None):
+    with app.app.app_context():
+        user = app.get_db().execute(
+            "SELECT id, session_version FROM admin_users WHERE username=?",
+            (username,),
+        ).fetchone()
+    if user is None:
+        raise AssertionError(f"admin user not found: {username}")
+    transaction_options = {"base_url": base_url} if base_url else {}
+    with client.session_transaction(**transaction_options) as session:
+        session.permanent = True
+        session["logged_in"] = True
+        session["username"] = username
+        session["admin_user_id"] = user["id"]
+        session["session_version"] = user["session_version"]
+
+
 class AnyTlsPanelTests(unittest.TestCase):
+    def test_shared_input_limits_reject_invalid_configuration_and_text(self):
+        import input_limits
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(input_limits.bounded_env_int("LIMIT", 7, 1, 10), 7)
+        with mock.patch.dict(os.environ, {"LIMIT": "8"}, clear=True):
+            self.assertEqual(input_limits.bounded_env_int("LIMIT", 7, 1, 10), 8)
+        for value, message in (("invalid", "integer"), ("11", "between")):
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {"LIMIT": value}, clear=True):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        input_limits.bounded_env_int("LIMIT", 7, 1, 10)
+
+        self.assertEqual(input_limits.validate_text("  ok  ", "字段", 3), "ok")
+        with self.assertRaisesRegex(ValueError, "不能为空"):
+            input_limits.validate_text(None, "字段", 3, required=True)
+        with self.assertRaisesRegex(ValueError, "不能超过"):
+            input_limits.validate_text("long", "字段", 3)
+
+    def test_node_probe_covers_address_and_connection_failure_boundaries(self):
+        import node_probe
+
+        with self.assertRaisesRegex(ValueError, "解析结果无效"):
+            node_probe._validated_addresses(["not-an-ip"], False)
+        with self.assertRaisesRegex(ValueError, "无法解析"):
+            node_probe._validated_addresses([], False)
+        self.assertEqual(
+            node_probe._validated_addresses(["fe80::1%en0", "fe80::1"], True),
+            ["fe80::1"],
+        )
+
+        resolver_error = node_probe.check_node_connect(
+            "node.example", 443, 1, mock.Mock(side_effect=OSError("dns failed"))
+        )
+        self.assertFalse(resolver_error["online"])
+        self.assertIn("dns failed", resolver_error["msg"])
+
+        cases = (
+            (node_probe.ssl.SSLError("tls"), True, "TLS 异常"),
+            (node_probe.socket.timeout(), False, "连接超时"),
+            (ConnectionRefusedError(), False, "连接被拒绝"),
+            (OSError("network down"), False, "network down"),
+        )
+        for failure, expected_online, expected_message in cases:
+            with self.subTest(failure=type(failure).__name__):
+                raw_socket = mock.Mock()
+                if isinstance(failure, node_probe.ssl.SSLError):
+                    context = mock.Mock()
+                    context.wrap_socket.side_effect = failure
+                    patches = (
+                        mock.patch.object(
+                            node_probe.socket, "create_connection", return_value=raw_socket
+                        ),
+                        mock.patch.object(
+                            node_probe.ssl, "create_default_context", return_value=context
+                        ),
+                    )
+                else:
+                    patches = (
+                        mock.patch.object(
+                            node_probe.socket, "create_connection", side_effect=failure
+                        ),
+                        mock.patch.object(node_probe.ssl, "create_default_context"),
+                    )
+                with patches[0], patches[1]:
+                    result = node_probe.check_node_connect(
+                        "node.example",
+                        443,
+                        1,
+                        lambda _host, _port, _deadline: ["8.8.8.8"],
+                    )
+                self.assertEqual(result["online"], expected_online)
+                self.assertIn(expected_message, result["msg"])
+
+        with mock.patch.object(node_probe.time, "monotonic", side_effect=[0, 2, 2]):
+            expired = node_probe.check_node_connect(
+                "node.example",
+                443,
+                1,
+                lambda _host, _port, _deadline: ["8.8.8.8"],
+            )
+        self.assertEqual(expired["msg"], "连接超时")
+
+    def test_traffic_token_cli_and_validation_fail_closed(self):
+        import traffic_token
+
+        for account_id in (True, "invalid", 0):
+            with self.subTest(account_id=account_id):
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    traffic_token.make_account_traffic_token("master", account_id)
+        with self.assertRaisesRegex(ValueError, "empty"):
+            traffic_token.make_account_traffic_token(" ", 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            token_file = Path(tmp) / "token"
+            token_file.write_text("master-token\n", encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    traffic_token.main(["2", "--token-file", str(token_file)]),
+                    0,
+                )
+            self.assertTrue(output.getvalue().startswith("atp1.2."))
+
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    traffic_token.main([
+                        "2", "--token-file", str(Path(tmp) / "missing")
+                    ])
+            token_file.write_text("\n", encoding="utf-8")
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    traffic_token.main(["2", "--token-file", str(token_file)])
+
+    def test_password_hash_legacy_and_malformed_paths(self):
+        import security_utils
+
+        legacy = hashlib.sha256(b"legacy-password").hexdigest()
+        self.assertEqual(
+            security_utils.verify_password(legacy, "legacy-password"),
+            (True, True),
+        )
+        self.assertEqual(
+            security_utils.verify_password(legacy, "wrong"),
+            (False, False),
+        )
+        self.assertEqual(security_utils.verify_password("malformed", "pw"), (False, False))
+
+    def test_migration_failure_rolls_back_version_record(self):
+        import db_migrations
+
+        with closing(sqlite3.connect(":memory:")) as db, db:
+            def failing_migration(connection):
+                connection.execute("CREATE TABLE should_rollback (id INTEGER)")
+                raise RuntimeError("migration failed")
+
+            with mock.patch.object(db_migrations, "_MIGRATIONS", ((99, failing_migration),)):
+                with self.assertRaisesRegex(RuntimeError, "migration failed"):
+                    db_migrations.apply_schema_migrations(db)
+            versions = db.execute("SELECT version FROM schema_migrations").fetchall()
+            table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='should_rollback'"
+            ).fetchone()
+
+        self.assertEqual(versions, [])
+        self.assertIsNone(table)
+
+    def test_database_maintenance_handles_corrupt_state_and_missing_files(self):
+        import database_maintenance
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            with closing(sqlite3.connect(database)) as db, db:
+                db.execute(
+                    "CREATE TABLE maintenance_state (key TEXT PRIMARY KEY, "
+                    "value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+                )
+                db.execute(
+                    "CREATE TABLE traffic_logs (id INTEGER PRIMARY KEY, "
+                    "recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+                )
+                db.execute(
+                    "INSERT INTO maintenance_state (key, value) "
+                    "VALUES ('traffic_log_prune', 'corrupt')"
+                )
+                self.assertEqual(
+                    database_maintenance.prune_traffic_logs(db, now=7200),
+                    0,
+                )
+                self.assertIsInstance(database_maintenance.checkpoint_database(db), tuple)
+
+            metrics = database_maintenance.database_metrics(database)
+            missing_metrics = database_maintenance.database_metrics(
+                Path(tmp) / "missing.db"
+            )
+
+        self.assertGreater(metrics["database_bytes"], 0)
+        self.assertEqual(missing_metrics["database_bytes"], 0)
+        self.assertEqual(missing_metrics["wal_bytes"], 0)
+
     def test_protocol_codecs_are_registry_driven_and_bounded(self):
         import protocol_codecs
 
@@ -54,6 +254,123 @@ class AnyTlsPanelTests(unittest.TestCase):
             len(inspect.getsource(protocol_codecs.clash_proxy_from_uri).splitlines()),
             30,
         )
+
+    def test_clash_yaml_rejects_excessive_alias_expansion(self):
+        import protocol_codecs
+
+        aliases = "\n".join(f"  - *shared" for _index in range(101))
+        content = "shared: &shared value\nproxies:\n" + aliases
+
+        self.assertEqual(protocol_codecs.parse_clash_yaml(content), [])
+
+    def test_protocol_codec_failure_paths_and_optional_fields(self):
+        import protocol_codecs as codecs
+
+        deeply_nested = "value: " + ("[" * 101) + "0" + ("]" * 101)
+        self.assertEqual(codecs.parse_clash_yaml(deeply_nested), [])
+        self.assertEqual(codecs.parse_clash_yaml("[]"), [])
+        self.assertEqual(codecs.parse_clash_yaml("proxies: {}"), [])
+        self.assertEqual(codecs.parse_clash_yaml("proxies: [invalid]"), [])
+        self.assertEqual(
+            codecs.parse_clash_yaml(
+                "proxies:\n"
+                "  - {name: bad, type: anytls, server: '', port: 443}\n"
+                "  - {name: custom, type: custom, server: example.com, port: 443, password: pw}"
+            )[0]["protocol"],
+            "custom",
+        )
+
+        self.assertEqual(codecs._safe_int("bad", "fallback"), "fallback")
+        self.assertEqual(
+            codecs._sip002_split(r"one\;part;tail\\", ";"),
+            [r"one\;part", r"tail\\"],
+        )
+        self.assertEqual(codecs._sip002_unescape("trailing\\"), "trailing\\")
+        self.assertIsNone(codecs._parse_ss_uri("ss://missing-at", "ss"))
+        self.assertIsNone(codecs.parse_protocol_uri("anytls://%zz@:bad", "anytls"))
+        with self.assertRaisesRegex(ValueError, "invalid Clash"):
+            codecs._clash_context({"type": "anytls", "server": "x", "port": 70000})
+
+        base_node = {
+            "name": "node",
+            "host": "example.com",
+            "port": 443,
+            "password": "pw",
+            "protocol": "custom",
+            "extra": {},
+        }
+        anytls_proxy = {}
+        codecs._to_anytls(
+            anytls_proxy,
+            base_node,
+            {
+                "fp": ["chrome"],
+                "idleSessionCheckInterval": ["bad"],
+                "idleSessionTimeout": ["30"],
+                "minIdleSession": ["2"],
+            },
+        )
+        self.assertEqual(anytls_proxy["client-fingerprint"], "chrome")
+        self.assertEqual(anytls_proxy["idle-session-check-interval"], "bad")
+
+        vmess_proxy = {}
+        vmess_node = {
+            **base_node,
+            "extra": {
+                "net": "grpc",
+                "serviceName": "svc",
+                "tls": "tls",
+                "sni": "sni.example",
+                "fp": "firefox",
+                "allowInsecure": "true",
+            },
+        }
+        codecs._to_vmess(vmess_proxy, vmess_node, {})
+        self.assertEqual(vmess_proxy["grpc-opts"]["grpc-service-name"], "svc")
+
+        ss_proxy = {}
+        codecs._to_shadowsocks(
+            ss_proxy,
+            base_node,
+            {"plugin": [r"obfs;mode=http;flag"], "pluginOpts": ["invalid"]},
+        )
+        self.assertTrue(ss_proxy["plugin-opts"]["flag"])
+        invalid_plugin_proxy = {}
+        codecs._to_shadowsocks(
+            invalid_plugin_proxy,
+            base_node,
+            {"pluginOpts": ["not-base64-json"]},
+        )
+        self.assertNotIn("plugin-opts", invalid_plugin_proxy)
+
+        trojan_proxy = {}
+        codecs._to_trojan(
+            trojan_proxy,
+            base_node,
+            {"fp": ["chrome"], "type": ["grpc"], "serviceName": ["svc"]},
+        )
+        self.assertEqual(trojan_proxy["grpc-opts"]["grpc-service-name"], "svc")
+
+        vless_proxy = {}
+        codecs._to_vless(
+            vless_proxy,
+            base_node,
+            {
+                "security": ["reality"],
+                "pbk": ["public"],
+                "sid": ["short"],
+                "flow": ["vision"],
+            },
+        )
+        self.assertEqual(vless_proxy["reality-opts"]["public-key"], "public")
+
+        tuic_proxy = {}
+        codecs._to_tuic(tuic_proxy, base_node, {})
+        self.assertEqual(tuic_proxy["password"], "pw")
+        unknown_proxy = {}
+        codecs._to_unknown(unknown_proxy, base_node, {})
+        self.assertEqual(unknown_proxy["type"], "custom")
+        self.assertIsNone(codecs.clash_proxy_from_uri("not-a-uri"))
 
     def test_shell_scripts_use_lf_line_endings(self):
         for script in REPO_ROOT.glob("*.sh"):
@@ -606,9 +923,22 @@ proxies:
                     side_effect=AssertionError("network called"),
                 ) as connect:
                     with self.assertRaisesRegex(ValueError, "公网"):
-                        app.parse_subscribe_url("http://internal.example/sub")
+                        app.parse_subscribe_url("https://internal.example/sub")
 
         connect.assert_not_called()
+
+    def test_plain_http_subscription_requires_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            with mock.patch.object(
+                app,
+                "_resolve_subscription_addresses",
+                side_effect=AssertionError("DNS should not run"),
+            ) as resolve:
+                with self.assertRaisesRegex(ValueError, "HTTPS"):
+                    app._resolve_public_subscription_url("http://sub.example/list")
+
+        resolve.assert_not_called()
 
     def test_subscription_dns_resolution_obeys_absolute_deadline(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -739,7 +1069,7 @@ proxies:
 
     def test_http_subscription_rejects_redirects_to_private_networks(self):
         response = mock.Mock(status=302)
-        response.getheader.return_value = "http://metadata.example/latest"
+        response.getheader.return_value = "https://metadata.example/latest"
         response.read.return_value = b""
         connection = mock.Mock()
         connection.getresponse.return_value = response
@@ -928,7 +1258,7 @@ proxies:
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
             app = load_app(database)
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 db.execute("DELETE FROM admin_users")
                 db.commit()
             barrier = threading.Barrier(4)
@@ -941,10 +1271,34 @@ proxies:
                 with ThreadPoolExecutor(max_workers=4) as executor:
                     list(executor.map(lambda _index: app.init_db(), range(4)))
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 admin_count = db.execute("SELECT COUNT(*) FROM admin_users").fetchone()[0]
 
         self.assertEqual(admin_count, 1)
+
+    def test_application_factory_owns_database_initialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            secret_key = Path(tmp) / ".secret_key"
+            spec = importlib.util.spec_from_file_location(
+                "anytls_panel_factory_test",
+                APP_PATH,
+            )
+            module = importlib.util.module_from_spec(spec)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "ANYTLS_DATABASE": str(database),
+                    "ANYTLS_SECRET_KEY_FILE": str(secret_key),
+                },
+                clear=False,
+            ):
+                spec.loader.exec_module(module)
+                self.assertFalse(database.exists())
+                created = module.create_app()
+
+            self.assertIs(created, module.app)
+            self.assertTrue(database.is_file())
 
     def test_secure_cookie_and_proxy_mode_are_configurable(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -962,6 +1316,88 @@ proxies:
 
         self.assertTrue(app.app.config["SESSION_COOKIE_SECURE"])
         self.assertEqual(type(app.app.wsgi_app).__name__, "ProxyFix")
+
+    def test_login_creates_expiring_versioned_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            with mock.patch.dict(
+                os.environ,
+                {"ANYTLS_ADMIN_PASS": "strong-review-password"},
+                clear=False,
+            ):
+                app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.test_client() as client:
+                response = client.post(
+                    "/login",
+                    data={"username": "admin", "password": "strong-review-password"},
+                )
+                with client.session_transaction() as session:
+                    permanent = session.permanent
+                    user_id = session.get("admin_user_id")
+                    session_version = session.get("session_version")
+
+        cookie = response.headers["Set-Cookie"]
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(permanent)
+        self.assertIsInstance(user_id, int)
+        self.assertEqual(session_version, 1)
+        self.assertIn("Expires=", cookie)
+        self.assertFalse(app.app.config["SESSION_REFRESH_EACH_REQUEST"])
+
+    def test_password_change_revokes_other_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            initial_password_file = Path(
+                app.app.config["INITIAL_ADMIN_PASSWORD_FILE"]
+            )
+            self.assertTrue(initial_password_file.is_file())
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                db.execute(
+                    "UPDATE admin_users SET password_hash=? WHERE username='admin'",
+                    (app.hash_password("existing-password"),),
+                )
+                db.commit()
+
+            first = app.app.test_client()
+            second = app.app.test_client()
+            authenticate_session(app, first)
+            authenticate_session(app, second)
+            changed = first.post(
+                "/settings/password",
+                data={
+                    "old_password": "existing-password",
+                    "new_password": "replacement-password",
+                    "confirm_password": "replacement-password",
+                },
+            )
+            stale = second.get("/")
+            self.assertFalse(initial_password_file.exists())
+
+        self.assertEqual(changed.status_code, 302)
+        self.assertTrue(changed.headers["Location"].endswith("/login"))
+        self.assertEqual(stale.status_code, 302)
+        self.assertTrue(stale.headers["Location"].endswith("/login"))
+
+    def test_request_body_limit_rejects_before_form_processing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(
+                TESTING=True,
+                WTF_CSRF_ENABLED=False,
+                MAX_CONTENT_LENGTH=128,
+            )
+            with app.app.test_client() as client:
+                response = client.post(
+                    "/login",
+                    data={"username": "admin", "password": "x" * 1024},
+                )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("请求内容过大", response.get_data(as_text=True))
 
     def test_login_rate_limit_survives_application_reload(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1089,7 +1525,9 @@ proxies:
             app = load_app(Path(tmp) / "anytls.db")
             app.app.config.update(TESTING=True)
             with mock.patch.object(
-                app.shutil, "disk_usage", return_value=mock.Mock(free=1024)
+                app,
+                "database_metrics",
+                return_value={"database_bytes": 1, "wal_bytes": 0, "free_bytes": 1024},
             ):
                 with app.app.test_client() as client:
                     response = client.get(
@@ -1142,9 +1580,9 @@ proxies:
                 db.commit()
                 account_id = cursor.lastrowid
             with app.app.test_client() as client:
-                with client.session_transaction(base_url="https://panel.example:9443") as session:
-                    session["logged_in"] = True
-                    session["username"] = "admin"
+                authenticate_session(
+                    app, client, base_url="https://panel.example:9443"
+                )
 
                 response = client.post(
                     f"/api/accounts/{account_id}/generate-token",
@@ -1169,9 +1607,7 @@ proxies:
                 account_id = cursor.lastrowid
 
             with app.app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["logged_in"] = True
-                    session["username"] = "admin"
+                authenticate_session(app, client)
 
                 missing_csrf = client.post(f"/api/accounts/{account_id}/generate-token")
                 self.assertEqual(missing_csrf.status_code, 400)
@@ -1287,7 +1723,7 @@ proxies:
                     json={"password": "pw0", "bytes_used": 1000},
                 )
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 totals = [row[0] for row in db.execute(
                     "SELECT traffic_used_bytes FROM accounts ORDER BY id"
                 )]
@@ -1359,13 +1795,28 @@ proxies:
                     headers=headers,
                     json={"account_id": True, "bytes_used": 1},
                 )
+                oversized_integer = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json={"password": "node-secret", "bytes_used": 2**63},
+                )
+                oversized_batch = client.post(
+                    "/api/traffic/report",
+                    headers=headers,
+                    json=[
+                        {"password": "node-secret", "bytes_used": 1}
+                        for _index in range(app.MAX_TRAFFIC_BATCH_ITEMS + 1)
+                    ],
+                )
 
             self.assertEqual(negative.status_code, 400)
             self.assertEqual(malformed.status_code, 400)
             self.assertEqual(fractional.status_code, 400)
             self.assertEqual(bad_total.status_code, 400)
             self.assertEqual(bad_account_id.status_code, 400)
-            with sqlite3.connect(database) as db:
+            self.assertEqual(oversized_integer.status_code, 400)
+            self.assertEqual(oversized_batch.status_code, 413)
+            with closing(sqlite3.connect(database)) as db, db:
                 used = db.execute("SELECT traffic_used_bytes FROM accounts").fetchone()[0]
             self.assertEqual(used, 100)
 
@@ -1401,7 +1852,7 @@ proxies:
                     json={"account_id": 999999, "total_bytes": 20},
                 )
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 total = db.execute(
                     "SELECT traffic_used_bytes FROM accounts WHERE id=?", (account_id,)
                 ).fetchone()[0]
@@ -1450,7 +1901,7 @@ proxies:
                     json={"account_id": account_ids[1], "bytes_used": 50},
                 )
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 totals = [row[0] for row in db.execute(
                     "SELECT traffic_used_bytes FROM accounts ORDER BY id"
                 )]
@@ -1500,7 +1951,7 @@ proxies:
                         },
                     ))
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 total = db.execute(
                     "SELECT traffic_used_bytes FROM accounts WHERE id=?", (account_id,)
                 ).fetchone()[0]
@@ -1555,12 +2006,13 @@ proxies:
             app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
             fake_db = FakeDb()
             with mock.patch.object(app, "get_db", return_value=fake_db):
-                with app.app.test_client() as client:
-                    response = client.post(
-                        "/api/traffic/report",
-                        headers={"Authorization": "Bearer traffic-token"},
-                        json={"account_id": 1, "bytes_used": 50},
-                    )
+                with mock.patch.object(app, "prune_traffic_logs", return_value=0):
+                    with app.app.test_client() as client:
+                        response = client.post(
+                            "/api/traffic/report",
+                            headers={"Authorization": "Bearer traffic-token"},
+                            json={"account_id": 1, "bytes_used": 50},
+                        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["results"][0]["total_bytes"], 150)
@@ -1579,9 +2031,7 @@ proxies:
                 db.commit()
 
             with app.app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["logged_in"] = True
-                    session["username"] = "admin"
+                authenticate_session(app, client)
 
                 response = client.post(
                     f"/accounts/{account_id}/edit",
@@ -1593,7 +2043,7 @@ proxies:
                 )
 
             self.assertEqual(response.status_code, 302)
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 limit = db.execute("SELECT traffic_limit_gb FROM accounts WHERE id=?", (account_id,)).fetchone()[0]
             self.assertEqual(limit, 250)
 
@@ -1611,14 +2061,12 @@ proxies:
                 db.commit()
 
             with app.app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["logged_in"] = True
-                    session["username"] = "admin"
+                authenticate_session(app, client)
 
                 response = client.post(f"/accounts/{account_id}/sync")
 
             self.assertEqual(response.status_code, 302)
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 protocol, raw_uri = db.execute("SELECT protocol, raw_uri FROM nodes").fetchone()
             self.assertEqual(protocol, "trojan")
             self.assertTrue(raw_uri.startswith("trojan://"))
@@ -1648,7 +2096,7 @@ proxies:
                 )
                 db.execute(
                     "INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)",
-                    ("SSRVPN.VIP", 'bad\r\nInjected: yes"name'),
+                    ("demo", 'bad\r\nInjected: yes"name'),
                 )
                 db.commit()
 
@@ -1739,6 +2187,7 @@ proxies:
                 )
 
             self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
             decoded = base64.b64decode(response.get_data(as_text=True)).decode()
             self.assertIn("anytls://pw@example.com:443", decoded)
             self.assertIn("#demo", decoded)
@@ -1976,7 +2425,7 @@ proxies:
     def test_init_db_migrates_traffic_metadata_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 db.execute(
                     """CREATE TABLE accounts (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1994,7 +2443,7 @@ proxies:
                     )"""
                 )
             app = load_app(database)
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 columns = {row[1] for row in db.execute("PRAGMA table_info(accounts)")}
                 tables = {row[0] for row in db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
@@ -2002,6 +2451,12 @@ proxies:
                 migration_versions = [row[0] for row in db.execute(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )]
+                admin_columns = {
+                    row[1] for row in db.execute("PRAGMA table_info(admin_users)")
+                }
+                traffic_indexes = {
+                    row[1] for row in db.execute("PRAGMA index_list(traffic_logs)")
+                }
 
         self.assertTrue({
             "traffic_upload_bytes",
@@ -2010,6 +2465,9 @@ proxies:
         }.issubset(columns))
         self.assertIn("traffic_collectors", tables)
         self.assertIn("rate_limits", tables)
+        self.assertIn("maintenance_state", tables)
+        self.assertIn("session_version", admin_columns)
+        self.assertIn("idx_traffic_logs_recorded_at", traffic_indexes)
         self.assertEqual(
             migration_versions,
             list(range(1, app.SCHEMA_VERSION + 1)),
@@ -2066,9 +2524,7 @@ proxies:
                 db.commit()
 
             with app.app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["logged_in"] = True
-                    session["username"] = "admin"
+                authenticate_session(app, client)
                 response = client.post(
                     "/settings/password",
                     data={
@@ -2078,7 +2534,7 @@ proxies:
                     },
                 )
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 stored_hash = db.execute(
                     "SELECT password_hash FROM admin_users WHERE username='admin'"
                 ).fetchone()[0]
@@ -2086,6 +2542,39 @@ proxies:
         self.assertEqual(response.status_code, 302)
         self.assertTrue(app.verify_password(stored_hash, "existing-password")[0])
         self.assertFalse(app.verify_password(stored_hash, "short7")[0])
+
+    def test_traffic_log_retention_prunes_details_but_preserves_total(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, traffic_used_bytes) "
+                    "VALUES ('demo', 'anytls://pw@example.com:443', 999)"
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO traffic_logs (account_id, bytes_used, recorded_at) "
+                    "VALUES (?, 100, datetime('now', '-100 days'))",
+                    (account_id,),
+                )
+                db.execute(
+                    "INSERT INTO traffic_logs (account_id, bytes_used) VALUES (?, 200)",
+                    (account_id,),
+                )
+                db.commit()
+                deleted = app.prune_traffic_logs(db, force=True)
+                rows = db.execute(
+                    "SELECT bytes_used FROM traffic_logs ORDER BY id"
+                ).fetchall()
+                total = db.execute(
+                    "SELECT traffic_used_bytes FROM accounts WHERE id=?",
+                    (account_id,),
+                ).fetchone()[0]
+
+        self.assertEqual(deleted, 1)
+        self.assertEqual([row[0] for row in rows], [200])
+        self.assertEqual(total, 999)
 
     def test_account_sync_skips_account_deleted_during_fetch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2101,7 +2590,7 @@ proxies:
                 db.commit()
 
             def delete_then_return(_url):
-                with sqlite3.connect(database) as other:
+                with closing(sqlite3.connect(database)) as other, other:
                     other.execute("PRAGMA foreign_keys=ON")
                     other.execute("DELETE FROM accounts WHERE id=?", (account_id,))
                     other.commit()
@@ -2116,11 +2605,10 @@ proxies:
 
             with mock.patch.object(app, "parse_subscribe_url", side_effect=delete_then_return):
                 with app.app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["logged_in"] = True
+                    authenticate_session(app, client)
                     response = client.post(f"/accounts/{account_id}/sync")
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 account_count = db.execute(
                     "SELECT COUNT(*) FROM accounts WHERE id=?", (account_id,)
                 ).fetchone()[0]
@@ -2159,11 +2647,10 @@ proxies:
 
             with mock.patch.object(app, "parse_subscribe_url", return_value=([], {})):
                 with app.app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["logged_in"] = True
+                    authenticate_session(app, client)
                     response = client.post(f"/accounts/{account_id}/sync")
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 rows = db.execute(
                     "SELECT name FROM nodes WHERE account_id=?", (account_id,)
                 ).fetchall()
@@ -2185,7 +2672,7 @@ proxies:
                 db.commit()
 
             def delete_then_return(_url):
-                with sqlite3.connect(database) as other:
+                with closing(sqlite3.connect(database)) as other, other:
                     other.execute("PRAGMA foreign_keys=ON")
                     other.execute("DELETE FROM accounts WHERE id=?", (account_id,))
                     other.commit()
@@ -2193,11 +2680,10 @@ proxies:
 
             with mock.patch.object(app, "parse_subscribe_url", side_effect=delete_then_return):
                 with app.app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["logged_in"] = True
+                    authenticate_session(app, client)
                     response = client.post("/api/sync-all")
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 orphan_count = db.execute(
                     "SELECT COUNT(*) FROM nodes WHERE account_id=?", (account_id,)
                 ).fetchone()[0]
@@ -2233,11 +2719,10 @@ proxies:
 
             with mock.patch.object(app, "parse_subscribe_url", return_value=([], {})):
                 with app.app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["logged_in"] = True
+                    authenticate_session(app, client)
                     response = client.post("/api/sync-all")
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 rows = db.execute(
                     "SELECT name FROM nodes WHERE account_id=?", (account_id,)
                 ).fetchall()
@@ -2316,12 +2801,10 @@ proxies:
             }
             with mock.patch.object(app, "parse_subscribe_url", return_value=([node], traffic)):
                 with app.app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["logged_in"] = True
-                        session["username"] = "admin"
+                    authenticate_session(app, client)
                     response = client.post(f"/accounts/{account_id}/sync")
 
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 metadata = db.execute(
                     "SELECT traffic_used_bytes, traffic_upload_bytes, "
                     "traffic_download_bytes, traffic_limit_gb, expire_date "
@@ -2400,9 +2883,7 @@ proxies:
                 db.commit()
 
             with app.app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["logged_in"] = True
-                    session["username"] = "admin"
+                authenticate_session(app, client)
 
                 response = client.get("/api/subscribe")
 
@@ -2430,15 +2911,13 @@ proxies:
             check_result = {"online": True, "status": "online", "msg": "ok", "latency": 123}
             with mock.patch.object(app, "_check_node_connect", return_value=check_result):
                 with app.app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["logged_in"] = True
-                        session["username"] = "admin"
+                    authenticate_session(app, client)
 
                     response = client.post(f"/api/accounts/{account_id}/check-all")
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.get_json()["results"][0]["latency"], 123)
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 is_online, latency_ms = db.execute(
                     "SELECT is_online, latency_ms FROM nodes WHERE id=?",
                     (node_id,),
@@ -2480,8 +2959,7 @@ proxies:
 
             with mock.patch.object(app, "_check_node_connect", side_effect=slow_check):
                 with app.app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["logged_in"] = True
+                    authenticate_session(app, client)
                     response = client.post(f"/api/accounts/{account_id}/check-all")
 
         self.assertEqual(response.status_code, 200)
@@ -2510,8 +2988,7 @@ proxies:
 
             with mock.patch.object(app, "_check_node_connect") as check:
                 with app.app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["logged_in"] = True
+                    authenticate_session(app, client)
                     response = client.post(f"/api/accounts/{account_id}/check-all")
 
         self.assertEqual(response.status_code, 413)
@@ -2560,10 +3037,9 @@ proxies:
 
             with mock.patch.object(app, "parse_subscribe_url", side_effect=slow_parse):
                 with app.app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["logged_in"] = True
+                    authenticate_session(app, client)
                     response = client.post("/api/sync-all")
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 used_values = [
                     row[0]
                     for row in db.execute(
@@ -2594,8 +3070,7 @@ proxies:
 
             with mock.patch.object(app, "parse_subscribe_url") as parse:
                 with app.app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["logged_in"] = True
+                    authenticate_session(app, client)
                     response = client.post("/api/sync-all")
 
         self.assertEqual(response.status_code, 413)
@@ -2627,8 +3102,7 @@ proxies:
                 db.commit()
 
             with app.app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["logged_in"] = True
+                authenticate_session(app, client)
                 response = client.get("/nodes/monitor")
 
         html = response.get_data(as_text=True)
@@ -2644,9 +3118,7 @@ proxies:
             app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
 
             with app.app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["logged_in"] = True
-                    session["username"] = "admin"
+                authenticate_session(app, client)
 
                 response = client.post(
                     "/api/check-by-host",
@@ -2662,15 +3134,39 @@ proxies:
             tls_socket = mock.Mock()
             tls_context = mock.Mock()
             tls_context.wrap_socket.return_value = tls_socket
-            with mock.patch.object(app.socket, "create_connection", return_value=raw_socket) as connect:
-                with mock.patch("ssl.create_default_context", return_value=tls_context):
-                    result = app._check_node_connect("2001:db8::1", 443)
+            with mock.patch.dict(
+                os.environ, {"ANYTLS_ALLOW_PRIVATE_NODE_PROBES": "1"}, clear=False
+            ):
+                with mock.patch.object(
+                    app.socket, "create_connection", return_value=raw_socket
+                ) as connect:
+                    with mock.patch("ssl.create_default_context", return_value=tls_context):
+                        result = app._check_node_connect("2001:db8::1", 443)
 
-        connect.assert_called_once_with(("2001:db8::1", 443), timeout=8)
+        connect.assert_called_once()
+        self.assertEqual(connect.call_args.args[0], ("2001:db8::1", 443))
+        self.assertLessEqual(connect.call_args.kwargs["timeout"], 8)
         tls_context.wrap_socket.assert_called_once_with(
             raw_socket, server_hostname="2001:db8::1"
         )
         self.assertTrue(result["online"])
+
+    def test_node_probe_rejects_private_targets_before_connecting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            with mock.patch.object(
+                app, "_resolve_subscription_addresses", return_value=["127.0.0.1"]
+            ):
+                with mock.patch.object(
+                    app.socket,
+                    "create_connection",
+                    side_effect=AssertionError("private network called"),
+                ) as connect:
+                    result = app._check_node_connect("internal.example", 443)
+
+        connect.assert_not_called()
+        self.assertFalse(result["online"])
+        self.assertIn("公网", result["msg"])
 
     def test_account_detail_template_escapes_js_arguments(self):
         content = (REPO_ROOT / "templates" / "account_detail.html").read_text(encoding="utf-8")
@@ -2698,9 +3194,7 @@ proxies:
                 db.commit()
 
             with app.app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["logged_in"] = True
-                    session["username"] = "admin"
+                authenticate_session(app, client)
                 response = client.get("/")
 
         html = response.get_data(as_text=True)
@@ -2888,7 +3382,13 @@ proxies:
             (panel_dir / "templates").mkdir(parents=True)
             for name in (
                 "app.py",
+                "database_maintenance.py",
+                "db_migrations.py",
+                "input_limits.py",
+                "node_probe.py",
+                "protocol_codecs.py",
                 "security_utils.py",
+                "sqlite_rate_limit.py",
                 "traffic_token.py",
                 "requirements.txt",
                 "deploy.sh",
@@ -2910,7 +3410,13 @@ proxies:
             )
             (panel_dir / "release-files.txt").write_text(
                 "app.py\n"
+                "database_maintenance.py\n"
+                "db_migrations.py\n"
+                "input_limits.py\n"
+                "node_probe.py\n"
+                "protocol_codecs.py\n"
                 "security_utils.py\n"
+                "sqlite_rate_limit.py\n"
                 "traffic_token.py\n"
                 "requirements.txt\n"
                 "deploy.sh\n"
@@ -3031,7 +3537,7 @@ proxies:
             smoke_database = root / "smoke" / "anytls.db"
             data_dir.mkdir(parents=True)
             smoke_database.parent.mkdir()
-            with sqlite3.connect(data_dir / "anytls.db") as db:
+            with closing(sqlite3.connect(data_dir / "anytls.db")) as db, db:
                 db.execute("CREATE TABLE proof (value TEXT)")
                 db.execute("INSERT INTO proof VALUES ('existing-data')")
                 db.commit()
@@ -3051,7 +3557,11 @@ proxies:
                     'prepare_smoke_database "$TEST_SMOKE_DATABASE"; '
                     'python3 - "$TEST_SMOKE_DATABASE" <<\'PY\'\n'
                     'import sqlite3, sys\n'
-                    'print(sqlite3.connect(sys.argv[1]).execute("SELECT value FROM proof").fetchone()[0])\n'
+                    'db = sqlite3.connect(sys.argv[1])\n'
+                    'try:\n'
+                    '    print(db.execute("SELECT value FROM proof").fetchone()[0])\n'
+                    'finally:\n'
+                    '    db.close()\n'
                     'PY',
                 ],
                 capture_output=True,
@@ -3778,7 +4288,7 @@ proxies:
         with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp:
             panel_dir = Path(tmp)
             legacy_db = panel_dir / "anytls.db"
-            with sqlite3.connect(legacy_db) as db:
+            with closing(sqlite3.connect(legacy_db)) as db, db:
                 db.execute("CREATE TABLE proof (value TEXT NOT NULL)")
                 db.execute("INSERT INTO proof (value) VALUES ('preserved')")
             (panel_dir / ".secret_key").write_text("legacy-secret", encoding="utf-8")
@@ -3803,7 +4313,7 @@ proxies:
             )
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            with sqlite3.connect(panel_dir / "data" / "anytls.db") as db:
+            with closing(sqlite3.connect(panel_dir / "data" / "anytls.db")) as db, db:
                 preserved = db.execute("SELECT value FROM proof").fetchone()[0]
                 integrity = db.execute("PRAGMA quick_check").fetchone()[0]
             self.assertEqual(preserved, "preserved")
@@ -3822,7 +4332,7 @@ proxies:
             rollback_dir = root / "rollback"
             panel_dir.mkdir()
             rollback_dir.mkdir()
-            with sqlite3.connect(panel_dir / "anytls.db") as db:
+            with closing(sqlite3.connect(panel_dir / "anytls.db")) as db, db:
                 db.execute("CREATE TABLE proof (value TEXT NOT NULL)")
                 db.execute("INSERT INTO proof VALUES ('legacy-current')")
             env = os.environ.copy()
@@ -3858,7 +4368,7 @@ proxies:
             )
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            with sqlite3.connect(panel_dir / "anytls.db") as db:
+            with closing(sqlite3.connect(panel_dir / "anytls.db")) as db, db:
                 self.assertEqual(
                     db.execute("SELECT value FROM proof").fetchone()[0],
                     "legacy-current",
@@ -3872,7 +4382,7 @@ proxies:
             rollback_dir = root / "rollback"
             panel_dir.mkdir()
             rollback_dir.mkdir()
-            with sqlite3.connect(panel_dir / "anytls.db") as db:
+            with closing(sqlite3.connect(panel_dir / "anytls.db")) as db, db:
                 db.execute("CREATE TABLE proof (value TEXT NOT NULL)")
                 db.execute("INSERT INTO proof VALUES ('legacy-current')")
             (panel_dir / ".secret_key").mkdir()
@@ -3977,6 +4487,7 @@ proxies:
 
         for content in (deploy, service, start):
             self.assertIn("--workers 1 --threads 4", content)
+            self.assertIn("app:create_app()", content)
             self.assertNotIn("-w 2", content)
         self.assertIn('SERVICE_USER="${ANYTLS_SERVICE_USER:-anytls-panel}"', deploy)
         self.assertIn("service user must not be root", deploy)
@@ -3986,6 +4497,11 @@ proxies:
         self.assertIn("NoNewPrivileges=true", service)
         self.assertIn("ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS", deploy)
         self.assertIn("ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=0", service)
+        self.assertIn("ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS=0", service)
+        self.assertIn("ANYTLS_ALLOW_PRIVATE_NODE_PROBES=0", service)
+        self.assertIn("ANYTLS_TRAFFIC_LOG_RETENTION_DAYS=90", service)
+        self.assertIn("ANYTLS_MAX_REQUEST_BYTES=4194304", service)
+        self.assertIn("ANYTLS_MAX_REQUEST_BYTES must be between", deploy)
         self.assertIn("--bind 127.0.0.1:8866", service)
         self.assertIn("ANYTLS_SESSION_COOKIE_SECURE=1", service)
         self.assertIn("ReadWritePaths=/opt/anytls-panel/data", service)

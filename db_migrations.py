@@ -1,6 +1,6 @@
 """Small, ordered SQLite schema migrations for existing installations."""
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 
 def _add_account_metadata_columns(db):
@@ -25,6 +25,29 @@ def _add_rate_limits(db):
             PRIMARY KEY (bucket, subject)
         ) WITHOUT ROWID"""
     )
+
+
+def _add_admin_session_version(db):
+    columns = {row[1] for row in db.execute("PRAGMA table_info(admin_users)")}
+    if "session_version" not in columns:
+        db.execute(
+            "ALTER TABLE admin_users ADD COLUMN "
+            "session_version INTEGER NOT NULL DEFAULT 1"
+        )
+
+
+def _add_database_maintenance(db):
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_traffic_logs_recorded_at "
+        "ON traffic_logs(recorded_at)"
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS maintenance_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ) WITHOUT ROWID"""
+    )
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_rate_limits_window_start "
         "ON rate_limits(window_start)"
@@ -34,6 +57,8 @@ def _add_rate_limits(db):
 _MIGRATIONS = (
     (1, _add_account_metadata_columns),
     (2, _add_rate_limits),
+    (3, _add_admin_session_version),
+    (4, _add_database_maintenance),
 )
 
 

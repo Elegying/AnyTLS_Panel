@@ -21,4 +21,4 @@ echo "  User: admin"
 echo "  On first start, the generated password is written next to anytls.db as .initial_admin_password."
 echo ""
 
-exec gunicorn --workers 1 --threads 4 --no-control-socket --bind "${HOST}:${PORT}" --timeout 120 app:app
+exec gunicorn --workers 1 --threads 4 --no-control-socket --bind "${HOST}:${PORT}" --timeout 120 'app:create_app()'
