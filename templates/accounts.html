@@ -1,93 +1,102 @@
 {% extends "base.html" %}
-{% block title %}账号管理 - AnyTLS Panel{% endblock %}
+{% block title %}账号 - AnyTLS Panel{% endblock %}
 {% block content %}
-<div class="header">
-    <h1>👤 账号管理</h1>
-    <button class="btn btn-primary" data-action="open-modal" data-modal="addModal">＋ 导入订阅</button>
+<header class="page-header">
+    <div class="page-heading">
+        <p class="eyebrow">订阅管理</p>
+        <h1 class="page-title">账号</h1>
+        <p class="page-description">管理订阅来源、流量配额和节点同步状态。</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn btn-primary" type="button" data-action="open-modal" data-modal="addModal"><i class="bi bi-plus-lg" aria-hidden="true"></i>导入订阅</button>
+    </div>
+</header>
+
+<div class="accounts-toolbar">
+    <span class="account-count">共 {{ accounts | length }} 个账号</span>
+    {% if accounts %}<span class="page-meta">选择账号查看节点与安全操作</span>{% endif %}
 </div>
 
 {% if accounts %}
-<div class="accounts-grid">
+<section class="accounts-grid" aria-label="账号列表">
     {% for a in accounts %}
     {% set pct = calc_traffic_percent(a.traffic_used_bytes or 0, a.traffic_limit_gb or 250) %}
-    <div class="account-card" data-action="navigate" data-href="{{ url_for('account_detail', account_id=a.id) }}">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:8px">
-            <div class="name">{{ a.name }}</div>
-            {% if a.status == 'active' %}
-            <span class="badge badge-green">活跃</span>
-            {% elif a.status == 'suspended' %}
-            <span class="badge badge-orange">暂停</span>
-            {% else %}
-            <span class="badge badge-red">停用</span>
-            {% endif %}
-        </div>
-        <div class="meta">
-            🖥️ {{ a.node_count or 0 }} 个节点
-            {% if a.last_synced_at %} · 🔄 {{ a.last_synced_at }}{% endif %}
-        </div>
-        <div>
-            <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">
-                <span>{{ format_bytes(a.traffic_used_bytes or 0) }}</span>
-                <span style="color:var(--text2)">{{ a.traffic_limit_gb }}GB</span>
-            </div>
-            <div class="progress" style="height:8px">
-                <div class="progress-bar {{ 'red' if pct >= 90 else 'orange' if pct >= 70 else 'green' }}" style="width:{{ pct }}%"></div>
-            </div>
-            <div style="text-align:right;font-size:12px;color:var(--text2);margin-top:4px">{{ pct }}%</div>
-            {% if a.notes %}
-            <div style="font-size:12px;color:var(--accent);margin-top:4px">📝 {{ a.notes }}</div>
-            {% endif %}
-        </div>
-    </div>
-    {% endfor %}
-</div>
-{% else %}
-<div class="card">
-    <div class="empty-state">
-        <div class="icon">📦</div>
-        <p>还没有账号，导入你的第一个订阅开始使用</p>
-        <button class="btn btn-primary" data-action="open-modal" data-modal="addModal">＋ 导入订阅</button>
-    </div>
-</div>
-{% endif %}
-
-<!-- 导入订阅弹窗 -->
-<div class="modal-overlay" id="addModal">
-    <div class="modal">
-        <h3>📥 导入订阅</h3>
-        <p style="color:var(--text2);font-size:13px;margin-bottom:20px">
-            支持以下格式：<br>
-            • HTTP(S) 订阅地址（自动拉取，支持 Clash YAML）<br>
-            • <code>anytls://</code> / <code>trojan://</code> / <code>vmess://</code> 等单链接<br>
-            • 多行链接（每行一个）<br>
-            • Base64 编码的订阅内容<br>
-            <span style="color:var(--accent)">自动识别节点类型：anytls / trojan / vmess / vless / hysteria2 / tuic / ss</span>
-        </p>
-        <form method="POST" action="{{ url_for('account_add') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <div class="form-group">
-                <label>账号名称（可选，留空自动取节点名）</label>
-                <input name="name" placeholder="如: 我的机场-套餐A">
-            </div>
-            <div class="form-group">
-                <label>订阅链接 *</label>
-                <textarea name="subscribe_url" rows="5" placeholder="粘贴 anytls 链接或订阅地址..." required></textarea>
-            </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>流量上限 (GB)</label>
-                    <input name="traffic_limit_gb" type="number" value="250" step="0.1">
+    <a class="account-card" href="{{ url_for('account_detail', account_id=a.id) }}">
+        <div class="account-card-header">
+            <div>
+                <h2 class="account-card-name">{{ a.name }}</h2>
+                <div class="account-card-meta">
+                    <span><i class="bi bi-hdd-network" aria-hidden="true"></i>{{ a.node_count or 0 }} 个节点</span>
+                    <span><i class="bi bi-arrow-repeat" aria-hidden="true"></i>{{ a.last_synced_at or '尚未同步' }}</span>
                 </div>
             </div>
-            <div class="form-group">
-                <label>备注</label>
-                <input name="notes" placeholder="可选备注">
+            <span class="badge {{ 'badge-green' if a.status == 'active' else 'badge-orange' if a.status == 'suspended' else 'badge-red' }}">{{ '活跃' if a.status == 'active' else '暂停' if a.status == 'suspended' else '停用' }}</span>
+        </div>
+        <div class="account-traffic">
+            <div class="account-traffic-row">
+                <span class="account-traffic-main">{{ format_bytes(a.traffic_used_bytes or 0) }}</span>
+                <span class="account-traffic-limit">/ {{ a.traffic_limit_gb }} GB</span>
             </div>
-            <div class="modal-actions">
-                <button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="addModal">取消</button>
-                <button type="submit" class="btn btn-primary">导入</button>
+            <div class="progress progress-lg"><div class="progress-bar {{ 'red' if pct >= 90 else 'orange' if pct >= 70 else 'green' }}" style="width:{{ pct }}%"></div></div>
+            <div class="account-card-footer">
+                <span>配额使用率 {{ pct }}%{% if a.notes %} · {{ a.notes }}{% endif %}</span>
+                <i class="bi bi-arrow-right" aria-hidden="true"></i>
             </div>
-        </form>
+        </div>
+    </a>
+    {% endfor %}
+</section>
+{% else %}
+<section class="panel">
+    <div class="empty-state">
+        <div class="empty-state-inner">
+            <span class="empty-icon"><i class="bi bi-person-plus" aria-hidden="true"></i></span>
+            <h3>导入第一个订阅</h3>
+            <p>支持订阅地址、单节点链接、多行链接与 Base64 内容。</p>
+            <button class="btn btn-primary" type="button" data-action="open-modal" data-modal="addModal"><i class="bi bi-plus-lg" aria-hidden="true"></i>导入订阅</button>
+        </div>
     </div>
+</section>
+{% endif %}
+
+<div class="modal-overlay" id="addModal" aria-hidden="true">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="addModalTitle">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title" id="addModalTitle"><i class="bi bi-box-arrow-in-down" aria-hidden="true"></i>导入订阅</h2>
+                <p class="modal-description">系统会自动识别订阅地址、AnyTLS 与其他常见代理链接。</p>
+            </div>
+            <button type="button" class="icon-button modal-close" data-action="close-modal" data-modal="addModal" aria-label="关闭导入订阅弹窗"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
+        </div>
+        <div class="modal-body">
+            <form method="POST" action="{{ url_for('account_add') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="account-name">账号名称</label>
+                    <input id="account-name" name="name" placeholder="例如：香港主线路">
+                    <p class="field-help">可选；留空时自动使用节点名称。</p>
+                </div>
+                <div class="form-group">
+                    <label for="subscribe-url">订阅内容</label>
+                    <textarea id="subscribe-url" name="subscribe_url" rows="6" placeholder="粘贴 HTTP(S) 订阅地址、单节点链接或多行链接" required></textarea>
+                    <p class="field-help">支持 anytls、trojan、vmess、vless、hysteria2、tuic 和 shadowsocks。</p>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="traffic-limit">流量上限（GB）</label>
+                        <input id="traffic-limit" name="traffic_limit_gb" type="number" value="250" step="0.1" min="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="account-notes">备注</label>
+                        <input id="account-notes" name="notes" placeholder="例如：生产环境">
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="addModal">取消</button>
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-box-arrow-in-down" aria-hidden="true"></i>导入并解析</button>
+                </div>
+            </form>
+        </div>
+    </section>
 </div>
 {% endblock %}

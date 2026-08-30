@@ -1,126 +1,188 @@
 {% extends "base.html" %}
 {% block title %}仪表盘 - AnyTLS Panel{% endblock %}
 {% block content %}
-<div class="header">
-    <h1>📊 仪表盘</h1>
-    <span style="color:var(--text2);font-size:13px">{{ now.strftime('%Y-%m-%d %H:%M') }}</span>
-</div>
+<header class="page-header">
+    <div class="page-heading">
+        <p class="eyebrow">运营总览</p>
+        <h1 class="page-title">仪表盘</h1>
+        <p class="page-description">集中查看账号、节点健康和流量风险，优先处理需要关注的问题。</p>
+    </div>
+    <div class="page-actions">
+        <span class="page-meta">最后同步：{{ last_synced_at or '尚未同步' }}</span>
+        <button class="btn btn-primary" id="syncAllBtn" type="button" data-action="sync-all">
+            <i class="bi bi-arrow-repeat" aria-hidden="true"></i><span>立即同步</span>
+        </button>
+    </div>
+</header>
 
-<div class="stats">
-    <div class="stat-card">
-        <div class="label">账号数</div>
-        <div class="value blue">{{ total_accounts }}</div>
+<section class="system-strip" aria-label="系统概览">
+    <div class="system-metric">
+        <div class="metric-label"><i class="bi bi-people" aria-hidden="true"></i>账号总数</div>
+        <div class="metric-value is-blue">{{ total_accounts }}</div>
+        <div class="metric-note">{{ active_accounts }} 个账号处于活跃状态</div>
     </div>
-    <div class="stat-card" style="display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer" data-action="sync-all">
-        <div style="font-size:32px;margin-bottom:8px">🔄</div>
-        <div style="font-size:15px;font-weight:600">一键同步全部</div>
-        <div style="font-size:12px;color:var(--text2);margin-top:4px">更新所有账号订阅</div>
+    <div class="system-metric">
+        <div class="metric-label"><i class="bi bi-hdd-network" aria-hidden="true"></i>在线节点</div>
+        <div class="metric-value is-green">{{ online_nodes }} <span class="page-meta">/ {{ total_nodes }}</span></div>
+        <div class="metric-note">{% if total_nodes %}在线率 {{ ((online_nodes / total_nodes) * 100) | round(1) }}%{% else %}暂无节点数据{% endif %}</div>
     </div>
-    <div class="stat-card">
-        <div class="label">总流量使用</div>
-        <div class="value">{{ format_bytes(total_traffic_used) }}</div>
-        {% if total_traffic_limit > 0 %}
-        <div class="progress">
-            <div class="progress-bar {{ 'red' if total_traffic_used > total_traffic_limit * 0.9 else 'orange' if total_traffic_used > total_traffic_limit * 0.7 else 'green' }}" style="width:{{ (total_traffic_used / total_traffic_limit * 100) | round(1) }}%"></div>
-        </div>
-        <div style="font-size:12px;color:var(--text2);margin-top:4px">/ {{ format_bytes(total_traffic_limit) }}</div>
-        {% endif %}
+    <div class="system-metric">
+        <div class="metric-label"><i class="bi bi-pie-chart" aria-hidden="true"></i>总流量使用</div>
+        <div class="metric-value">{{ format_bytes(total_traffic_used) }}</div>
+        <div class="metric-note">{% if total_traffic_limit %}总配额 {{ format_bytes(total_traffic_limit) }}{% else %}尚未设置配额{% endif %}</div>
     </div>
-    <div class="stat-card">
-        <div class="label">告警账号 (≥80%)</div>
-        <div class="value {{ 'orange' if warning_accounts else 'green' }}">{{ warning_accounts | length }}</div>
+    <div class="system-metric">
+        <div class="metric-label"><i class="bi bi-exclamation-triangle" aria-hidden="true"></i>告警账号</div>
+        <div class="metric-value {{ 'is-orange' if warning_accounts else 'is-green' }}">{{ warning_accounts | length }}</div>
+        <div class="metric-note">流量使用率达到 80% 以上</div>
     </div>
-</div>
+    <div class="system-metric">
+        <div class="metric-label"><i class="bi bi-broadcast-pin" aria-hidden="true"></i>节点状态</div>
+        <div class="metric-value {{ 'is-orange' if offline_nodes else 'is-green' }}">{{ offline_nodes }}</div>
+        <div class="metric-note">离线 {{ offline_nodes }} · 未检测 {{ unknown_nodes }}</div>
+    </div>
+</section>
 
-{% if warning_accounts %}
-<div class="card" style="border-color:rgba(253,203,110,0.3)">
-    <h2>⚠️ 流量告警</h2>
-    <table class="rwd-table">
-        <thead><tr><th>账号</th><th>使用率</th><th>已用 / 上限</th></tr></thead>
-        {% for a in warning_accounts %}
-        <tr>
-            <td data-label="账号"><a href="{{ url_for('account_detail', account_id=a.id) }}" style="color:var(--accent)">{{ a.name }}</a></td>
-            <td data-label="使用率"><span class="badge badge-orange">{{ a.usage_pct }}%</span></td>
-            <td data-label="流量">{{ format_bytes(a.traffic_used_bytes or 0) }} / {{ a.traffic_limit_gb }}GB</td>
-        </tr>
-        {% endfor %}
-    </table>
-</div>
-{% endif %}
-
-<div class="card">
-    <h2>👤 账号概览</h2>
-    {% if accounts %}
-    <table class="rwd-table">
-        <thead><tr><th>账号</th><th>到期时间</th><th>节点数</th><th>流量</th><th>状态</th><th class="hide-mobile">最后同步</th></tr></thead>
-        {% for a in accounts %}
-        <tr class="clickable" data-action="navigate" data-href="{{ url_for('account_detail', account_id=a.id) }}">
-            <td data-label="账号"><strong>{{ a.name }}</strong></td>
-            <td data-label="到期时间" style="white-space:nowrap">
-                {% if a.expire_date %}
-                {% set remaining_days = days_until(a.expire_date) %}
-                <span style="font-size:13px">到期：{{ a.expire_date }}</span>
-                {% if remaining_days is not none %}
-                <span class="badge {{ 'badge-red' if remaining_days < 0 else 'badge-orange' if remaining_days <= 30 else 'badge-green' }}" style="margin-left:6px">
-                    {{ '已过期' ~ (-remaining_days) ~ '天' if remaining_days < 0 else '剩余' ~ remaining_days ~ '天' }}
-                </span>
-                {% endif %}
-                {% else %}
-                <span style="font-size:13px;color:var(--text2)">到期：未设置</span>
-                {% endif %}
-            </td>
-            <td data-label="节点数"><span class="badge badge-blue">{{ a.node_count or 0 }} 个</span></td>
-            <td data-label="流量">
-                {% set pct = calc_traffic_percent(a.traffic_used_bytes or 0, a.traffic_limit_gb or 250) %}
-                <div class="m-traffic">
-                    <div style="display:flex;align-items:center;gap:8px">
-                        <span style="font-size:13px">{{ format_bytes(a.traffic_used_bytes or 0) }} / {{ a.traffic_limit_gb }}GB</span>
-                        <span class="badge {{ 'badge-red' if pct >= 90 else 'badge-orange' if pct >= 70 else 'badge-green' }}">{{ pct }}%</span>
+<section class="dashboard-grid" aria-label="运营详情">
+    <article class="panel">
+        <header class="panel-header">
+            <h2 class="panel-title"><i class="bi bi-exclamation-triangle" aria-hidden="true"></i>需要处理</h2>
+            <span class="badge {{ 'badge-orange' if attention_total else 'badge-green' }}">{{ attention_total }}</span>
+        </header>
+        <div class="panel-body">
+            {% if warning_accounts or attention_nodes %}
+            <ul class="alert-list">
+                {% for a in warning_accounts[:2] %}
+                <li class="alert-item">
+                    <span class="alert-icon"><i class="bi bi-speedometer2" aria-hidden="true"></i></span>
+                    <div>
+                        <div class="alert-name">{{ a.name }}</div>
+                        <div class="alert-detail">已用 {{ format_bytes(a.traffic_used_bytes or 0) }} / {{ a.traffic_limit_gb }} GB</div>
                     </div>
-                    <div class="progress" style="width:100%"><div class="progress-bar {{ 'red' if pct >= 90 else 'orange' if pct >= 70 else 'green' }}" style="width:{{ pct }}%"></div></div>
+                    <a class="btn btn-sm btn-ghost" href="{{ url_for('account_detail', account_id=a.id) }}">查看</a>
+                </li>
+                {% endfor %}
+                {% for n in attention_nodes[:2] %}
+                {% set endpoint = ('[' ~ n.host ~ ']:' ~ n.port) if ':' in n.host else (n.host ~ ':' ~ n.port) %}
+                <li class="alert-item">
+                    <span class="alert-icon"><i class="bi {{ 'bi-wifi-off' if n.is_online == 0 else 'bi-question-circle' }}" aria-hidden="true"></i></span>
+                    <div>
+                        <div class="alert-name">{{ n.name }}</div>
+                        <div class="alert-detail">{{ '节点离线' if n.is_online == 0 else '节点尚未检测' }} · {{ endpoint }}</div>
+                    </div>
+                    <a class="btn btn-sm btn-ghost" href="{{ url_for('account_detail', account_id=n.account_id) }}">查看</a>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="empty-state">
+                <div class="empty-state-inner">
+                    <span class="empty-icon"><i class="bi bi-check2-circle" aria-hidden="true"></i></span>
+                    <h3>当前没有流量告警</h3>
+                    <p>所有账号的配额使用率均低于 80%。</p>
                 </div>
-            </td>
-            <td data-label="状态">
-                {% if a.status == 'active' %}
-                <span class="badge badge-green">活跃</span>
-                {% elif a.status == 'suspended' %}
-                <span class="badge badge-orange">暂停</span>
-                {% else %}
-                <span class="badge badge-red">停用</span>
-                {% endif %}
-            </td>
-            <td data-label="最后同步" class="hide-mobile" style="font-size:12px;color:var(--text2)">{{ a.last_synced_at or '未同步' }}</td>
-        </tr>
-        {% endfor %}
-    </table>
-    {% else %}
-    <div class="empty-state">
-        <div class="icon">📦</div>
-        <p>暂无账号，前往 <a href="{{ url_for('accounts_list') }}" style="color:var(--accent)">账号管理</a> 导入订阅</p>
+            </div>
+            {% endif %}
+        </div>
+        <footer class="panel-footer"><a class="panel-link" href="{{ url_for('accounts_list') }}">查看全部账号<i class="bi bi-arrow-right" aria-hidden="true"></i></a></footer>
+    </article>
+
+    <article class="panel">
+        <header class="panel-header">
+            <h2 class="panel-title"><i class="bi bi-person-check" aria-hidden="true"></i>账号状态</h2>
+            <span class="panel-meta">{{ active_accounts }} / {{ total_accounts }} 活跃</span>
+        </header>
+        <div class="panel-body">
+            {% if accounts %}
+            <ul class="health-list">
+                {% for a in accounts[:4] %}
+                {% set pct = calc_traffic_percent(a.traffic_used_bytes or 0, a.traffic_limit_gb or 250) %}
+                <li class="health-item">
+                    <div>
+                        <div class="health-name">{{ a.name }}</div>
+                        <div class="health-detail">{{ format_bytes(a.traffic_used_bytes or 0) }} / {{ a.traffic_limit_gb }} GB · {{ a.node_count or 0 }} 个节点</div>
+                    </div>
+                    <span class="badge {{ 'badge-red' if pct >= 90 else 'badge-orange' if pct >= 70 else 'badge-green' }}">{{ pct }}%</span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-person-plus" aria-hidden="true"></i></span><h3>尚未导入账号</h3><p>导入订阅后即可查看账号健康状态。</p></div></div>
+            {% endif %}
+        </div>
+        <footer class="panel-footer"><a class="panel-link" href="{{ url_for('accounts_list') }}">管理账号<i class="bi bi-arrow-right" aria-hidden="true"></i></a></footer>
+    </article>
+
+    <article class="panel">
+        <header class="panel-header">
+            <h2 class="panel-title"><i class="bi bi-bar-chart" aria-hidden="true"></i>流量使用</h2>
+            <span class="panel-meta">总计</span>
+        </header>
+        <div class="panel-body traffic-summary">
+            {% set traffic_pct = ((total_traffic_used / total_traffic_limit * 100) | round(1)) if total_traffic_limit else 0 %}
+            <div class="traffic-number">{{ format_bytes(total_traffic_used) }} <span>/ {{ format_bytes(total_traffic_limit) if total_traffic_limit else '未设置' }}</span></div>
+            <div class="progress progress-lg"><div class="progress-bar {{ 'red' if traffic_pct >= 90 else 'orange' if traffic_pct >= 70 else 'green' }}" style="width:{{ [traffic_pct, 100] | min }}%"></div></div>
+            <div class="traffic-legend">
+                <div class="legend-row"><span class="legend-label"><span class="legend-dot"></span>已使用</span><strong>{{ format_bytes(total_traffic_used) }}</strong></div>
+                <div class="legend-row"><span class="legend-label"><span class="legend-dot is-muted"></span>总配额</span><strong>{{ format_bytes(total_traffic_limit) if total_traffic_limit else '—' }}</strong></div>
+                <div class="legend-row"><span>整体使用率</span><span class="badge {{ 'badge-red' if traffic_pct >= 90 else 'badge-orange' if traffic_pct >= 70 else 'badge-green' }}">{{ traffic_pct }}%</span></div>
+            </div>
+        </div>
+        <footer class="panel-footer"><a class="panel-link" href="{{ url_for('accounts_list') }}">查看流量详情<i class="bi bi-arrow-right" aria-hidden="true"></i></a></footer>
+    </article>
+</section>
+
+<section class="panel dashboard-bottom">
+    <header class="panel-header">
+        <h2 class="panel-title"><i class="bi bi-list-check" aria-hidden="true"></i>账号概览</h2>
+        <span class="panel-meta">按账号集中查看节点与流量</span>
+    </header>
+    {% if accounts %}
+    <div class="table-scroll">
+        <table class="rwd-table">
+            <thead><tr><th>账号</th><th>到期时间</th><th>节点</th><th>流量使用</th><th>状态</th><th class="hide-mobile">最后同步</th></tr></thead>
+            <tbody>
+            {% for a in accounts %}
+            {% set pct = calc_traffic_percent(a.traffic_used_bytes or 0, a.traffic_limit_gb or 250) %}
+            <tr class="clickable" data-action="navigate" data-href="{{ url_for('account_detail', account_id=a.id) }}" tabindex="0" role="link">
+                <td data-label="账号"><strong>{{ a.name }}</strong><span class="cell-subtitle">账号 #{{ a.id }}</span></td>
+                <td data-label="到期时间">
+                    {% if a.expire_date %}
+                    {% set remaining_days = days_until(a.expire_date) %}
+                    <span class="cell-title">到期：{{ a.expire_date }}</span>
+                    {% if remaining_days is not none %}<span class="cell-subtitle">{{ '已过期' ~ (-remaining_days) ~ '天' if remaining_days < 0 else '剩余' ~ remaining_days ~ '天' }}</span>{% endif %}
+                    {% else %}<span class="cell-subtitle">到期：未设置</span>{% endif %}
+                </td>
+                <td data-label="节点数"><span class="badge badge-blue">{{ a.node_count or 0 }} 个</span></td>
+                <td data-label="流量使用"><div class="cell-stack"><div class="cell-row"><span>{{ format_bytes(a.traffic_used_bytes or 0) }} / {{ a.traffic_limit_gb }} GB</span><span class="badge {{ 'badge-red' if pct >= 90 else 'badge-orange' if pct >= 70 else 'badge-green' }}">{{ pct }}%</span></div><div class="progress"><div class="progress-bar {{ 'red' if pct >= 90 else 'orange' if pct >= 70 else 'green' }}" style="width:{{ pct }}%"></div></div></div></td>
+                <td data-label="状态"><span class="badge {{ 'badge-green' if a.status == 'active' else 'badge-orange' if a.status == 'suspended' else 'badge-red' }}">{{ '活跃' if a.status == 'active' else '暂停' if a.status == 'suspended' else '停用' }}</span></td>
+                <td data-label="最后同步" class="hide-mobile"><span class="cell-subtitle">{{ a.last_synced_at or '未同步' }}</span></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
     </div>
+    {% else %}
+    <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-inbox" aria-hidden="true"></i></span><h3>暂无账号</h3><p>前往账号页导入第一个订阅。</p><a class="btn btn-primary" href="{{ url_for('accounts_list') }}">管理账号</a></div></div>
     {% endif %}
-</div>
+</section>
 
 <script nonce="{{ g.csp_nonce }}">
-async function syncAll(card) {
+async function syncAll(button) {
     if (!confirm('确认同步所有账号的订阅？')) return;
-    const orig = card.innerHTML;
-    card.innerHTML = '<div style="font-size:32px;margin-bottom:8px">⏳</div><div style="font-size:15px;font-weight:600">同步中...</div>';
-    card.style.pointerEvents = 'none';
+    const original = button.innerHTML;
+    button.innerHTML = '<i class="bi bi-arrow-repeat" aria-hidden="true"></i><span>同步中…</span>';
+    button.disabled = true;
     try {
-        const resp = await fetch('/api/sync-all', {method: 'POST', headers: csrfHeaders()});
-        const data = await resp.json();
-        let msg = data.results.map(r => {
-            return r.status === 'ok'
-                ? '✅ ' + r.name + ': ' + r.nodes + ' 个节点'
-                : '❌ ' + r.name + ': ' + r.msg;
-        }).join('\n');
-        alert('同步完成:\n' + msg);
-        location.reload();
-    } catch(e) {
-        alert('同步失败: ' + e.message);
-        card.innerHTML = orig;
-        card.style.pointerEvents = '';
+        const response = await fetch('/api/sync-all', {method: 'POST', headers: csrfHeaders()});
+        const data = await response.json();
+        const successCount = (data.results || []).filter(result => result.status === 'ok').length;
+        showToast('同步完成：' + successCount + ' 个账号更新成功', true);
+        window.setTimeout(() => location.reload(), 700);
+    } catch (error) {
+        showToast('同步失败：' + error.message, false);
+        button.innerHTML = original;
+        button.disabled = false;
     }
 }
 </script>

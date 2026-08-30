@@ -1,198 +1,114 @@
 {% extends "base.html" %}
-{% block title %}节点检测 - AnyTLS Panel{% endblock %}
+{% block title %}监控 - AnyTLS Panel{% endblock %}
 {% block content %}
-<div class="header">
-    <h1>📡 节点检测</h1>
-    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <span id="check-status" style="font-size:13px;color:var(--text2)"></span>
-        <button class="btn btn-primary" id="checkAllBtn" data-action="check-all">🔍 一键检测全部</button>
-    </div>
-</div>
+{% set health = namespace(online=0, offline=0, unknown=0) %}
+{% for n in nodes %}
+    {% if n.is_online == 1 %}{% set health.online = health.online + 1 %}
+    {% elif n.is_online == 0 %}{% set health.offline = health.offline + 1 %}
+    {% else %}{% set health.unknown = health.unknown + 1 %}{% endif %}
+{% endfor %}
 
-<div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
-        <h2 style="margin-bottom:0">唯一节点列表</h2>
-        <span style="font-size:13px;color:var(--text2)">共 {{ nodes | length }} 个唯一节点（按地址去重）</span>
+<header class="page-header">
+    <div class="page-heading">
+        <p class="eyebrow">节点健康</p>
+        <h1 class="page-title">监控</h1>
+        <p class="page-description">按唯一连接地址查看可用性与延迟，快速定位离线或响应缓慢的节点。</p>
     </div>
+    <div class="page-actions">
+        <span class="page-meta" id="check-status" role="status"></span>
+        <button class="btn btn-primary" id="checkAllBtn" type="button" data-action="check-all"><i class="bi bi-radar" aria-hidden="true"></i><span>检测全部</span></button>
+    </div>
+</header>
 
+<section class="monitor-summary" aria-label="节点状态汇总">
+    <div class="summary-card"><div class="metric-label"><i class="bi bi-hdd-stack" aria-hidden="true"></i>唯一节点</div><div class="summary-card-value is-blue">{{ nodes | length }}</div></div>
+    <div class="summary-card"><div class="metric-label"><i class="bi bi-check-circle" aria-hidden="true"></i>在线</div><div class="summary-card-value" id="stat-online" style="color:var(--green)">{{ health.online }}</div></div>
+    <div class="summary-card"><div class="metric-label"><i class="bi bi-x-circle" aria-hidden="true"></i>离线</div><div class="summary-card-value" id="stat-offline" style="color:var(--red)">{{ health.offline }}</div></div>
+    <div class="summary-card"><div class="metric-label"><i class="bi bi-question-circle" aria-hidden="true"></i>未检测</div><div class="summary-card-value" id="stat-unknown" style="color:var(--text-2)">{{ health.unknown }}</div></div>
+</section>
+
+<section class="panel">
+    <header class="panel-header"><h2 class="panel-title"><i class="bi bi-broadcast" aria-hidden="true"></i>唯一节点列表</h2><span class="panel-meta">按地址与端口去重</span></header>
     {% if nodes %}
-    <table class="rwd-table">
-        <thead>
-        <tr>
-            <th class="hide-mobile">#</th>
-            <th>节点名称</th>
-            <th>协议</th>
-            <th class="hide-mobile">地址</th>
-            <th>状态</th>
-            <th>延迟</th>
-            <th class="hide-mobile">最后检测</th>
-            <th>操作</th>
-        </tr>
-        </thead>
-        {% for n in nodes %}
-        <tr>
-            <td data-label="#" class="hide-mobile" style="color:var(--text2)">{{ loop.index }}</td>
-            <td data-label="节点">
-                <strong>{{ n.name }}</strong>
-                {% if n.account_count > 1 %}
-                <div style="font-size:11px;color:var(--text2);margin-top:2px">关联 {{ n.account_count }} 个账号</div>
-                {% endif %}
-            </td>
-            <td data-label="协议"><span class="badge badge-blue">{{ n.protocol or 'anytls' }}</span></td>
-            <td data-label="地址" class="hide-mobile">
-                <code style="background:var(--bg);padding:2px 8px;border-radius:4px;font-size:13px">{{ n.host }}:{{ n.port }}</code>
-            </td>
-            <td data-label="状态" id="status-{{ n.host }}-{{ n.port }}">
-                {% if n.is_online == 1 %}
-                <span class="badge badge-green">在线</span>
-                {% elif n.is_online == 0 %}
-                <span class="badge badge-red">离线</span>
-                {% else %}
-                <span class="badge" style="background:rgba(139,143,163,0.15);color:var(--text2)">未检测</span>
-                {% endif %}
-            </td>
-            <td data-label="延迟" id="latency-{{ n.host }}-{{ n.port }}" style="font-size:13px">
-                {% if n.latency_ms is not none and n.latency_ms >= 0 %}
-                    {% if n.latency_ms < 200 %}
-                    <span style="color:var(--green)">{{ n.latency_ms }}ms</span>
-                    {% elif n.latency_ms < 500 %}
-                    <span style="color:var(--orange)">{{ n.latency_ms }}ms</span>
-                    {% else %}
-                    <span style="color:var(--red)">{{ n.latency_ms }}ms</span>
-                    {% endif %}
-                {% else %}
-                <span style="color:var(--text2)">-</span>
-                {% endif %}
-            </td>
-            <td data-label="检测时间" class="hide-mobile" style="font-size:12px;color:var(--text2)">{{ n.last_checked_at or '-' }}</td>
-            <td data-label="操作">
-                <button class="btn btn-sm btn-ghost"
-                        data-host="{{ n.host }}" data-port="{{ n.port }}"
-                        data-action="check-host">检测</button>
-            </td>
-        </tr>
-        {% endfor %}
-    </table>
+    <div class="table-scroll">
+        <table class="rwd-table" id="monitorTable">
+            <thead><tr><th class="hide-mobile">#</th><th>节点名称</th><th>协议</th><th class="hide-mobile">连接地址</th><th>状态</th><th>延迟</th><th class="hide-mobile">最后检测</th><th>操作</th></tr></thead>
+            <tbody>
+            {% for n in nodes %}
+            {% set endpoint = ('[' ~ n.host ~ ']:' ~ n.port) if ':' in n.host else (n.host ~ ':' ~ n.port) %}
+            <tr>
+                <td data-label="#" class="hide-mobile"><span class="cell-subtitle">{{ loop.index }}</span></td>
+                <td data-label="节点"><span class="cell-title">{{ n.name }}</span>{% if n.account_count > 1 %}<span class="cell-subtitle">关联 {{ n.account_count }} 个账号</span>{% endif %}</td>
+                <td data-label="协议"><span class="badge badge-blue">{{ n.protocol or 'anytls' }}</span></td>
+                <td data-label="地址" class="hide-mobile"><code class="code-value">{{ endpoint }}</code></td>
+                <td data-label="状态" id="status-{{ n.host }}-{{ n.port }}"><span class="badge {{ 'badge-green' if n.is_online == 1 else 'badge-red' if n.is_online == 0 else 'badge-neutral' }}">{{ '在线' if n.is_online == 1 else '离线' if n.is_online == 0 else '未检测' }}</span></td>
+                <td data-label="延迟" id="latency-{{ n.host }}-{{ n.port }}">{% if n.latency_ms is not none and n.latency_ms >= 0 %}<span style="color:{{ 'var(--green)' if n.latency_ms < 200 else 'var(--orange)' if n.latency_ms < 500 else 'var(--red)' }}">{{ n.latency_ms }} ms</span>{% else %}<span class="cell-subtitle">—</span>{% endif %}</td>
+                <td data-label="检测时间" class="hide-mobile"><span class="cell-subtitle">{{ n.last_checked_at or '—' }}</span></td>
+                <td data-label="操作"><button class="btn btn-sm btn-ghost" type="button" data-host="{{ n.host }}" data-port="{{ n.port }}" data-action="check-host"><i class="bi bi-play-circle" aria-hidden="true"></i>检测</button></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
     {% else %}
-    <div class="empty-state">
-        <div class="icon">🔍</div>
-        <p>暂无节点，请先 <a href="{{ url_for('accounts_list') }}" style="color:var(--accent)">导入订阅</a></p>
-    </div>
+    <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-broadcast" aria-hidden="true"></i></span><h3>暂无节点</h3><p>导入并同步订阅后即可进行节点检测。</p><a class="btn btn-primary" href="{{ url_for('accounts_list') }}">前往账号</a></div></div>
     {% endif %}
-</div>
-
-<div class="card">
-    <h2>📊 统计</h2>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:12px;text-align:center">
-        <div>
-            <div style="font-size:24px;font-weight:700;color:var(--blue)">{{ nodes | length }}</div>
-            <div style="font-size:12px;color:var(--text2)">唯一节点</div>
-        </div>
-        <div>
-            <div id="stat-online" style="font-size:24px;font-weight:700;color:var(--green)">-</div>
-            <div style="font-size:12px;color:var(--text2)">在线</div>
-        </div>
-        <div>
-            <div id="stat-offline" style="font-size:24px;font-weight:700;color:var(--red)">-</div>
-            <div style="font-size:12px;color:var(--text2)">离线</div>
-        </div>
-        <div>
-            <div id="stat-unknown" style="font-size:24px;font-weight:700;color:var(--text2)">{{ nodes | length }}</div>
-            <div style="font-size:12px;color:var(--text2)">未检测</div>
-        </div>
-    </div>
-</div>
+</section>
 
 <script nonce="{{ g.csp_nonce }}">
+function setNodeResult(host, port, data) {
+    const statusElement = document.getElementById('status-' + host + '-' + port);
+    const latencyElement = document.getElementById('latency-' + host + '-' + port);
+    statusElement.innerHTML = data.online ? '<span class="badge badge-green">在线</span>' : '<span class="badge badge-red">离线</span>';
+    if (data.latency >= 0) {
+        const color = data.latency < 200 ? 'var(--green)' : data.latency < 500 ? 'var(--orange)' : 'var(--red)';
+        latencyElement.innerHTML = '<span style="color:' + color + '">' + data.latency + ' ms</span>';
+    } else latencyElement.innerHTML = '<span class="cell-subtitle">—</span>';
+}
+
 async function checkOne(host, port) {
-    const el = document.getElementById('status-' + host + '-' + port);
-    const latEl = document.getElementById('latency-' + host + '-' + port);
-    el.innerHTML = '<span class="badge" style="background:rgba(116,185,255,0.15);color:var(--blue)">检测中...</span>';
-    latEl.innerHTML = '<span style="color:var(--text2)">...</span>';
+    const statusElement = document.getElementById('status-' + host + '-' + port);
+    const latencyElement = document.getElementById('latency-' + host + '-' + port);
+    statusElement.innerHTML = '<span class="badge badge-blue">检测中…</span>';
+    latencyElement.innerHTML = '<span class="cell-subtitle">…</span>';
     try {
-        const resp = await fetch('/api/check-by-host', {
-            method: 'POST',
-            headers: csrfHeaders({'Content-Type': 'application/json'}),
-            body: JSON.stringify({host: host, port: port})
-        });
-        const data = await resp.json();
-        el.innerHTML = data.online
-            ? '<span class="badge badge-green">在线</span>'
-            : '<span class="badge badge-red">离线</span>';
-        if (data.latency >= 0) {
-            const c = data.latency < 200 ? 'var(--green)' : data.latency < 500 ? 'var(--orange)' : 'var(--red)';
-            latEl.innerHTML = '<span style="color:' + c + '">' + data.latency + 'ms</span>';
-        } else {
-            latEl.innerHTML = '<span style="color:var(--text2)">-</span>';
-        }
-    } catch(e) {
-        el.innerHTML = '<span class="badge badge-red">错误</span>';
-        latEl.innerHTML = '<span style="color:var(--text2)">-</span>';
+        const response = await fetch('/api/check-by-host', {method: 'POST', headers: csrfHeaders({'Content-Type': 'application/json'}), body: JSON.stringify({host, port})});
+        const data = await response.json();
+        setNodeResult(host, port, data);
+        updateStats();
+    } catch (error) {
+        statusElement.innerHTML = '<span class="badge badge-red">检测失败</span>';
+        latencyElement.innerHTML = '<span class="cell-subtitle">—</span>';
+        updateStats();
     }
 }
 
 async function checkAll() {
-    const btn = document.getElementById('checkAllBtn');
+    const button = document.getElementById('checkAllBtn');
     const status = document.getElementById('check-status');
-    btn.disabled = true;
-    btn.textContent = '⏳ 检测中...';
-    status.textContent = '';
-
-    const rows = document.querySelectorAll('.rwd-table tbody tr');
-    let total = 0, online = 0, offline = 0;
-
-    for (const row of rows) {
+    const rows = Array.from(document.querySelectorAll('#monitorTable tbody tr'));
+    button.disabled = true;
+    button.innerHTML = '<i class="bi bi-radar" aria-hidden="true"></i><span>检测中…</span>';
+    for (let index = 0; index < rows.length; index += 1) {
+        const row = rows[index];
         const action = row.querySelector('button[data-host][data-port]');
         if (!action) continue;
-        const host = action.dataset.host;
-        const port = Number(action.dataset.port);
-        const statusEl = document.getElementById('status-' + host + '-' + port);
-        const latEl = document.getElementById('latency-' + host + '-' + port);
-        if (!statusEl) continue;
-
-        statusEl.innerHTML = '<span class="badge" style="background:rgba(116,185,255,0.15);color:var(--blue)">检测中...</span>';
-        if (latEl) latEl.innerHTML = '<span style="color:var(--text2)">...</span>';
-        try {
-            const resp = await fetch('/api/check-by-host', {
-                method: 'POST',
-                headers: csrfHeaders({'Content-Type': 'application/json'}),
-                body: JSON.stringify({host: host, port: parseInt(port)})
-            });
-            const data = await resp.json();
-            if (data.online) {
-                statusEl.innerHTML = '<span class="badge badge-green">在线</span>';
-                online++;
-            } else {
-                statusEl.innerHTML = '<span class="badge badge-red">离线</span>';
-                offline++;
-            }
-            if (latEl && data.latency >= 0) {
-                const c = data.latency < 200 ? 'var(--green)' : data.latency < 500 ? 'var(--orange)' : 'var(--red)';
-                latEl.innerHTML = '<span style="color:' + c + '">' + data.latency + 'ms</span>';
-            } else if (latEl) {
-                latEl.innerHTML = '<span style="color:var(--text2)">-</span>';
-            }
-        } catch(e) {
-            statusEl.innerHTML = '<span class="badge badge-red">错误</span>';
-            offline++;
-        }
-        total++;
-        status.textContent = total + '/' + rows.length;
+        status.textContent = (index + 1) + ' / ' + rows.length;
+        await checkOne(action.dataset.host, Number(action.dataset.port));
     }
-
-    btn.disabled = false;
-    btn.textContent = '🔍 一键检测全部';
-    status.textContent = '完成 ✓';
-    updateStats();
+    button.disabled = false;
+    button.innerHTML = '<i class="bi bi-radar" aria-hidden="true"></i><span>检测全部</span>';
+    status.textContent = '检测完成';
+    showToast('全部节点检测完成', true);
 }
 
 function updateStats() {
-    const greens = document.querySelectorAll('.badge-green').length;
-    const reds = document.querySelectorAll('.badge-red').length;
-    const total = {{ nodes | length }};
-    document.getElementById('stat-online').textContent = greens;
-    document.getElementById('stat-offline').textContent = reds;
-    document.getElementById('stat-unknown').textContent = total - greens - reds;
+    const statuses = Array.from(document.querySelectorAll('#monitorTable td[id^="status-"]'));
+    const online = statuses.filter(element => element.textContent.trim() === '在线').length;
+    const offline = statuses.filter(element => ['离线', '检测失败'].includes(element.textContent.trim())).length;
+    document.getElementById('stat-online').textContent = online;
+    document.getElementById('stat-offline').textContent = offline;
+    document.getElementById('stat-unknown').textContent = statuses.length - online - offline;
 }
 </script>
 {% endblock %}
