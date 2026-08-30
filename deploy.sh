@@ -20,7 +20,7 @@ TRAFFIC_LOG_RETENTION_DAYS="${ANYTLS_TRAFFIC_LOG_RETENTION_DAYS:-90}"
 MAX_REQUEST_BYTES="${ANYTLS_MAX_REQUEST_BYTES:-4194304}"
 PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
-REPO_REF="${ANYTLS_REPO_REF:-v1.2.2}"
+REPO_REF="${ANYTLS_REPO_REF:-v1.3.0}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
@@ -36,6 +36,8 @@ CADDYFILE="$CADDY_CONFIG_DIR/Caddyfile"
 CADDY_MIN_VERSION="2.11.4"
 CADDY_KEY_FINGERPRINT="65760C51EDEA2017CEA2CA15155B6D79CA56EA34"
 BACKUP_ROOT="/var/backups/${SERVICE_NAME}"
+DAILY_BACKUP_ROOT="${ANYTLS_BACKUP_ROOT:-$BACKUP_ROOT/daily}"
+BACKUP_RETENTION_COUNT="${ANYTLS_BACKUP_RETENTION_COUNT:-14}"
 MAX_PERSISTENT_BACKUPS=2
 CADDY_INSTALLED_NOW=0
 CADDY_INSTALL_ATTEMPTED=0
@@ -61,6 +63,10 @@ OLD_HEALTH_TIMER_ACTIVE=0
 OLD_HEALTH_TIMER_ENABLED=0
 OLD_HEALTH_TIMER_ENABLEMENT_MANAGED=0
 OLD_HEALTH_TIMER_UNIT_PRESENT=0
+OLD_BACKUP_TIMER_ACTIVE=0
+OLD_BACKUP_TIMER_ENABLED=0
+OLD_BACKUP_TIMER_ENABLEMENT_MANAGED=0
+OLD_BACKUP_TIMER_UNIT_PRESENT=0
 OLD_DATA_DATABASE_PRESENT=0
 OLD_INSTALL_PRESENT=0
 CODE_BACKED_UP=0
@@ -70,6 +76,8 @@ CONFIG_BACKED_UP=0
 HEALTHCHECK_SCRIPT=""
 HEALTHCHECK_SERVICE=""
 HEALTHCHECK_TIMER=""
+BACKUP_SERVICE=""
+BACKUP_TIMER=""
 CADDY_RESTART_DROPIN=""
 
 log() {
@@ -371,9 +379,29 @@ validate_configuration() {
        (( MAX_REQUEST_BYTES < 65536 || MAX_REQUEST_BYTES > 16777216 )); then
         fail "ANYTLS_MAX_REQUEST_BYTES must be between 65536 and 16777216"
     fi
+    if ! [[ "$BACKUP_RETENTION_COUNT" =~ ^[0-9]+$ ]] || \
+       (( BACKUP_RETENTION_COUNT < 2 || BACKUP_RETENTION_COUNT > 365 )); then
+        fail "ANYTLS_BACKUP_RETENTION_COUNT must be between 2 and 365"
+    fi
+    if ! [[ "$DAILY_BACKUP_ROOT" =~ ^/var/backups/[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+        fail "ANYTLS_BACKUP_ROOT must be a dedicated path below /var/backups"
+    fi
+    case "$DAILY_BACKUP_ROOT/" in
+        */../*|*/./*|*//* ) fail "ANYTLS_BACKUP_ROOT contains unsafe components" ;;
+    esac
+    local backup_component backup_current="/var/backups"
+    local backup_components=()
+    IFS='/' read -r -a backup_components <<< "${DAILY_BACKUP_ROOT#/var/backups/}"
+    for backup_component in "${backup_components[@]}"; do
+        backup_current="$backup_current/$backup_component"
+        [[ ! -L "$backup_current" ]] || \
+            fail "ANYTLS_BACKUP_ROOT must not traverse symlinks: $backup_current"
+    done
     HEALTHCHECK_SCRIPT="/usr/local/sbin/${SERVICE_NAME}-healthcheck"
     HEALTHCHECK_SERVICE="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-healthcheck.service"
     HEALTHCHECK_TIMER="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-healthcheck.timer"
+    BACKUP_SERVICE="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-backup.service"
+    BACKUP_TIMER="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-backup.timer"
     CADDY_RESTART_DROPIN="${SYSTEMD_UNIT_DIR}/caddy.service.d/${SERVICE_NAME}-restart.conf"
 }
 
@@ -630,6 +658,8 @@ backup_configuration_for_rollback() {
     backup_optional_file "$HEALTHCHECK_SCRIPT" healthcheck-script
     backup_optional_file "$HEALTHCHECK_SERVICE" healthcheck.service
     backup_optional_file "$HEALTHCHECK_TIMER" healthcheck.timer
+    backup_optional_file "$BACKUP_SERVICE" backup.service
+    backup_optional_file "$BACKUP_TIMER" backup.timer
     backup_optional_file "$CADDY_RESTART_DROPIN" caddy-restart.conf
     backup_optional_file "$SECRET_KEY_FILE" secret-key
     backup_optional_file "$TRAFFIC_API_TOKEN_FILE" traffic-api-token
@@ -689,6 +719,10 @@ begin_cutover() {
     read -r OLD_HEALTH_TIMER_UNIT_PRESENT OLD_HEALTH_TIMER_ACTIVE \
         OLD_HEALTH_TIMER_ENABLED OLD_HEALTH_TIMER_ENABLEMENT_MANAGED \
         <<< "$snapshot"
+    snapshot="$(capture_systemd_unit_state "${SERVICE_NAME}-backup.timer")"
+    read -r OLD_BACKUP_TIMER_UNIT_PRESENT OLD_BACKUP_TIMER_ACTIVE \
+        OLD_BACKUP_TIMER_ENABLED OLD_BACKUP_TIMER_ENABLEMENT_MANAGED \
+        <<< "$snapshot"
     if [[ -f "$DATA_DIR/anytls.db" && ! -L "$DATA_DIR/anytls.db" ]]; then
         OLD_DATA_DATABASE_PRESENT=1
     fi
@@ -697,6 +731,8 @@ begin_cutover() {
 
     systemctl stop "${SERVICE_NAME}-healthcheck.timer" >/dev/null 2>&1 || true
     systemctl stop "${SERVICE_NAME}-healthcheck.service" >/dev/null 2>&1 || true
+    systemctl stop "${SERVICE_NAME}-backup.timer" >/dev/null 2>&1 || true
+    systemctl stop "${SERVICE_NAME}-backup.service" >/dev/null 2>&1 || true
     stop_service_for_update
     backup_database_for_rollback
     prepare_state_directory
@@ -724,6 +760,11 @@ write_rollback_metadata() {
         printf 'OLD_HEALTH_TIMER_ENABLED=%s\n' "$OLD_HEALTH_TIMER_ENABLED"
         printf 'OLD_HEALTH_TIMER_ENABLEMENT_MANAGED=%s\n' \
             "$OLD_HEALTH_TIMER_ENABLEMENT_MANAGED"
+        printf 'OLD_BACKUP_TIMER_UNIT_PRESENT=%s\n' "$OLD_BACKUP_TIMER_UNIT_PRESENT"
+        printf 'OLD_BACKUP_TIMER_ACTIVE=%s\n' "$OLD_BACKUP_TIMER_ACTIVE"
+        printf 'OLD_BACKUP_TIMER_ENABLED=%s\n' "$OLD_BACKUP_TIMER_ENABLED"
+        printf 'OLD_BACKUP_TIMER_ENABLEMENT_MANAGED=%s\n' \
+            "$OLD_BACKUP_TIMER_ENABLEMENT_MANAGED"
         printf 'OLD_INSTALL_PRESENT=%s\n' "$OLD_INSTALL_PRESENT"
         printf 'CODE_BACKED_UP=%s\n' "$CODE_BACKED_UP"
         printf 'DATABASE_BACKED_UP=%s\n' "$DATABASE_BACKED_UP"
@@ -821,6 +862,19 @@ load_rollback_metadata() {
         [[ "$value" =~ ^[01]$ ]] || fail "invalid rollback metadata: $variable"
         printf -v "$variable" '%s' "$value"
     done
+    for variable in \
+        OLD_BACKUP_TIMER_UNIT_PRESENT OLD_BACKUP_TIMER_ACTIVE \
+        OLD_BACKUP_TIMER_ENABLED OLD_BACKUP_TIMER_ENABLEMENT_MANAGED; do
+        value="$(sed -n "s/^${variable}=//p" "$metadata")"
+        [[ -n "$value" ]] || value=0
+        [[ "$value" =~ ^[01]$ ]] || fail "invalid rollback metadata: $variable"
+        printf -v "$variable" '%s' "$value"
+    done
+    if ! grep -q '^OLD_BACKUP_TIMER_UNIT_PRESENT=' "$metadata"; then
+        : > "$ROLLBACK_DIR/backup.service.absent"
+        : > "$ROLLBACK_DIR/backup.timer.absent"
+        OLD_BACKUP_TIMER_ENABLEMENT_MANAGED=1
+    fi
 }
 
 list_persistent_backups() {
@@ -938,6 +992,10 @@ rollback_deployment() {
 
     stop_unit_for_rollback_if_present \
         "stop health-check timer" "${SERVICE_NAME}-healthcheck.timer"
+    stop_unit_for_rollback_if_present \
+        "stop backup timer" "${SERVICE_NAME}-backup.timer"
+    stop_unit_for_rollback_if_present \
+        "stop backup service" "${SERVICE_NAME}-backup.service"
     stop_unit_for_rollback_if_present "stop panel" "$SERVICE_NAME"
     stop_unit_for_rollback_if_present "stop Caddy" caddy
     disable_unit_if_previously_disabled \
@@ -947,6 +1005,9 @@ rollback_deployment() {
     disable_unit_if_previously_disabled \
         "${SERVICE_NAME}-healthcheck.timer" "$OLD_HEALTH_TIMER_ENABLED" \
         "$OLD_HEALTH_TIMER_ENABLEMENT_MANAGED"
+    disable_unit_if_previously_disabled \
+        "${SERVICE_NAME}-backup.timer" "$OLD_BACKUP_TIMER_ENABLED" \
+        "$OLD_BACKUP_TIMER_ENABLEMENT_MANAGED"
 
     if [[ "$CODE_BACKED_UP" -eq 1 && -d "$PANEL_DIR" ]]; then
         rollback_step "remove incomplete release" \
@@ -991,6 +1052,10 @@ rollback_deployment() {
             "$HEALTHCHECK_SERVICE" healthcheck.service
         rollback_step "restore health-check timer" restore_optional_file \
             "$HEALTHCHECK_TIMER" healthcheck.timer
+        rollback_step "restore backup service" restore_optional_file \
+            "$BACKUP_SERVICE" backup.service
+        rollback_step "restore backup timer" restore_optional_file \
+            "$BACKUP_TIMER" backup.timer
         rollback_step "restore Caddy restart policy" restore_optional_file \
             "$CADDY_RESTART_DROPIN" caddy-restart.conf
         rollback_step "restore session secret" restore_optional_file \
@@ -1011,6 +1076,9 @@ rollback_deployment() {
     enable_unit_if_previously_enabled \
         "${SERVICE_NAME}-healthcheck.timer" "$OLD_HEALTH_TIMER_ENABLED" \
         "$OLD_HEALTH_TIMER_ENABLEMENT_MANAGED"
+    enable_unit_if_previously_enabled \
+        "${SERVICE_NAME}-backup.timer" "$OLD_BACKUP_TIMER_ENABLED" \
+        "$OLD_BACKUP_TIMER_ENABLEMENT_MANAGED"
     restore_unit_activity \
         "$SERVICE_NAME" "$OLD_PANEL_UNIT_PRESENT" "$OLD_PANEL_ACTIVE" panel
     restore_unit_activity \
@@ -1019,6 +1087,10 @@ rollback_deployment() {
         "${SERVICE_NAME}-healthcheck.timer" \
         "$OLD_HEALTH_TIMER_UNIT_PRESENT" "$OLD_HEALTH_TIMER_ACTIVE" \
         "health-check timer"
+    restore_unit_activity \
+        "${SERVICE_NAME}-backup.timer" \
+        "$OLD_BACKUP_TIMER_UNIT_PRESENT" "$OLD_BACKUP_TIMER_ACTIVE" \
+        "backup timer"
     if [[ "$ROLLBACK_FAILED" -ne 0 ]]; then
         printf '[anytls-panel] ERROR: rollback incomplete; manual recovery required\n' >&2
         return 1
@@ -1620,6 +1692,68 @@ EOF
     rm -f -- "$script_tmp" "$service_tmp" "$timer_tmp" "$caddy_tmp"
 }
 
+write_backup_config() {
+    log "installing daily disaster-recovery backups"
+    local service_tmp timer_tmp
+    service_tmp="$(mktemp /tmp/anytls-backup-service.XXXXXX)"
+    timer_tmp="$(mktemp /tmp/anytls-backup-timer.XXXXXX)"
+
+    cat > "$service_tmp" <<EOF
+[Unit]
+Description=AnyTLS Panel daily disaster-recovery backup (${SERVICE_NAME})
+After=${SERVICE_NAME}.service
+Requires=${SERVICE_NAME}.service
+
+[Service]
+Type=oneshot
+ExecStart=${PANEL_DIR}/backup.sh
+Environment=ANYTLS_PANEL_DIR=${PANEL_DIR}
+Environment=ANYTLS_SERVICE_NAME=${SERVICE_NAME}
+Environment=ANYTLS_SECRET_KEY_FILE=${SECRET_KEY_FILE}
+Environment=ANYTLS_TRAFFIC_API_TOKEN_FILE=${TRAFFIC_API_TOKEN_FILE}
+Environment=ANYTLS_ADMIN_PASSWORD_FILE=${ADMIN_PASSWORD_FILE}
+Environment=ANYTLS_BACKUP_ROOT=${DAILY_BACKUP_ROOT}
+Environment=ANYTLS_BACKUP_RETENTION_COUNT=${BACKUP_RETENTION_COUNT}
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=${DATA_DIR} ${DAILY_BACKUP_ROOT} /run/lock
+TimeoutStartSec=10min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+EOF
+
+    cat > "$timer_tmp" <<EOF
+[Unit]
+Description=Run the AnyTLS Panel disaster-recovery backup daily (${SERVICE_NAME})
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=30min
+Persistent=true
+Unit=${SERVICE_NAME}-backup.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    install -o root -g root -m 644 "$service_tmp" "$BACKUP_SERVICE"
+    install -o root -g root -m 644 "$timer_tmp" "$BACKUP_TIMER"
+    rm -f -- "$service_tmp" "$timer_tmp"
+}
+
 start_service() {
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
@@ -1754,6 +1888,18 @@ start_keepalive() {
         fail "health-check timer failed to start"
 }
 
+start_backups() {
+    install -d -o root -g root -m 700 "$BACKUP_ROOT" "$DAILY_BACKUP_ROOT"
+    systemctl daemon-reload
+    systemctl enable --now "${SERVICE_NAME}-backup.timer" >/dev/null
+    if ! systemctl start "${SERVICE_NAME}-backup.service"; then
+        journalctl -u "${SERVICE_NAME}-backup.service" -n 50 --no-pager || true
+        fail "initial disaster-recovery backup failed"
+    fi
+    systemctl is-active --quiet "${SERVICE_NAME}-backup.timer" || \
+        fail "backup timer failed to start"
+}
+
 print_summary() {
     logger -p daemon.notice -t "$SERVICE_NAME-deploy" \
         "event=deployment_success repo_ref=$REPO_REF" || true
@@ -1804,10 +1950,12 @@ main() {
     secure_panel_permissions
     write_service
     write_keepalive_config
+    write_backup_config
     start_service
     write_caddy_config
     start_https_proxy
     start_keepalive
+    start_backups
     persist_rollback_backup
     DEPLOY_SUCCEEDED=1
     CUTOVER_STARTED=0

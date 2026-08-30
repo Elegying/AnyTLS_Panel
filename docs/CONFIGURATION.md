@@ -21,7 +21,7 @@ AnyTLS Panel 使用环境变量覆盖默认配置。生产环境由 `deploy.sh` 
 | `ANYTLS_SERVICE_USER` | `anytls-panel` | 低权限运行用户，不能是 `root` |
 | `ANYTLS_BIND_HOST` | `127.0.0.1` | 生产 HTTPS 部署必须保持回环地址 |
 | `ANYTLS_REPO_URL` | 官方 GitHub 仓库 | 部署脚本拉取代码的 Git 仓库 |
-| `ANYTLS_REPO_REF` | `v1.2.2` | 要部署的正式标签或分支；生产环境建议使用不可变标签 |
+| `ANYTLS_REPO_REF` | `v1.3.0` | 要部署的正式标签或分支；生产环境建议使用不可变标签 |
 | `ANYTLS_REPO_SUBDIR` | 空 | 仓库中的项目子目录，常规部署不需要设置 |
 | `ANYTLS_ADMIN_USER` | 交互输入 | 首次无人值守安装时的管理员用户名 |
 | `ANYTLS_ADMIN_PASS` | 交互输入或安全随机值 | 首次无人值守安装时的 8–128 字符密码 |
@@ -51,6 +51,8 @@ bash deploy.sh
 | `ANYTLS_TRAFFIC_API_TOKEN_FILE` | `<数据目录>/.traffic_api_token` | 流量主 Token 文件 |
 | `ANYTLS_ADMIN_PASSWORD_FILE` | `<数据目录>/.initial_admin_password` | 首次密码引导文件，首次改密后自动删除默认位置中的文件 |
 | `ANYTLS_TRAFFIC_API_TOKEN` | 自动生成 | 首次安装时显式提供主 Token；已有 Token 不会被覆盖 |
+| `ANYTLS_BACKUP_ROOT` | `/var/backups/<服务名>/daily` | `backup.sh` 的本机灾难恢复备份目录，必须位于 `/var/backups` 下 |
+| `ANYTLS_BACKUP_RETENTION_COUNT` | `14` | 自动保留的每日备份份数，允许 2–365 |
 
 ## 网络边界例外
 

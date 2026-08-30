@@ -62,11 +62,11 @@ jobs:
           security_utils.py sqlite_rate_limit.py traffic_token.py
 
       - name: Check shell syntax
-        run: bash -n deploy.sh start.sh traffic_collector.sh uninstall.sh
+        run: bash -n backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh
 
       - name: Lint shell scripts
         run: >-
-          shellcheck deploy.sh start.sh traffic_collector.sh uninstall.sh
+          shellcheck backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh
           tests/ubuntu24_integration.sh
 
       - name: Audit dependencies

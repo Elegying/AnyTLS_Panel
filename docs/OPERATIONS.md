@@ -21,13 +21,13 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
 在线部署：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.3.0/deploy.sh)
 ```
 
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.2.2 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.3.0 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -35,8 +35,8 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.2.2" \
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh)
+ANYTLS_REPO_REF="v1.3.0" \
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.3.0/deploy.sh)
 ```
 
 首次交互部署会要求输入管理员用户名、两次输入密码以及面板域名。密码输入不会回显。自定义端口、服务名和目录时仍会显示这些提示：
@@ -73,6 +73,7 @@ bash deploy.sh
 4. 使用 Caddy 默认的公开 ACME 签发方签发证书，自动将 HTTP 跳转至 HTTPS。
 5. 等待 `https://<域名>/login` 通过真实证书校验后才报告部署成功。
 6. 为面板和 Caddy 配置异常自动拉起，并安装每分钟运行一次的本机健康检查 timer；连续三次失败才触发恢复，两次恢复至少间隔五分钟，降低短暂抖动造成的重启风暴。
+7. 安装每日灾难恢复备份 timer；默认在每天 03:15 后的随机 30 分钟内执行，并保留最近 14 份备份。
 
 生成的站点配置等价于：
 
@@ -87,6 +88,18 @@ Caddy 常驻服务会在证书到期前自动续签，不使用 cron，也不是
 订阅默认只允许 HTTPS，并禁止访问内网、回环、链路本地和保留地址。确需明文 HTTP 时设置 `ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS=1`；确需拉取可信内网订阅时设置 `ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=1`。节点检测默认也只连接公网地址，可信隔离网络可通过 `ANYTLS_ALLOW_PRIVATE_NODE_PROBES=1` 放开。三个开关互相独立，取值只能为 `0` 或 `1`；不要在可接收不可信输入的面板上开启例外。
 
 面板默认拒绝超过 4 MiB 的请求体，可用 `ANYTLS_MAX_REQUEST_BYTES` 在 64 KiB 到 16 MiB 之间调整。流量明细默认保留 90 天，可用 `ANYTLS_TRAFFIC_LOG_RETENTION_DAYS` 设置为 1–3650 天；后台按小时检查并清理过期明细，但账号累计流量不会被扣减。修改这些值后需重新运行部署脚本，使 systemd 环境与应用配置保持一致。
+
+## 主机与 SSH 加固
+
+面板应用已经使用独立低权限账号，但操作系统仍需要单独加固。生产服务器至少应满足：
+
+- 日常登录使用具备 `sudo` 权限的非 root 账号；确认该入口可用后设置 `PermitRootLogin no`；
+- 设置 `PasswordAuthentication no` 和 `KbdInteractiveAuthentication no`，只接受独立 SSH 密钥；
+- 主机防火墙默认拒绝入站，只放行 SSH、TCP 80/443 和确实使用的业务端口；使用 HTTP/3 时还需放行 UDP 443；
+- 启用 Fail2ban、自动安全更新和日志轮转；定期检查被封禁来源、待重启服务和剩余磁盘；
+- 自动部署使用独立账号、独立密钥和受限 `sudoers` 命令，不复用维护者日常私钥，也不给部署账号通用 root shell。
+
+修改 SSH 前必须保持一个已登录会话，并在另一个终端验证非 root 密钥登录和 `sudo -n`。只有验证成功后才能关闭 root 登录；否则可能永久失去远程访问。主机还承载邮件、数据库等其他服务时，应先盘点监听端口，不能照抄只允许 22/80/443 的规则。
 
 ## 节点流量采集
 
@@ -157,10 +170,27 @@ sha256sum "${backup_dir}.tar.gz.age" > "${backup_dir}.tar.gz.age.sha256"
 
 加密文件和校验文件上传异机后，应删除本机长期明文副本。至少每季度在隔离的 Ubuntu 24.04 主机执行一次恢复演练：校验 SHA-256、解密归档、对数据库运行 `PRAGMA quick_check`，将数据库和三个密钥文件恢复到全新安装的 `data/`，校正为服务用户所有且权限 `600`，启动服务后验证 `/readyz`、管理员登录、订阅输出和账号累计流量。演练记录应包含备份时间、恢复耗时、数据库版本和验证结果。
 
+从 `v1.3.0` 开始，部署脚本还会启用每日本机备份。它使用 SQLite 在线备份 API 获取一致快照，把数据库和运行密钥写入 root 专用压缩包，生成外层 SHA-256，并在创建后立即执行归档与数据库完整性校验：
+
+```bash
+# 立即创建一份备份
+sudo /opt/anytls-panel/backup.sh
+
+# 查看和验证备份
+sudo /opt/anytls-panel/backup.sh --list
+sudo /opt/anytls-panel/backup.sh --verify latest
+
+# 检查定时任务及最近日志
+systemctl list-timers anytls-panel-backup.timer --all
+journalctl -u anytls-panel-backup.service -n 30 --no-pager
+```
+
+默认目录是 `/var/backups/anytls-panel/daily/`，默认保留 14 份。这里仍属于同机明文备份，只解决误操作、数据库损坏和快速恢复，不替代加密异机备份。至少要定期把其中一份校验通过的归档加密复制到另一台主机或对象存储。
+
 重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库。脚本先完成源码暂存、带哈希依赖下载和现有数据库副本迁移测试，再停止服务进行短切换；切换后任一步失败都会自动恢复旧代码、数据库、systemd 和 Caddy 配置。成功更新还会在 `/var/backups/<服务名>/` 保留最近两份带 SHA-256 校验的上一版本快照：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.3.0/deploy.sh)
 ```
 
 更新时会再次询问面板域名，已有数据库不会再次询问或覆盖管理员凭据。自动化更新可设置 `ANYTLS_PANEL_DOMAIN`。如果使用自定义目录、服务名或 `/etc/anytls-panel/` 下的密钥文件，更新时需要继续传入相同环境变量。
@@ -168,8 +198,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.2.2
 部署成功后可检查保活状态：
 
 ```bash
-systemctl is-active anytls-panel caddy anytls-panel-healthcheck.timer
-systemctl list-timers anytls-panel-healthcheck.timer --all
+systemctl is-active anytls-panel caddy anytls-panel-healthcheck.timer anytls-panel-backup.timer
+systemctl list-timers anytls-panel-healthcheck.timer anytls-panel-backup.timer --all
 journalctl -u anytls-panel-healthcheck.service -n 30 --no-pager
 journalctl -t anytls-panel-healthcheck -n 30 --no-pager
 ```
@@ -221,8 +251,8 @@ python3.12 -m venv .venv
   input_limits.py node_probe.py protocol_codecs.py \
   security_utils.py sqlite_rate_limit.py traffic_token.py tests \
   --select=E9,F63,F7,F82,F401,F811
-bash -n deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh
-shellcheck deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh
+bash -n backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh
+shellcheck backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh
 actionlint
 .venv/bin/python -m bandit -q -ll -r app.py database_maintenance.py \
   db_migrations.py input_limits.py node_probe.py protocol_codecs.py \
@@ -231,6 +261,23 @@ actionlint
 ```
 
 以上命令固定使用带哈希的开发依赖锁，适用于 macOS 本地质量门禁。GitHub Actions 会在 push 和 pull request 时使用 Python 3.12、3.13 运行同等检查，并在干净的 Ubuntu 24.04 runner 上完成旧数据库迁移、真实 systemd 服务、Caddy 配置与 LKG 校验集成测试。
+
+## 维护者自动发布与部署
+
+标签发布工作流先验证标签正好指向通过 CI 的 `main`，再构建带 SHA-256 和 Sigstore bundle 的源码包。配置生产变量后，工作流会通过独立 SSH 账号部署这个不可变标签，检查公网登录页、HSTS 与 CSP，全部成功后才把草稿 Release 发布为正式版本。
+
+仓库变量：
+
+- `PROD_HOST`：生产服务器地址；
+- `PROD_USER`：受限部署账号，建议使用 `anytls-deploy`；
+- `PROD_URL`：生产 HTTPS 根地址。
+
+仓库 Secrets：
+
+- `PROD_SSH_PRIVATE_KEY`：仅供 Actions 使用的独立 Ed25519 私钥；
+- `PROD_SSH_KNOWN_HOSTS`：经过人工核对指纹的固定服务器公钥记录。
+
+服务器上的部署账号只应获准免密执行一个 root-owned 包装器，例如 `/usr/local/sbin/deploy-anytls-panel`。包装器必须校验 `vX.Y.Z` 标签格式、使用部署锁、固定官方仓库和域名，并在返回成功前验证 systemd 服务、本机 `/readyz` 与 HTTPS。不要把普通管理员私钥或不受限制的 `NOPASSWD: ALL` 放入 GitHub Secrets。
 
 ## 常见排障
 

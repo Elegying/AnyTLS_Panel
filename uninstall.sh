@@ -10,6 +10,8 @@ CADDY_SITE_FILE="/etc/caddy/anytls-panel.d/${SERVICE_NAME}.caddy"
 HEALTHCHECK_SCRIPT="/usr/local/sbin/${SERVICE_NAME}-healthcheck"
 HEALTHCHECK_SERVICE="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-healthcheck.service"
 HEALTHCHECK_TIMER="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-healthcheck.timer"
+BACKUP_SERVICE="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-backup.service"
+BACKUP_TIMER="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-backup.timer"
 CADDY_RESTART_DROPIN="${SYSTEMD_UNIT_DIR}/caddy.service.d/${SERVICE_NAME}-restart.conf"
 
 usage() {
@@ -152,6 +154,7 @@ if [[ -L "$CADDY_SITE_FILE" ]]; then
 fi
 for managed_file in \
   "$HEALTHCHECK_SCRIPT" "$HEALTHCHECK_SERVICE" "$HEALTHCHECK_TIMER" \
+  "$BACKUP_SERVICE" "$BACKUP_TIMER" \
   "$CADDY_RESTART_DROPIN"; do
   if [[ -L "$managed_file" ]]; then
     fail "refusing to remove a symlinked managed file: $managed_file"
@@ -161,9 +164,12 @@ done
 log "disabling service: $SERVICE_NAME"
 systemctl disable --now "${SERVICE_NAME}-healthcheck.timer" >/dev/null 2>&1 || true
 systemctl stop "${SERVICE_NAME}-healthcheck.service" >/dev/null 2>&1 || true
+systemctl disable --now "${SERVICE_NAME}-backup.timer" >/dev/null 2>&1 || true
+systemctl stop "${SERVICE_NAME}-backup.service" >/dev/null 2>&1 || true
 systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
 rm -f "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service"
 rm -f -- "$HEALTHCHECK_SCRIPT" "$HEALTHCHECK_SERVICE" "$HEALTHCHECK_TIMER" \
+  "$BACKUP_SERVICE" "$BACKUP_TIMER" \
   "$CADDY_RESTART_DROPIN"
 systemctl daemon-reload >/dev/null 2>&1 || true
 
