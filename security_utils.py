@@ -33,7 +33,8 @@ def verify_password(stored_hash: str, candidate: str):
     stored_hash = stored_hash or ''
     candidate = candidate or ''
     if _is_legacy(stored_hash):
-        legacy = hashlib.sha256(candidate.encode()).hexdigest()
+        # Compatibility-only verification; a match is immediately upgraded to PBKDF2.
+        legacy = hashlib.sha256(candidate.encode()).hexdigest()  # lgtm[py/weak-sensitive-data-hashing]
         ok = hmac.compare_digest(legacy, stored_hash)
         return ok, ok  # 旧格式校验通过即需要升级
     try:
