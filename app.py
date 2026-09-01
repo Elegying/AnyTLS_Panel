@@ -984,11 +984,6 @@ def _traffic_update_values(traffic_info):
     ))
 
 
-def sanitize_header_value(value, default="subscription"):
-    cleaned = re.sub(r'[\r\n"\\]+', ' ', str(value or '')).strip()
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    return cleaned[:120] or default
-
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -2023,8 +2018,6 @@ def public_subscribe(token):
     if not account:
         return 'Not found', 404
 
-    rules = db.execute('SELECT old_text, new_text FROM rename_rules WHERE enabled=1 ORDER BY id').fetchall()
-
     db_nodes = db.execute('SELECT * FROM nodes WHERE account_id=? ORDER BY id', (account['id'],)).fetchall()
     nodes = _nodes_from_db_rows(db_nodes)
     traffic_info = _account_traffic_info(account)
@@ -2034,16 +2027,10 @@ def public_subscribe(token):
             'Cache-Control': 'no-store',
         }
 
-    # 构建订阅配置名称（profile-title）
-    sub_name = account['name'] or 'subscription'
-    if rules:
-        sub_name = _apply_rename(sub_name, rules)
-    header_sub_name = sanitize_header_value(sub_name, 'subscription')
-
-    # 公共响应头：profile-title 设置订阅名 + 流量信息
+    # 所有客户端统一显示品牌名，避免把面板账号名（例如邮箱）暴露为订阅名称。
     resp_headers = {
-        'profile-title': f'"store-name={header_sub_name}"',
-        'Content-Disposition': f'attachment; filename="{header_sub_name}"',
+        'profile-title': '"store-name=SSRVPN.VIP"',
+        'Content-Disposition': 'attachment; filename="SSRVPN.VIP"',
     }
     if traffic_info:
         parts = []
