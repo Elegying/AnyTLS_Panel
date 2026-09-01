@@ -124,6 +124,11 @@ def audit_event(action, outcome, **details):
         key: value for key, value in details.items()
         if key in _AUDIT_DETAIL_FIELDS
     })
+    payload = {
+        key: value.replace('\r', '').replace('\n', '')
+        if isinstance(value, str) else value
+        for key, value in payload.items()
+    }
     audit_logger.info('%s', json.dumps(
         payload,
         ensure_ascii=False,
@@ -683,7 +688,7 @@ def _read_pinned_subscription_response(url, user_agent, deadline=None):
             )
             connection.sock = sock
             # The socket is already pinned to a policy-validated IP address.
-            connection.putrequest(  # lgtm[py/full-ssrf]
+            connection.putrequest(
                 'GET',
                 _subscription_request_target(parsed),
                 skip_host=True,

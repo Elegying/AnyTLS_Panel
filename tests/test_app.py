@@ -1619,6 +1619,17 @@ proxies:
         self.assertIn('"outcome":"failure"', output)
         self.assertNotIn(password, output)
 
+        with app.app.test_request_context(
+            "/login", environ_overrides={"REMOTE_ADDR": "127.0.0.1"}
+        ):
+            app.g.request_id = "request-id"
+            with self.assertLogs("anytls.audit", level="INFO") as sanitized:
+                app.audit_event(
+                    "auth.login", "failure", username="admin\nforged-entry"
+                )
+        payload = json.loads(sanitized.records[0].getMessage())
+        self.assertEqual(payload["username"], "adminforged-entry")
+
     def test_debug_server_is_limited_to_loopback(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
