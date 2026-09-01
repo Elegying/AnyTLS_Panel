@@ -2122,6 +2122,176 @@ proxies:
                 limit = db.execute("SELECT traffic_limit_gb FROM accounts WHERE id=?", (account_id,)).fetchone()[0]
             self.assertEqual(limit, 250)
 
+    def test_admin_account_lifecycle_covers_stateful_write_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            initial_node = {
+                "name": "香港入口",
+                "host": "entry.example.com",
+                "port": 443,
+                "password": "initial-password",
+                "raw_uri": "anytls://initial-password@entry.example.com:443#香港入口",
+                "protocol": "anytls",
+            }
+            initial_traffic = {
+                "total_gb": 12,
+                "used_bytes": 1024,
+                "upload_bytes": 256,
+                "download_bytes": 768,
+                "expire_date": "2030-01-02",
+            }
+
+            with app.app.test_client() as client:
+                authenticate_session(app, client)
+                with mock.patch.object(
+                    app,
+                    "parse_subscribe_url",
+                    return_value=([initial_node], initial_traffic),
+                ):
+                    response = client.post(
+                        "/accounts/add",
+                        data={
+                            "name": "",
+                            "subscribe_url": initial_node["raw_uri"],
+                            "notes": "",
+                            "traffic_limit_gb": "250",
+                        },
+                    )
+                self.assertEqual(response.status_code, 302)
+
+                with closing(sqlite3.connect(database)) as db:
+                    db.row_factory = sqlite3.Row
+                    account = db.execute("SELECT * FROM accounts").fetchone()
+                    node = db.execute("SELECT * FROM nodes").fetchone()
+                account_id = account["id"]
+                node_id = node["id"]
+                self.assertEqual(account["name"], initial_node["name"])
+                self.assertEqual(account["traffic_limit_gb"], 12)
+                self.assertEqual(account["notes"], "到期: 2030-01-02")
+                self.assertEqual(node["protocol"], "anytls")
+
+                for path in (
+                    "/",
+                    "/accounts",
+                    f"/accounts/{account_id}",
+                    "/nodes/monitor",
+                    "/settings/rename-rules",
+                ):
+                    self.assertEqual(client.get(path).status_code, 200)
+                self.assertEqual(client.get("/api/accounts").status_code, 200)
+                self.assertEqual(
+                    client.get(f"/api/accounts/{account_id}/nodes").status_code,
+                    200,
+                )
+
+                response = client.post(
+                    f"/accounts/{account_id}/rename", data={"name": "正式账号"}
+                )
+                self.assertEqual(response.status_code, 302)
+                response = client.post(
+                    f"/accounts/{account_id}/edit",
+                    data={
+                        "subscribe_url": "trojan://next-password@next.example.com:8443#新加坡入口",
+                        "notes": "人工维护",
+                        "traffic_limit_gb": "20.5",
+                        "status": "suspended",
+                    },
+                )
+                self.assertEqual(response.status_code, 302)
+
+                token_response = client.post(
+                    f"/api/accounts/{account_id}/generate-token"
+                )
+                self.assertEqual(token_response.status_code, 200)
+                self.assertEqual(len(token_response.get_json()["token"]), 32)
+
+                with mock.patch.object(
+                    app,
+                    "_check_node_connect",
+                    return_value={"online": True, "latency": 8, "msg": "在线"},
+                ):
+                    by_host = client.post(
+                        "/api/check-by-host",
+                        json={"host": initial_node["host"], "port": 443},
+                    )
+                    by_id = client.post(f"/api/nodes/{node_id}/check")
+                self.assertEqual(by_host.status_code, 200)
+                self.assertEqual(by_id.status_code, 200)
+
+                synced_node = {
+                    "name": "新加坡入口",
+                    "host": "next.example.com",
+                    "port": 8443,
+                    "password": "next-password",
+                    "raw_uri": "trojan://next-password@next.example.com:8443#新加坡入口",
+                    "protocol": "trojan",
+                }
+                synced_traffic = {
+                    "total_gb": 20.5,
+                    "used_bytes": 2048,
+                    "upload_bytes": 512,
+                    "download_bytes": 1536,
+                    "expire_date": "2030-02-03",
+                }
+                with mock.patch.object(
+                    app,
+                    "parse_subscribe_url",
+                    return_value=([synced_node], synced_traffic),
+                ):
+                    response = client.post(f"/accounts/{account_id}/sync")
+                self.assertEqual(response.status_code, 302)
+
+                response = client.post(
+                    "/settings/rename-rules/add",
+                    data={"old_text": "新加坡", "new_text": "SG"},
+                )
+                self.assertEqual(response.status_code, 302)
+                with closing(sqlite3.connect(database)) as db, db:
+                    synced_node_id = db.execute("SELECT id FROM nodes").fetchone()[0]
+                    rule_id = db.execute("SELECT id FROM rename_rules").fetchone()[0]
+                    db.execute(
+                        "INSERT INTO traffic_logs (account_id, bytes_used) VALUES (?, ?)",
+                        (account_id, 100),
+                    )
+                    db.execute(
+                        "INSERT INTO traffic_collectors "
+                        "(collector_id, account_id, last_counter_bytes) VALUES (?, ?, ?)",
+                        ("collector-1", account_id, 100),
+                    )
+
+                self.assertEqual(
+                    client.post(f"/settings/rename-rules/{rule_id}/toggle").status_code,
+                    302,
+                )
+                self.assertEqual(
+                    client.post(f"/settings/rename-rules/{rule_id}/delete").status_code,
+                    302,
+                )
+                self.assertEqual(
+                    client.post(f"/nodes/{synced_node_id}/delete").status_code,
+                    302,
+                )
+                self.assertEqual(
+                    client.post(f"/accounts/{account_id}/delete").status_code,
+                    302,
+                )
+                self.assertEqual(client.post("/logout").status_code, 302)
+
+            with closing(sqlite3.connect(database)) as db:
+                account_count = db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
+                node_count = db.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+                log_count = db.execute("SELECT COUNT(*) FROM traffic_logs").fetchone()[0]
+                collector_count = db.execute(
+                    "SELECT COUNT(*) FROM traffic_collectors"
+                ).fetchone()[0]
+                rule_count = db.execute("SELECT COUNT(*) FROM rename_rules").fetchone()[0]
+            self.assertEqual(
+                (account_count, node_count, log_count, collector_count, rule_count),
+                (0, 0, 0, 0, 0),
+            )
+
     def test_account_sync_stores_parsed_protocol(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
