@@ -31,11 +31,18 @@ def check_node_connect(host, port, timeout, resolver, *, allow_private=False):
             resolver(host, port, deadline),
             allow_private,
         )
-    except (OSError, TimeoutError, ValueError) as exc:
+    except ValueError:
         return {
             'online': False,
             'status': 'offline',
-            'msg': str(exc),
+            'msg': '节点地址无效或默认只允许公网地址',
+            'latency': -1,
+        }
+    except (OSError, TimeoutError):
+        return {
+            'online': False,
+            'status': 'offline',
+            'msg': '节点地址解析失败',
             'latency': -1,
         }
 
@@ -50,6 +57,7 @@ def check_node_connect(host, port, timeout, resolver, *, allow_private=False):
             sock = socket.create_connection((address, port), timeout=remaining)
             sock.settimeout(max(0.001, deadline - time.monotonic()))
             context = ssl.create_default_context()
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             tls_sock = context.wrap_socket(sock, server_hostname=host)
@@ -73,8 +81,8 @@ def check_node_connect(host, port, timeout, resolver, *, allow_private=False):
             last_error = '连接超时'
         except ConnectionRefusedError:
             last_error = '连接被拒绝'
-        except OSError as exc:
-            last_error = str(exc)
+        except OSError:
+            last_error = '连接失败'
         finally:
             if sock is not None:
                 try:

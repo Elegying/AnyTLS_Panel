@@ -124,7 +124,12 @@ def audit_event(action, outcome, **details):
         key: value for key, value in details.items()
         if key in _AUDIT_DETAIL_FIELDS
     })
-    audit_logger.info(json.dumps(
+    payload = {
+        key: value.replace('\r', '').replace('\n', '')
+        if isinstance(value, str) else value
+        for key, value in payload.items()
+    }
+    audit_logger.info('%s', json.dumps(
         payload,
         ensure_ascii=False,
         separators=(',', ':'),
@@ -672,6 +677,7 @@ def _read_pinned_subscription_response(url, user_agent, deadline=None):
             if parsed.scheme == 'https':
                 _set_subscription_socket_deadline(sock, deadline)
                 context = ssl.create_default_context()
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
                 sock = context.wrap_socket(sock, server_hostname=parsed.hostname)
             remaining = _set_subscription_socket_deadline(sock, deadline)
 
@@ -681,6 +687,7 @@ def _read_pinned_subscription_response(url, user_agent, deadline=None):
                 timeout=remaining,
             )
             connection.sock = sock
+            # The socket is already pinned to a policy-validated IP address.
             connection.putrequest(
                 'GET',
                 _subscription_request_target(parsed),
@@ -1461,8 +1468,8 @@ def _resolve_traffic_account_id(db, item):
     if 'account_id' in item:
         try:
             account_id = parse_nonnegative_int(item['account_id'], 'account_id')
-        except ValueError as exc:
-            return None, str(exc), 400
+        except ValueError:
+            return None, 'account_id must be a nonnegative integer', 400
         if account_id < 1:
             return None, 'account_id must be a positive integer', 400
         return account_id, None, None
@@ -1516,8 +1523,8 @@ def api_report_traffic():
             return jsonify({"error": "Invalid traffic item"}), 400
         try:
             bytes_used = parse_nonnegative_int(item.get('bytes_used', 0), 'bytes_used')
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
+        except ValueError:
+            return jsonify({"error": "bytes_used must be a nonnegative integer"}), 400
 
         account_id, identity_error, identity_status = _resolve_traffic_account_id(db, item)
         if identity_error:
@@ -1563,8 +1570,8 @@ def api_report_traffic_counter():
         counter_bytes = parse_nonnegative_int(
             data.get('counter_bytes'), 'counter_bytes'
         )
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+    except ValueError:
+        return jsonify({"error": "counter_bytes must be a nonnegative integer"}), 400
 
     db = get_db()
     db.execute('BEGIN IMMEDIATE')
@@ -1634,8 +1641,8 @@ def api_set_traffic():
 
     try:
         total_bytes = parse_nonnegative_int(data.get('total_bytes', 0), 'total_bytes')
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+    except ValueError:
+        return jsonify({"error": "total_bytes must be a nonnegative integer"}), 400
 
     db = get_db()
     account_id, identity_error, identity_status = _resolve_traffic_account_id(db, data)
@@ -1679,12 +1686,12 @@ def api_check_by_host():
 
     try:
         host = validate_text(data['host'], 'host', MAX_HOST_CHARS, required=True)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+    except ValueError:
+        return jsonify({"error": "host 必须是 1-253 个字符"}), 400
     try:
         port = parse_nonnegative_int(data['port'], 'port')
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+    except ValueError:
+        return jsonify({"error": "port 必须是整数"}), 400
     if not 1 <= port <= 65535:
         return jsonify({"error": "port必须在1-65535之间"}), 400
 
@@ -1725,9 +1732,9 @@ def api_check_node(node_id):
             status='online' if result['online'] else 'offline',
         )
         return jsonify(result)
-    except Exception as e:
+    except Exception:
         audit_event('node.check', 'failure', node_id=node_id, reason='probe_error')
-        return jsonify({"status": "error", "msg": str(e)})
+        return jsonify({"status": "error", "msg": "节点检测失败"})
 
 @app.route('/api/accounts/<int:account_id>/check-all', methods=['POST'])
 @login_required
@@ -1746,8 +1753,8 @@ def api_check_all_nodes(account_id):
     def check(node):
         try:
             return node, _check_node_connect(node['host'], node['port']), None
-        except Exception as e:
-            return node, None, str(e)
+        except Exception:
+            return node, None, "节点检测失败"
 
     results = []
     checks = _bounded_parallel_map(check, nodes, max_workers=32)

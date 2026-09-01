@@ -1,4 +1,4 @@
-PYTHON ?= python3
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PYTHON_FILES := app.py database_maintenance.py db_migrations.py input_limits.py node_probe.py protocol_codecs.py security_utils.py sqlite_rate_limit.py traffic_token.py
 SHELL_FILES := backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh
 
@@ -42,4 +42,4 @@ security:
 audit:
 	$(PYTHON) -m pip_audit -r requirements.txt
 
-check: lint coverage shellcheck security
+check: lint coverage shellcheck security audit

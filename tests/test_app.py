@@ -94,13 +94,13 @@ class AnyTlsPanelTests(unittest.TestCase):
             "node.example", 443, 1, mock.Mock(side_effect=OSError("dns failed"))
         )
         self.assertFalse(resolver_error["online"])
-        self.assertIn("dns failed", resolver_error["msg"])
+        self.assertEqual(resolver_error["msg"], "节点地址解析失败")
 
         cases = (
             (node_probe.ssl.SSLError("tls"), True, "TLS 异常"),
             (node_probe.socket.timeout(), False, "连接超时"),
             (ConnectionRefusedError(), False, "连接被拒绝"),
-            (OSError("network down"), False, "network down"),
+            (OSError("network down"), False, "连接失败"),
         )
         for failure, expected_online, expected_message in cases:
             with self.subTest(failure=type(failure).__name__):
@@ -1188,6 +1188,10 @@ proxies:
 
         self.assertEqual(raw, b"anytls://pw@example.com:443#demo")
         self.assertEqual(connect.call_args.args[0], ("93.184.216.34", 443))
+        self.assertEqual(
+            tls_context.return_value.minimum_version,
+            app.ssl.TLSVersion.TLSv1_2,
+        )
         tls_context.return_value.wrap_socket.assert_called_once_with(
             raw_socket, server_hostname="sub.example"
         )
@@ -1519,8 +1523,10 @@ proxies:
                 ),
                 msg=f"inline event handler remains in {template.name}",
             )
-            for tag in re.findall(r"<(?:script|style)\b[^>]*>", content):
-                if tag.startswith("<script") and " src=" in tag:
+            for tag in re.findall(
+                r"<(?:script|style)\b[^>]*>", content, flags=re.IGNORECASE
+            ):
+                if tag.lower().startswith("<script") and " src=" in tag:
                     continue
                 self.assertIn("nonce=", tag, msg=f"missing nonce in {template.name}: {tag}")
 
@@ -1612,6 +1618,17 @@ proxies:
         self.assertIn('"action":"auth.login"', output)
         self.assertIn('"outcome":"failure"', output)
         self.assertNotIn(password, output)
+
+        with app.app.test_request_context(
+            "/login", environ_overrides={"REMOTE_ADDR": "127.0.0.1"}
+        ):
+            app.g.request_id = "request-id"
+            with self.assertLogs("anytls.audit", level="INFO") as sanitized:
+                app.audit_event(
+                    "auth.login", "failure", username="admin\nforged-entry"
+                )
+        payload = json.loads(sanitized.records[0].getMessage())
+        self.assertEqual(payload["username"], "adminforged-entry")
 
     def test_debug_server_is_limited_to_loopback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3204,6 +3221,10 @@ proxies:
         connect.assert_called_once()
         self.assertEqual(connect.call_args.args[0], ("2001:db8::1", 443))
         self.assertLessEqual(connect.call_args.kwargs["timeout"], 8)
+        self.assertEqual(
+            tls_context.minimum_version,
+            app.ssl.TLSVersion.TLSv1_2,
+        )
         tls_context.wrap_socket.assert_called_once_with(
             raw_socket, server_hostname="2001:db8::1"
         )
