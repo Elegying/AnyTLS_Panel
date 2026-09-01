@@ -2146,7 +2146,7 @@ proxies:
             self.assertEqual(protocol, "trojan")
             self.assertTrue(raw_uri.startswith("trojan://"))
 
-    def test_public_subscribe_sanitizes_header_filename(self):
+    def test_public_subscribe_uses_branded_profile_title(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
             app = load_app(database)
@@ -2155,7 +2155,7 @@ proxies:
                 db = app.get_db()
                 account_id = db.execute(
                     "INSERT INTO accounts (name, subscribe_url, sub_token) VALUES (?, ?, ?)",
-                    ("demo", "anytls://pw@example.com:443#demo", "token"),
+                    ("customer@example.com", "anytls://pw@example.com:443#demo", "token"),
                 ).lastrowid
                 db.execute(
                     "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
@@ -2181,10 +2181,10 @@ proxies:
             self.assertEqual(response.status_code, 200)
             disposition = response.headers["Content-Disposition"]
             profile_title = response.headers["profile-title"]
-            self.assertNotIn("\r", disposition + profile_title)
-            self.assertNotIn("\n", disposition + profile_title)
-            self.assertIn('filename="bad Injected: yes name"', disposition)
-            self.assertNotIn('yes"name', disposition)
+            self.assertEqual(disposition, 'attachment; filename="SSRVPN.VIP"')
+            self.assertEqual(profile_title, '"store-name=SSRVPN.VIP"')
+            self.assertNotIn("customer@example.com", disposition + profile_title)
+            self.assertNotIn("Injected", disposition + profile_title)
 
     def test_disabled_account_public_subscription_is_not_available(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4542,7 +4542,7 @@ proxies:
         self.assertIn("python3.12 -m venv .venv", operations)
         self.assertIn("brew install python@3.12 shellcheck actionlint", operations)
         self.assertIn("--require-hashes -r requirements-dev.txt", operations)
-        self.assertIn("git clone --depth 1 --branch v1.3.0", operations)
+        self.assertIn("git clone --depth 1 --branch v1.3.1", operations)
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
@@ -4642,8 +4642,8 @@ proxies:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.3.0}"', deploy)
-        self.assertIn("AnyTLS_Panel/v1.3.0/deploy.sh", readme)
+        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.3.1}"', deploy)
+        self.assertIn("AnyTLS_Panel/v1.3.1/deploy.sh", readme)
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)

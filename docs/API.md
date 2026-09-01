@@ -161,7 +161,7 @@ curl --fail-with-body \
 
 ## 公开订阅
 
-`GET /sub/<token>` 不需要管理员 Session。普通客户端得到 Base64 内容；User-Agent 包含 `Clash` 时得到 Clash YAML。账号被停用、删除或 Token 轮换后，旧链接返回 `404`。
+`GET /sub/<token>` 不需要管理员 Session。普通客户端得到 Base64 内容；User-Agent 包含 `Clash` 时得到 Clash YAML。客户端中的订阅名称统一显示为 `SSRVPN.VIP`，不会暴露面板账号名。账号被停用、删除或 Token 轮换后，旧链接返回 `404`。
 
 公开订阅 URL 本身就是凭据：
 
