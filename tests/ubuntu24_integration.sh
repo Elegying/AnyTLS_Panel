@@ -94,9 +94,15 @@ import sys
 
 with sqlite3.connect(sys.argv[1]) as db:
     assert db.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
-    assert db.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 4
+    assert db.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 5
     columns = {row[1] for row in db.execute('PRAGMA table_info(accounts)')}
-    assert {'sub_token', 'traffic_upload_bytes', 'traffic_download_bytes'} <= columns
+    assert {
+        'sub_token', 'traffic_upload_bytes', 'traffic_download_bytes',
+        'last_traffic_reset_on',
+    } <= columns
+    assert db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='customer_services'"
+    ).fetchone()
 PY
 
 # Reuse the production unit renderer, then prove systemd can start and restart it.
