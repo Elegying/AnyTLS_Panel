@@ -5,7 +5,7 @@
     <div class="page-heading">
         <p class="eyebrow">运营总览</p>
         <h1 class="page-title">仪表盘</h1>
-        <p class="page-description">集中查看账号、节点健康和流量风险，优先处理需要关注的问题。</p>
+        <p class="page-description">集中查看专线流量、每月重置周期、用户续费和节点健康。</p>
     </div>
     <div class="page-actions">
         <span class="page-meta">最后同步：{{ last_synced_at or '尚未同步' }}</span>
@@ -32,9 +32,9 @@
         <div class="metric-note">{% if total_traffic_limit %}总配额 {{ format_bytes(total_traffic_limit) }}{% else %}尚未设置配额{% endif %}</div>
     </div>
     <div class="system-metric">
-        <div class="metric-label"><i class="bi bi-exclamation-triangle" aria-hidden="true"></i>告警账号</div>
-        <div class="metric-value {{ 'is-orange' if warning_accounts else 'is-green' }}">{{ warning_accounts | length }}</div>
-        <div class="metric-note">流量使用率达到 80% 以上</div>
+        <div class="metric-label"><i class="bi bi-calendar2-check" aria-hidden="true"></i>续费待办</div>
+        <div class="metric-value {{ 'is-orange' if due_services or expired_services else 'is-green' }}">{{ due_services + expired_services }}</div>
+        <div class="metric-note">30 天内到期 {{ due_services }} · 已过期 {{ expired_services }}</div>
     </div>
     <div class="system-metric">
         <div class="metric-label"><i class="bi bi-broadcast-pin" aria-hidden="true"></i>节点状态</div>
@@ -134,29 +134,59 @@
 
 <section class="panel dashboard-bottom">
     <header class="panel-header">
+        <h2 class="panel-title"><i class="bi bi-calendar2-check" aria-hidden="true"></i>续费提醒</h2>
+        <span class="panel-meta">有效服务 {{ active_services }} / 全部 {{ service_total }}</span>
+    </header>
+    {% if renewal_services %}
+    <div class="table-scroll">
+        <table class="rwd-table">
+            <thead><tr><th>微信号</th><th>专线账号</th><th>到期日</th><th>剩余时间</th><th>最近提醒</th><th>操作</th></tr></thead>
+            <tbody>
+            {% for service in renewal_services %}
+            {% set remaining = days_until(service.expires_on) %}
+            <tr>
+                <td data-label="微信号"><strong>{{ service.wechat_id }}</strong><span class="cell-subtitle">{{ service.relationship }}</span></td>
+                <td data-label="专线账号"><span class="cell-title">{{ service.account_name }}</span></td>
+                <td data-label="到期日"><span class="cell-title">{{ service.expires_on }}</span></td>
+                <td data-label="剩余时间"><span class="badge {{ 'badge-red' if remaining < 0 else 'badge-orange' if remaining <= 7 else 'badge-blue' }}">{{ '已过期' ~ (-remaining) ~ '天' if remaining < 0 else '剩余' ~ remaining ~ '天' }}</span></td>
+                <td data-label="最近提醒"><span class="cell-subtitle">{{ service.last_reminded_at or '尚未提醒' }}</span></td>
+                <td data-label="操作"><div class="cell-actions"><form method="POST" action="{{ url_for('service_remind', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-ghost" type="submit">标记已提醒</button></form><a class="btn btn-sm btn-primary" href="{{ url_for('service_detail', service_id=service.id) }}">续期</a></div></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-check2-circle" aria-hidden="true"></i></span><h3>未来 30 天没有续费待办</h3><p>用户服务临近到期时会自动出现在这里。</p></div></div>
+    {% endif %}
+    <footer class="panel-footer"><a class="panel-link" href="{{ url_for('services_list') }}">管理全部用户服务<i class="bi bi-arrow-right" aria-hidden="true"></i></a></footer>
+</section>
+
+<section class="panel dashboard-bottom">
+    <header class="panel-header">
         <h2 class="panel-title"><i class="bi bi-list-check" aria-hidden="true"></i>账号概览</h2>
-        <span class="panel-meta">按账号集中查看节点与流量</span>
+        <span class="panel-meta">按上游账号查看节点、流量和分发人数</span>
     </header>
     {% if accounts %}
     <div class="table-scroll">
         <table class="rwd-table">
-            <thead><tr><th>账号</th><th>到期时间</th><th>节点</th><th>流量使用</th><th>状态</th><th class="hide-mobile">最后同步</th></tr></thead>
+            <thead><tr><th>账号</th><th>账号到期 / 流量重置</th><th>用户</th><th>节点</th><th>流量使用</th><th>状态</th></tr></thead>
             <tbody>
             {% for a in accounts %}
             {% set pct = calc_traffic_percent(a.traffic_used_bytes or 0, a.traffic_limit_gb or 250) %}
             <tr class="clickable" data-action="navigate" data-href="{{ url_for('account_detail', account_id=a.id) }}" tabindex="0" role="link">
                 <td data-label="账号"><strong>{{ a.name }}</strong><span class="cell-subtitle">账号 #{{ a.id }}</span></td>
-                <td data-label="到期时间">
+                <td data-label="账号到期 / 流量重置">
                     {% if a.expire_date %}
-                    {% set remaining_days = days_until(a.expire_date) %}
                     <span class="cell-title">到期：{{ a.expire_date }}</span>
-                    {% if remaining_days is not none %}<span class="cell-subtitle">{{ '已过期' ~ (-remaining_days) ~ '天' if remaining_days < 0 else '剩余' ~ remaining_days ~ '天' }}</span>{% endif %}
-                    {% else %}<span class="cell-subtitle">到期：未设置</span>{% endif %}
+                    {% set reset = traffic_reset_info(a.expire_date) %}
+                    {% if reset %}<span class="cell-subtitle">每月 {{ reset.day }} 日重置 · 下次 {{ reset.next }}</span>{% endif %}
+                    {% else %}<span class="cell-subtitle">账号到期：未设置</span>{% endif %}
                 </td>
+                <td data-label="有效用户"><span class="badge badge-blue">{{ service_counts.get(a.id, 0) }} 位</span></td>
                 <td data-label="节点数"><span class="badge badge-blue">{{ a.node_count or 0 }} 个</span></td>
                 <td data-label="流量使用"><div class="cell-stack"><div class="cell-row"><span>{{ format_bytes(a.traffic_used_bytes or 0) }} / {{ a.traffic_limit_gb }} GB</span><span class="badge {{ 'badge-red' if pct >= 90 else 'badge-orange' if pct >= 70 else 'badge-green' }}">{{ pct }}%</span></div><div class="progress"><div class="progress-bar {{ 'red' if pct >= 90 else 'orange' if pct >= 70 else 'green' }}" style="width:{{ pct }}%"></div></div></div></td>
                 <td data-label="状态"><span class="badge {{ 'badge-green' if a.status == 'active' else 'badge-orange' if a.status == 'suspended' else 'badge-red' }}">{{ '活跃' if a.status == 'active' else '暂停' if a.status == 'suspended' else '停用' }}</span></td>
-                <td data-label="最后同步" class="hide-mobile"><span class="cell-subtitle">{{ a.last_synced_at or '未同步' }}</span></td>
             </tr>
             {% endfor %}
             </tbody>

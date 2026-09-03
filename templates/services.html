@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}用户服务 - AnyTLS Panel{% endblock %}
+{% block content %}
+<header class="page-header">
+    <div class="page-heading">
+        <p class="eyebrow">二次分发管理</p>
+        <h1 class="page-title">用户服务</h1>
+        <p class="page-description">为每位用户独立管理专线分配、服务期、续费提醒和订阅链接。</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn btn-primary" type="button" data-action="open-modal" data-modal="addServiceModal"><i class="bi bi-person-plus" aria-hidden="true"></i>添加用户服务</button>
+    </div>
+</header>
+
+<section class="monitor-summary" aria-label="用户服务概览">
+    <div class="summary-card"><div class="metric-label">全部服务</div><div class="summary-card-value">{{ services | length }}</div><div class="metric-note">历史和当前服务记录</div></div>
+    <div class="summary-card"><div class="metric-label">使用中</div><div class="summary-card-value is-green">{{ active_count }}</div><div class="metric-note">Token 当前可以获取订阅</div></div>
+    <div class="summary-card"><div class="metric-label">30 天内到期</div><div class="summary-card-value is-orange">{{ due_count }}</div><div class="metric-note">需要安排续费提醒</div></div>
+    <div class="summary-card"><div class="metric-label">已过期</div><div class="summary-card-value {{ 'is-orange' if expired_count else '' }}">{{ expired_count }}</div><div class="metric-note">Token 已自动停止提供订阅</div></div>
+</section>
+
+{% if accounts %}
+{% set recommended = accounts[0] %}
+{% set recommended_pct = calc_traffic_percent(recommended.traffic_used_bytes or 0, recommended.traffic_limit_gb or 0) %}
+{% set recommended_reset = traffic_reset_info(recommended.expire_date) %}
+<div class="info-banner">
+    <i class="bi bi-lightbulb" aria-hidden="true"></i>
+    <div><strong>当前优先分配：{{ recommended.name }}</strong>使用率 {{ recommended_pct }}%，已有 {{ recommended.service_count }} 位有效用户{% if recommended_reset %}，下次流量重置 {{ recommended_reset.next }}{% endif %}。推荐顺序按是否超过 80%、当前使用率和有效用户数综合排列。</div>
+</div>
+{% endif %}
+
+<section class="panel">
+    <header class="panel-header">
+        <h2 class="panel-title"><i class="bi bi-list-check" aria-hidden="true"></i>服务清单</h2>
+        <span class="panel-meta">按到期日优先排列</span>
+    </header>
+    {% if services %}
+    <div class="table-scroll">
+        <table class="rwd-table">
+            <thead><tr><th>微信号</th><th>专线账号</th><th>关系</th><th>服务期</th><th>状态</th><th>最近提醒</th><th>操作</th></tr></thead>
+            <tbody>
+            {% for service in services %}
+            {% set state = customer_service_state(service) %}
+            {% set remaining = days_until(service.expires_on) %}
+            <tr>
+                <td data-label="微信号"><strong>{{ service.wechat_id }}</strong></td>
+                <td data-label="专线账号"><span class="cell-title">{{ service.account_name }}</span>{% if service.account_expires_on and service.expires_on > service.account_expires_on %}<span class="cell-subtitle" style="color:var(--orange)">用户到期日晚于账号到期日</span>{% endif %}</td>
+                <td data-label="关系"><span class="badge badge-neutral">{{ service.relationship }}</span></td>
+                <td data-label="服务期"><span class="cell-title">{{ service.started_on }} 至 {{ service.expires_on }}</span><span class="cell-subtitle">{{ '已过期' ~ (-remaining) ~ '天' if state == 'expired' else '剩余' ~ remaining ~ '天' if state == 'active' else '开始日未到' if state == 'pending' else '当前未启用' }}</span></td>
+                <td data-label="状态"><span class="badge {{ 'badge-green' if state == 'active' else 'badge-red' if state == 'expired' else 'badge-blue' if state == 'pending' else 'badge-orange' }}">{{ '使用中' if state == 'active' else '已过期' if state == 'expired' else '待生效' if state == 'pending' else '暂停' if state == 'suspended' else '停用' }}</span></td>
+                <td data-label="最近提醒"><span class="cell-subtitle">{{ service.last_reminded_at or '尚未提醒' }}</span></td>
+                <td data-label="操作"><a class="btn btn-sm btn-ghost" href="{{ url_for('service_detail', service_id=service.id) }}">管理</a></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-person-plus" aria-hidden="true"></i></span><h3>还没有用户服务</h3><p>添加第一位用户后，系统会自动管理其到期提醒和独立订阅链接。</p><button class="btn btn-primary" type="button" data-action="open-modal" data-modal="addServiceModal">添加用户服务</button></div></div>
+    {% endif %}
+</section>
+
+<div class="modal-overlay" id="addServiceModal" aria-hidden="true">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="addServiceTitle">
+        <div class="modal-header"><div><h2 class="modal-title" id="addServiceTitle"><i class="bi bi-person-plus" aria-hidden="true"></i>添加用户服务</h2><p class="modal-description">每位用户会获得独立的服务期和订阅链接。</p></div><button type="button" class="icon-button modal-close" data-action="close-modal" data-modal="addServiceModal" aria-label="关闭添加用户服务弹窗"><i class="bi bi-x-lg" aria-hidden="true"></i></button></div>
+        <div class="modal-body">
+            <form method="POST" action="{{ url_for('service_add') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group"><label for="service-account">专线账号</label><select id="service-account" name="account_id" required>{% for account in accounts %}<option value="{{ account.id }}" {{ 'selected' if request.args.get('account_id') == account.id|string }}>{{ account.name }} · 已用 {{ calc_traffic_percent(account.traffic_used_bytes or 0, account.traffic_limit_gb or 0) }}% · {{ account.service_count }} 位用户</option>{% endfor %}</select><p class="field-help">已按使用率和有效用户数给出推荐顺序。</p></div>
+                <div class="form-row"><div class="form-group"><label for="service-wechat">微信号</label><input id="service-wechat" name="wechat_id" required></div><div class="form-group"><label for="service-relationship">账号关系</label><select id="service-relationship" name="relationship"><option value="自用">自用</option><option value="借用">借用</option></select></div></div>
+                <div class="form-row"><div class="form-group"><label for="service-start">开始日期</label><input id="service-start" name="started_on" type="date" value="{{ now.strftime('%Y-%m-%d') }}" required></div><div class="form-group"><label for="service-expire">到期日期</label><input id="service-expire" name="expires_on" type="date" required></div></div>
+                <div class="form-group"><label for="service-notes">备注</label><input id="service-notes" name="notes" placeholder="例如：年付、已收款"></div>
+                <div class="modal-actions"><button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="addServiceModal">取消</button><button class="btn btn-primary" type="submit">创建服务</button></div>
+            </form>
+        </div>
+    </section>
+</div>
+{% endblock %}

@@ -21,13 +21,13 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
 在线部署：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.3.1/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.0/deploy.sh)
 ```
 
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.3.1 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.0 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -35,8 +35,8 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.3.1" \
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.3.1/deploy.sh)
+ANYTLS_REPO_REF="v1.4.0" \
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.0/deploy.sh)
 ```
 
 首次交互部署会要求输入管理员用户名、两次输入密码以及面板域名。密码输入不会回显。自定义端口、服务名和目录时仍会显示这些提示：
@@ -116,6 +116,42 @@ sudo -u anytls-panel /opt/anytls-panel/venv/bin/python \
 
 脚本依赖 util-linux 的 `flock`，默认通过 `/run/anytls-panel-traffic.lock` 保证单实例执行；可用 `COLLECTOR_LOCK_FILE` 自定义。自定义 ID/锁文件必须是绝对路径，父目录需预先创建，且整条目录链由 root 所有、不可组/全局写；禁止放在 `/tmp` 或普通用户目录。当前 iptables 计数仅覆盖 IPv4，并且按端口而不是 AnyTLS 用户区分。每个被采集的 IPv4 端口必须只对应一个面板账号，且同一端口只能运行一个 collector。双栈/纯 IPv6或共享端口需要用户级指标，不能使用 `traffic_collector.sh` 做账号计费。
 
+## 私密导入用户服务
+
+用户服务包含客户标识和服务期，属于业务敏感数据，不应提交到 Git、Issue、Release 或普通日志。批量导入前，先在面板中建立并同步所有上游专线账号；JSON 中的账号名称必须与面板完全一致。
+
+导入文件是一个数组，每条记录使用以下字段：
+
+```json
+[
+  {
+    "wechat_id": "示例用户",
+    "account": "上游账号名称",
+    "relationship": "自用",
+    "started_on": "2026-09-01",
+    "expires_on": "2027-08-31",
+    "notes": ""
+  }
+]
+```
+
+将本地文件以受限权限放入服务器数据目录，再用面板服务账号执行导入：
+
+```bash
+install -o anytls-panel -g anytls-panel -m 600 \
+  /安全路径/customer-services.json \
+  /opt/anytls-panel/data/customer-services-import.json
+
+runuser -u anytls-panel -- /opt/anytls-panel/venv/bin/python \
+  /opt/anytls-panel/import_customer_services.py \
+  --database /opt/anytls-panel/data/anytls.db \
+  --source /opt/anytls-panel/data/customer-services-import.json
+
+rm -f /opt/anytls-panel/data/customer-services-import.json
+```
+
+工具会先验证全部账号名称和日期，再开启写事务；有任何未知账号或非法记录时整批失败，不会只导入一半。重复导入会按“专线账号 + 微信号 + 开始日期”更新原记录并保留用户 Token，因此可以安全复跑。导入完成后登录「用户服务」核对总数、到期日、专线分配和覆盖警告，并确认临时文件已删除。
+
 ## 部署后验证
 
 ```bash
@@ -190,7 +226,7 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
 重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库。脚本先完成源码暂存、带哈希依赖下载和现有数据库副本迁移测试，再停止服务进行短切换；切换后任一步失败都会自动恢复旧代码、数据库、systemd 和 Caddy 配置。成功更新还会在 `/var/backups/<服务名>/` 保留最近两份带 SHA-256 校验的上一版本快照：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.3.1/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.0/deploy.sh)
 ```
 
 更新时会再次询问面板域名，已有数据库不会再次询问或覆盖管理员凭据。自动化更新可设置 `ANYTLS_PANEL_DOMAIN`。如果使用自定义目录、服务名或 `/etc/anytls-panel/` 下的密钥文件，更新时需要继续传入相同环境变量。

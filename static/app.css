@@ -383,7 +383,7 @@ code, .code-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", 
 .account-card-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 15px; color: var(--text-3); font-size: 11px; }
 .account-card-footer i { color: #9e94ff; font-size: 15px; }
 
-.detail-summary { display: grid; grid-template-columns: 1fr 1.35fr 1fr; margin-bottom: 18px; }
+.detail-summary { display: grid; grid-template-columns: 1fr 1.35fr 1fr 1.2fr; margin-bottom: 18px; }
 .detail-summary .system-metric { border: 1px solid var(--border); background: var(--surface); }
 .detail-summary .system-metric:first-child { border-radius: var(--radius-lg) 0 0 var(--radius-lg); }
 .detail-summary .system-metric:last-child { border-radius: 0 var(--radius-lg) var(--radius-lg) 0; }

@@ -12,7 +12,7 @@
             <h1 class="page-title" id="account-name-display">{{ account.name }}</h1>
             <span class="badge {{ 'badge-green' if account.status == 'active' else 'badge-orange' if account.status == 'suspended' else 'badge-red' }}">{{ '活跃' if account.status == 'active' else '暂停' if account.status == 'suspended' else '停用' }}</span>
         </div>
-        <p class="page-description">查看节点连接、流量配额，并管理同步与分享设置。</p>
+        <p class="page-description">查看专线节点、流量周期和关联的下游用户服务。</p>
     </div>
     <div class="page-actions">
         <button class="btn btn-ghost" type="button" data-action="check-all"><i class="bi bi-radar" aria-hidden="true"></i>检测全部</button>
@@ -43,6 +43,41 @@
         <div class="metric-value" style="font-size:17px">{{ account.last_synced_at or '尚未同步' }}</div>
         <div class="metric-note">订阅数据更新时间</div>
     </div>
+    <div class="system-metric">
+        {% set reset = traffic_reset_info(account.expire_date) %}
+        <div class="metric-label"><i class="bi bi-calendar2-week" aria-hidden="true"></i>账号周期</div>
+        <div class="metric-value" style="font-size:17px">{{ account.expire_date or '未设置到期日' }}</div>
+        <div class="metric-note">{% if reset %}每月 {{ reset.day }} 日重置 · 下次 {{ reset.next }}{% else %}同步订阅后显示重置日{% endif %}</div>
+    </div>
+</section>
+
+<section class="panel">
+    <header class="panel-header">
+        <h2 class="panel-title"><i class="bi bi-person-vcard" aria-hidden="true"></i>下游用户服务</h2>
+        <div class="cell-row"><span class="panel-meta">共 {{ services | length }} 条</span><a class="btn btn-sm btn-primary" href="{{ url_for('services_list', account_id=account.id) }}"><i class="bi bi-plus-lg" aria-hidden="true"></i>添加用户</a></div>
+    </header>
+    {% if services %}
+    <div class="table-scroll">
+        <table class="rwd-table">
+            <thead><tr><th>微信号</th><th>关系</th><th>服务期</th><th>状态</th><th>最近提醒</th><th>操作</th></tr></thead>
+            <tbody>
+            {% for service in services %}
+            {% set state = customer_service_state(service) %}
+            <tr>
+                <td data-label="微信号"><strong>{{ service.wechat_id }}</strong></td>
+                <td data-label="关系"><span class="badge badge-neutral">{{ service.relationship }}</span></td>
+                <td data-label="服务期"><span class="cell-title">{{ service.started_on }} 至 {{ service.expires_on }}</span><span class="cell-subtitle">{{ '已过期' if state == 'expired' else '剩余' ~ days_until(service.expires_on) ~ '天' if state == 'active' else '开始日未到' if state == 'pending' else '当前未启用' }}</span></td>
+                <td data-label="状态"><span class="badge {{ 'badge-green' if state == 'active' else 'badge-red' if state == 'expired' else 'badge-blue' if state == 'pending' else 'badge-orange' }}">{{ '使用中' if state == 'active' else '已过期' if state == 'expired' else '待生效' if state == 'pending' else '暂停' if state == 'suspended' else '停用' }}</span></td>
+                <td data-label="最近提醒"><span class="cell-subtitle">{{ service.last_reminded_at or '尚未提醒' }}</span></td>
+                <td data-label="操作"><a class="btn btn-sm btn-ghost" href="{{ url_for('service_detail', service_id=service.id) }}">管理</a></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-person-plus" aria-hidden="true"></i></span><h3>尚未分配用户</h3><p>添加用户服务后，可以独立管理到期日、提醒和订阅链接。</p><a class="btn btn-primary" href="{{ url_for('services_list', account_id=account.id) }}">添加用户服务</a></div></div>
+    {% endif %}
 </section>
 
 <section class="panel">

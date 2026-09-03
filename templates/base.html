@@ -36,6 +36,9 @@
             <a href="{{ url_for('accounts_list') }}" class="nav-link {{ 'active' if request.endpoint in ['accounts_list', 'account_detail'] }}" {% if request.endpoint in ['accounts_list', 'account_detail'] %}aria-current="page"{% endif %}>
                 <i class="bi bi-people" aria-hidden="true"></i><span>账号</span>
             </a>
+            <a href="{{ url_for('services_list') }}" class="nav-link {{ 'active' if request.endpoint in ['services_list', 'service_detail'] }}" {% if request.endpoint in ['services_list', 'service_detail'] %}aria-current="page"{% endif %}>
+                <i class="bi bi-person-vcard" aria-hidden="true"></i><span>用户服务</span>
+            </a>
             <a href="{{ url_for('nodes_monitor') }}" class="nav-link {{ 'active' if request.endpoint == 'nodes_monitor' }}" {% if request.endpoint == 'nodes_monitor' %}aria-current="page"{% endif %}>
                 <i class="bi bi-activity" aria-hidden="true"></i><span>监控</span>
             </a>
