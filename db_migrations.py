@@ -1,6 +1,6 @@
 """Small, ordered SQLite schema migrations for existing installations."""
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _add_account_metadata_columns(db):
@@ -54,11 +54,65 @@ def _add_database_maintenance(db):
     )
 
 
+def _add_customer_services(db):
+    columns = {row[1] for row in db.execute("PRAGMA table_info(accounts)")}
+    if "last_traffic_reset_on" not in columns:
+        db.execute(
+            "ALTER TABLE accounts ADD COLUMN last_traffic_reset_on TEXT DEFAULT ''"
+        )
+    db.execute(
+        "UPDATE accounts SET last_traffic_reset_on=date('now') "
+        "WHERE COALESCE(last_traffic_reset_on, '')=''"
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS customer_services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            wechat_id TEXT NOT NULL,
+            relationship TEXT NOT NULL DEFAULT '自用',
+            started_on TEXT NOT NULL,
+            expires_on TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            sub_token TEXT NOT NULL UNIQUE,
+            last_reminded_at TIMESTAMP,
+            notes TEXT DEFAULT '',
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+            UNIQUE (account_id, wechat_id, started_on)
+        )"""
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS service_renewals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_id INTEGER NOT NULL,
+            old_expires_on TEXT NOT NULL,
+            new_expires_on TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (service_id) REFERENCES customer_services(id) ON DELETE CASCADE
+        )"""
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_customer_services_account_id "
+        "ON customer_services(account_id)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_customer_services_expires_on "
+        "ON customer_services(expires_on, status)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_service_renewals_service_id "
+        "ON service_renewals(service_id)"
+    )
+
+
 _MIGRATIONS = (
     (1, _add_account_metadata_columns),
     (2, _add_rate_limits),
     (3, _add_admin_session_version),
     (4, _add_database_maintenance),
+    (5, _add_customer_services),
 )
 
 

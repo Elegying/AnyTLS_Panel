@@ -5,7 +5,7 @@
     <div class="page-heading">
         <p class="eyebrow">订阅管理</p>
         <h1 class="page-title">账号</h1>
-        <p class="page-description">管理订阅来源、流量配额和节点同步状态。</p>
+        <p class="page-description">管理上游专线账号、流量周期和节点同步状态。</p>
     </div>
     <div class="page-actions">
         <button class="btn btn-primary" type="button" data-action="open-modal" data-modal="addModal"><i class="bi bi-plus-lg" aria-hidden="true"></i>导入订阅</button>
@@ -27,6 +27,7 @@
                 <h2 class="account-card-name">{{ a.name }}</h2>
                 <div class="account-card-meta">
                     <span><i class="bi bi-hdd-network" aria-hidden="true"></i>{{ a.node_count or 0 }} 个节点</span>
+                    <span><i class="bi bi-person-check" aria-hidden="true"></i>{{ a.service_count or 0 }} 位有效用户</span>
                     <span><i class="bi bi-arrow-repeat" aria-hidden="true"></i>{{ a.last_synced_at or '尚未同步' }}</span>
                 </div>
             </div>
@@ -39,7 +40,8 @@
             </div>
             <div class="progress progress-lg"><div class="progress-bar {{ 'red' if pct >= 90 else 'orange' if pct >= 70 else 'green' }}" style="width:{{ pct }}%"></div></div>
             <div class="account-card-footer">
-                <span>配额使用率 {{ pct }}%{% if a.notes %} · {{ a.notes }}{% endif %}</span>
+                {% set reset = traffic_reset_info(a.expire_date) %}
+                <span>配额使用率 {{ pct }}%{% if reset %} · 下次重置 {{ reset.next }}{% endif %}{% if a.notes %} · {{ a.notes }}{% endif %}</span>
                 <i class="bi bi-arrow-right" aria-hidden="true"></i>
             </div>
         </div>

@@ -2081,13 +2081,14 @@ proxies:
             app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
             fake_db = FakeDb()
             with mock.patch.object(app, "get_db", return_value=fake_db):
-                with mock.patch.object(app, "prune_traffic_logs", return_value=0):
-                    with app.app.test_client() as client:
-                        response = client.post(
-                            "/api/traffic/report",
-                            headers={"Authorization": "Bearer traffic-token"},
-                            json={"account_id": 1, "bytes_used": 50},
-                        )
+                with mock.patch.object(app, "apply_due_traffic_resets", return_value=[]):
+                    with mock.patch.object(app, "prune_traffic_logs", return_value=0):
+                        with app.app.test_client() as client:
+                            response = client.post(
+                                "/api/traffic/report",
+                                headers={"Authorization": "Bearer traffic-token"},
+                                json={"account_id": 1, "bytes_used": 50},
+                            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["results"][0]["total_bytes"], 150)
@@ -2291,6 +2292,251 @@ proxies:
                 (account_count, node_count, log_count, collector_count, rule_count),
                 (0, 0, 0, 0, 0),
             )
+
+    def test_customer_service_lifecycle_and_monthly_traffic_reset(self):
+        from datetime import date
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                first_account = db.execute(
+                    '''INSERT INTO accounts (
+                           name, subscribe_url, traffic_limit_gb, traffic_used_bytes,
+                           expire_date, last_traffic_reset_on, status, node_count
+                       ) VALUES (?, ?, ?, ?, ?, ?, 'active', 1)''',
+                    (
+                        "upstream-one",
+                        "anytls://pw1@one.example:443#one",
+                        100,
+                        500,
+                        "2030-04-24",
+                        "2026-08-24",
+                    ),
+                ).lastrowid
+                second_account = db.execute(
+                    '''INSERT INTO accounts (
+                           name, subscribe_url, traffic_limit_gb, expire_date,
+                           last_traffic_reset_on, status, node_count
+                       ) VALUES (?, ?, ?, ?, ?, 'active', 1)''',
+                    (
+                        "upstream-two",
+                        "anytls://pw2@two.example:443#two",
+                        200,
+                        "2032-05-15",
+                        "2026-08-15",
+                    ),
+                ).lastrowid
+                for account_id, host, password in (
+                    (first_account, "one.example", "pw1"),
+                    (second_account, "two.example", "pw2"),
+                ):
+                    db.execute(
+                        '''INSERT INTO nodes (
+                               account_id, name, host, port, password, raw_uri
+                           ) VALUES (?, ?, ?, 443, ?, ?)''',
+                        (
+                            account_id,
+                            host,
+                            host,
+                            password,
+                            f"anytls://{password}@{host}:443#{host}",
+                        ),
+                    )
+                db.commit()
+
+                reset = app.traffic_reset_info(
+                    "2030-04-24", today=date(2026, 9, 3)
+                )
+                self.assertEqual(
+                    reset,
+                    {
+                        "day": 24,
+                        "previous": "2026-08-24",
+                        "next": "2026-09-24",
+                        "days": 21,
+                    },
+                )
+                self.assertEqual(
+                    app.traffic_reset_info(
+                        "2030-01-31", today=date(2027, 2, 1)
+                    )["next"],
+                    "2027-02-28",
+                )
+                self.assertEqual(
+                    app.customer_service_state(
+                        {
+                            "status": "active",
+                            "started_on": "2026-09-04",
+                            "expires_on": "2027-09-03",
+                        },
+                        today=date(2026, 9, 3),
+                    ),
+                    "pending",
+                )
+                self.assertEqual(
+                    set(app.apply_due_traffic_resets(db, today=date(2026, 9, 24))),
+                    {first_account, second_account},
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT traffic_used_bytes FROM accounts WHERE id=?",
+                        (first_account,),
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    app.apply_due_traffic_resets(db, today=date(2026, 9, 24)), []
+                )
+
+            with app.app.test_client() as client:
+                authenticate_session(app, client)
+                response = client.post(
+                    "/services/add",
+                    data={
+                        "account_id": first_account,
+                        "wechat_id": "customer-one",
+                        "relationship": "借用",
+                        "started_on": "2026-09-01",
+                        "expires_on": "2030-05-01",
+                        "notes": "annual",
+                    },
+                )
+                self.assertEqual(response.status_code, 302)
+                with closing(sqlite3.connect(database)) as db:
+                    db.row_factory = sqlite3.Row
+                    service = db.execute(
+                        "SELECT * FROM customer_services"
+                    ).fetchone()
+                service_id = service["id"]
+                original_token = service["sub_token"]
+
+                self.assertEqual(client.get("/services").status_code, 200)
+                detail = client.get(f"/services/{service_id}")
+                self.assertEqual(detail.status_code, 200)
+                self.assertIn("当前上游有效期不能完整覆盖", detail.get_data(as_text=True))
+                public = client.get(f"/sub/{original_token}")
+                self.assertEqual(public.status_code, 200)
+                self.assertIn("expire=", public.headers["Subscription-Userinfo"])
+
+                self.assertEqual(
+                    client.post(f"/services/{service_id}/remind").status_code, 302
+                )
+                self.assertEqual(
+                    client.post(
+                        f"/services/{service_id}/renew",
+                        data={"new_expires_on": "2031-05-01", "notes": "renewed"},
+                    ).status_code,
+                    302,
+                )
+                self.assertEqual(
+                    client.post(
+                        f"/services/{service_id}/edit",
+                        data={
+                            "account_id": second_account,
+                            "wechat_id": "customer-one",
+                            "relationship": "自用",
+                            "started_on": "2026-09-01",
+                            "expires_on": "2031-05-01",
+                            "notes": "migrated",
+                        },
+                    ).status_code,
+                    302,
+                )
+                self.assertEqual(
+                    client.post(f"/services/{service_id}/rotate-token").status_code,
+                    302,
+                )
+                with closing(sqlite3.connect(database)) as db:
+                    db.row_factory = sqlite3.Row
+                    updated = db.execute(
+                        "SELECT * FROM customer_services WHERE id=?", (service_id,)
+                    ).fetchone()
+                    renewal_count = db.execute(
+                        "SELECT COUNT(*) FROM service_renewals WHERE service_id=?",
+                        (service_id,),
+                    ).fetchone()[0]
+                self.assertEqual(updated["account_id"], second_account)
+                self.assertIsNone(updated["last_reminded_at"])
+                self.assertNotEqual(updated["sub_token"], original_token)
+                self.assertEqual(renewal_count, 1)
+                self.assertEqual(client.get(f"/sub/{original_token}").status_code, 404)
+                self.assertEqual(
+                    client.get(f"/sub/{updated['sub_token']}").status_code, 200
+                )
+
+                self.assertEqual(
+                    client.post(
+                        f"/services/{service_id}/status",
+                        data={"status": "suspended"},
+                    ).status_code,
+                    302,
+                )
+                self.assertEqual(
+                    client.get(f"/sub/{updated['sub_token']}").status_code, 404
+                )
+                self.assertEqual(
+                    client.post(
+                        f"/services/{service_id}/status", data={"status": "active"}
+                    ).status_code,
+                    302,
+                )
+                self.assertEqual(
+                    client.post(f"/services/{service_id}/delete").status_code, 302
+                )
+
+            with closing(sqlite3.connect(database)) as db:
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM customer_services").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM service_renewals").fetchone()[0],
+                    0,
+                )
+
+    def test_customer_service_json_import_is_idempotent(self):
+        import import_customer_services
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            source = Path(tmp) / "services.json"
+            app = load_app(database)
+            with app.app.app_context():
+                db = app.get_db()
+                db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("upstream", "anytls://pw@example.com:443#demo"),
+                )
+                db.commit()
+            source.write_text(
+                json.dumps(
+                    [
+                        {
+                            "account": "upstream",
+                            "wechat_id": "customer",
+                            "relationship": "借用",
+                            "started_on": "2026-09-01",
+                            "expires_on": "2027-09-01",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                import_customer_services.import_services(database, source), (1, 0)
+            )
+            self.assertEqual(
+                import_customer_services.import_services(database, source), (0, 1)
+            )
+            with closing(sqlite3.connect(database)) as db:
+                count, token_length = db.execute(
+                    "SELECT COUNT(*), LENGTH(sub_token) FROM customer_services"
+                ).fetchone()
+            self.assertEqual((count, token_length), (1, 32))
 
     def test_account_sync_stores_parsed_protocol(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2707,10 +2953,13 @@ proxies:
             "traffic_upload_bytes",
             "traffic_download_bytes",
             "expire_date",
+            "last_traffic_reset_on",
         }.issubset(columns))
         self.assertIn("traffic_collectors", tables)
         self.assertIn("rate_limits", tables)
         self.assertIn("maintenance_state", tables)
+        self.assertIn("customer_services", tables)
+        self.assertIn("service_renewals", tables)
         self.assertIn("session_version", admin_columns)
         self.assertIn("idx_traffic_logs_recorded_at", traffic_indexes)
         self.assertEqual(
@@ -3448,15 +3697,15 @@ proxies:
 
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("<th>到期时间</th>", html)
+        self.assertIn("<th>账号到期 / 流量重置</th>", html)
         account_name_index = html.index("<strong>demo-account</strong>")
         expiration_index = html.index("到期：2030-01-02")
-        node_count_index = html.index('data-label="节点数"', expiration_index)
+        user_count_index = html.index('data-label="有效用户"', expiration_index)
         self.assertLess(account_name_index, expiration_index)
-        self.assertLess(expiration_index, node_count_index)
-        self.assertIn('data-label="到期时间"', html)
-        self.assertIn(f"剩余{app.days_until('2030-01-02')}天", html)
-        self.assertIn("到期：未设置", html)
+        self.assertLess(expiration_index, user_count_index)
+        self.assertIn('data-label="账号到期 / 流量重置"', html)
+        self.assertIn("每月 2 日重置", html)
+        self.assertIn("账号到期：未设置", html)
 
     def test_monitor_template_does_not_embed_host_in_javascript(self):
         content = (REPO_ROOT / "templates" / "monitor.html").read_text(encoding="utf-8")
@@ -4712,7 +4961,7 @@ proxies:
         self.assertIn("python3.12 -m venv .venv", operations)
         self.assertIn("brew install python@3.12 shellcheck actionlint", operations)
         self.assertIn("--require-hashes -r requirements-dev.txt", operations)
-        self.assertIn("git clone --depth 1 --branch v1.3.1", operations)
+        self.assertIn("git clone --depth 1 --branch v1.4.0", operations)
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
@@ -4812,8 +5061,8 @@ proxies:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.3.1}"', deploy)
-        self.assertIn("AnyTLS_Panel/v1.3.1/deploy.sh", readme)
+        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.4.0}"', deploy)
+        self.assertIn("AnyTLS_Panel/v1.4.0/deploy.sh", readme)
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)

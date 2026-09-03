@@ -9,7 +9,7 @@
 
 ![AnyTLS Panel 仪表盘](docs/assets/dashboard.jpg)
 
-> 当前正式版本：`v1.3.1`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
+> 当前正式版本：`v1.4.0`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
 
 ## 你可以用它做什么
 
@@ -17,6 +17,8 @@
 | --- | --- |
 | 多协议订阅导入 | 支持 AnyTLS、Trojan、VMess、VLESS、Hysteria2、TUIC、Shadowsocks，以及 Clash YAML、Base64 和多行链接 |
 | 多账号统一管理 | 一个账号对应一个订阅来源，可独立设置名称、状态、流量上限、备注和到期日 |
+| 用户服务与续费 | 为每位下游用户记录服务期、续费历史和提醒状态，并提供始终稳定的独立订阅链接 |
+| 月度流量周期 | 账号到期日仍是真实到期日；系统按其中的日号推导每月重置日，例如 `2027-04-24` 表示每月 24 日重置 |
 | 一键同步 | 单独同步一个账号，或并发更新全部活跃账号；失败不会覆盖上一次可用节点 |
 | 节点健康检测 | 检测节点是否在线并记录延迟，同时限制探测目标，避免访问内网敏感服务 |
 | 流量统计 | 显示上传、下载、累计使用量、配额占比和到期状态，可接入节点侧采集脚本 |
@@ -41,7 +43,7 @@
 
 ```bash
 curl -fL \
-  https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.3.1/deploy.sh \
+  https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.0/deploy.sh \
   -o /tmp/anytls-panel-deploy.sh
 less /tmp/anytls-panel-deploy.sh
 ```
@@ -57,7 +59,7 @@ bash /tmp/anytls-panel-deploy.sh
 如果你已经审查过脚本，也可以使用一行命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.3.1/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.0/deploy.sh)
 ```
 
 ### 2. 打开面板
@@ -76,7 +78,9 @@ Caddy 会自动申请受信任的 HTTPS 证书、将 HTTP 跳转到 HTTPS，并�
 2. 进入「账号」，点击「导入订阅」；
 3. 填写订阅内容、流量上限和备注；
 4. 在「监控」中检测节点，在「重命名规则」中统一整理节点名称；
-5. 如果需要分发订阅，在账号详情页生成独立分享链接。
+5. 在「用户服务」里登记每位用户的开始日、到期日和所用专线账号，再把该用户的独立订阅链接发给对方。
+
+用户服务即使迁移到另一条专线，订阅链接也不会改变；暂停、到期或重新生成链接后，旧访问会立即失效。仪表盘会集中显示未来 30 天需要续费提醒的用户。
 
 更细的图文式步骤见[快速开始](docs/QUICKSTART.md)。
 

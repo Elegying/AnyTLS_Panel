@@ -18,8 +18,9 @@ import ssl
 import http.client
 import subprocess
 import threading
+import calendar
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime
 from functools import wraps
 from urllib.parse import urljoin, urlparse
 from pathlib import Path
@@ -106,7 +107,8 @@ csrf = CSRFProtect(app)
 audit_logger = logging.getLogger('anytls.audit')
 _REQUEST_ID_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,64}$')
 _AUDIT_DETAIL_FIELDS = {
-    'account_id', 'node_count', 'node_id', 'rule_id', 'status', 'username', 'reason'
+    'account_id', 'service_id', 'node_count', 'node_id', 'rule_id', 'status',
+    'username', 'reason'
 }
 _READINESS_MIN_FREE_BYTES = 64 * 1024 * 1024
 
@@ -946,6 +948,93 @@ def days_until(expire_date):
     return (target_date - datetime.now().date()).days
 
 
+def parse_iso_date(value, field_name):
+    try:
+        return datetime.strptime(str(value or ''), '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        raise ValueError(f'{field_name}必须是有效日期')
+
+
+def _date_with_day(year, month, day):
+    return date(year, month, min(day, calendar.monthrange(year, month)[1]))
+
+
+def traffic_reset_info(expire_date, today=None):
+    """Derive the current and next monthly traffic reset from the account expiry day."""
+    if not expire_date:
+        return None
+    try:
+        reset_day = parse_iso_date(expire_date, '账号到期日').day
+    except ValueError:
+        return None
+    today = today or date.today()
+    this_month = _date_with_day(today.year, today.month, reset_day)
+    if today < this_month:
+        next_reset = this_month
+        previous_month = today.month - 1 or 12
+        previous_year = today.year - 1 if today.month == 1 else today.year
+        previous_reset = _date_with_day(previous_year, previous_month, reset_day)
+    elif today == this_month:
+        previous_reset = next_reset = this_month
+    else:
+        previous_reset = this_month
+        next_month = today.month + 1 if today.month < 12 else 1
+        next_year = today.year + 1 if today.month == 12 else today.year
+        next_reset = _date_with_day(next_year, next_month, reset_day)
+    return {
+        'day': reset_day,
+        'previous': previous_reset.isoformat(),
+        'next': next_reset.isoformat(),
+        'days': (next_reset - today).days,
+    }
+
+
+def apply_due_traffic_resets(db, today=None):
+    """Reset counters once per derived monthly cycle without changing account expiry."""
+    today = today or date.today()
+    reset_ids = []
+    rows = db.execute(
+        'SELECT id, expire_date, last_traffic_reset_on FROM accounts'
+    ).fetchall()
+    for account in rows:
+        reset = traffic_reset_info(account['expire_date'], today)
+        if not reset:
+            continue
+        previous_reset = parse_iso_date(reset['previous'], '流量重置日')
+        last_reset_text = account['last_traffic_reset_on'] or ''
+        try:
+            last_reset = parse_iso_date(last_reset_text, '上次流量重置日')
+        except ValueError:
+            last_reset = today
+        if last_reset >= previous_reset:
+            continue
+        cursor = db.execute(
+            '''UPDATE accounts SET traffic_used_bytes=0, traffic_upload_bytes=0,
+               traffic_download_bytes=0, last_traffic_reset_on=?,
+               updated_at=CURRENT_TIMESTAMP
+               WHERE id=? AND COALESCE(last_traffic_reset_on, '')<?''',
+            (previous_reset.isoformat(), account['id'], previous_reset.isoformat()),
+        )
+        if cursor.rowcount:
+            reset_ids.append(account['id'])
+    db.commit()
+    for account_id in reset_ids:
+        audit_event('account.traffic_cycle_reset', 'success', account_id=account_id)
+    return reset_ids
+
+
+def customer_service_state(service, today=None):
+    today = today or date.today()
+    if _row_get(service, 'status', 'active') != 'active':
+        return _row_get(service, 'status', 'disabled')
+    try:
+        if parse_iso_date(service['started_on'], '开始日') > today:
+            return 'pending'
+        return 'expired' if parse_iso_date(service['expires_on'], '到期日') < today else 'active'
+    except (ValueError, IndexError, KeyError, TypeError):
+        return 'invalid'
+
+
 def parse_nonnegative_float(value, field_name):
     try:
         parsed = float(value)
@@ -1026,6 +1115,8 @@ def inject_utils():
         'format_bytes': format_bytes,
         'calc_traffic_percent': calc_traffic_percent,
         'days_until': days_until,
+        'traffic_reset_info': traffic_reset_info,
+        'customer_service_state': customer_service_state,
         'now': datetime.now(),
     }
 
@@ -1093,6 +1184,7 @@ def logout():
 @login_required
 def dashboard():
     db = get_db()
+    apply_due_traffic_resets(db)
     accounts = db.execute('SELECT * FROM accounts ORDER BY id').fetchall()
 
     total_accounts = len(accounts)
@@ -1114,6 +1206,30 @@ def dashboard():
         (a['last_synced_at'] for a in accounts if a['last_synced_at']),
         default=None,
     )
+    service_summary = db.execute(
+        '''SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN status='active' AND started_on<=date('now') AND expires_on>=date('now') THEN 1 ELSE 0 END) AS active,
+                  SUM(CASE WHEN status='active' AND expires_on<date('now') THEN 1 ELSE 0 END) AS expired,
+                  SUM(CASE WHEN status='active' AND started_on<=date('now') AND expires_on BETWEEN date('now') AND date('now', '+30 days') THEN 1 ELSE 0 END) AS due
+           FROM customer_services'''
+    ).fetchone()
+    renewal_services = db.execute(
+        '''SELECT cs.*, a.name AS account_name
+           FROM customer_services cs JOIN accounts a ON a.id=cs.account_id
+           WHERE cs.status='active' AND cs.started_on<=date('now')
+             AND cs.expires_on<=date('now', '+30 days')
+           ORDER BY cs.expires_on, cs.id LIMIT 6'''
+    ).fetchall()
+    service_counts = {
+        row['account_id']: row['service_count']
+        for row in db.execute(
+            '''SELECT account_id, COUNT(*) AS service_count
+               FROM customer_services
+               WHERE status='active' AND started_on<=date('now')
+                 AND expires_on>=date('now')
+               GROUP BY account_id'''
+        )
+    }
 
     warning_accounts = []
     for a in accounts:
@@ -1144,6 +1260,12 @@ def dashboard():
         offline_nodes=offline_nodes,
         unknown_nodes=unknown_nodes,
         last_synced_at=last_synced_at,
+        service_total=int(service_summary['total'] or 0),
+        active_services=int(service_summary['active'] or 0),
+        expired_services=int(service_summary['expired'] or 0),
+        due_services=int(service_summary['due'] or 0),
+        renewal_services=renewal_services,
+        service_counts=service_counts,
     )
 
 # ─── 账号管理 ──────────────────────────────────────────────
@@ -1152,7 +1274,15 @@ def dashboard():
 @login_required
 def accounts_list():
     db = get_db()
-    accounts = db.execute('SELECT * FROM accounts ORDER BY id').fetchall()
+    apply_due_traffic_resets(db)
+    accounts = db.execute(
+        '''SELECT a.*, COUNT(cs.id) AS service_count
+           FROM accounts a
+           LEFT JOIN customer_services cs
+             ON cs.account_id=a.id AND cs.status='active'
+                AND cs.started_on<=date('now') AND cs.expires_on>=date('now')
+           GROUP BY a.id ORDER BY a.id'''
+    ).fetchall()
     return render_template('accounts.html', accounts=accounts)
 
 @app.route('/accounts/add', methods=['POST'])
@@ -1203,8 +1333,9 @@ def account_add():
     cursor = db.execute(
         '''INSERT INTO accounts (
                name, subscribe_url, traffic_limit_gb, notes, node_count, last_synced_at,
-               traffic_used_bytes, traffic_upload_bytes, traffic_download_bytes, expire_date
-           ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)''',
+               traffic_used_bytes, traffic_upload_bytes, traffic_download_bytes, expire_date,
+               last_traffic_reset_on
+           ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)''',
         (
             name,
             subscribe_url,
@@ -1215,6 +1346,7 @@ def account_add():
             traffic_info.get('upload_bytes', 0),
             traffic_info.get('download_bytes', 0),
             traffic_info.get('expire_date', ''),
+            date.today().isoformat(),
         )
     )
     account_id = cursor.lastrowid
@@ -1248,6 +1380,7 @@ def account_add():
 @login_required
 def account_detail(account_id):
     db = get_db()
+    apply_due_traffic_resets(db)
     account = db.execute('SELECT * FROM accounts WHERE id=?', (account_id,)).fetchone()
     if not account:
         flash('账号不存在', 'error')
@@ -1257,7 +1390,15 @@ def account_detail(account_id):
         'SELECT * FROM nodes WHERE account_id=? ORDER BY id', (account_id,)
     ).fetchall()
 
-    return render_template('account_detail.html', account=account, nodes=nodes)
+    services = db.execute(
+        '''SELECT * FROM customer_services WHERE account_id=?
+           ORDER BY expires_on, id''',
+        (account_id,),
+    ).fetchall()
+
+    return render_template(
+        'account_detail.html', account=account, nodes=nodes, services=services
+    )
 
 @app.route('/accounts/<int:account_id>/rename', methods=['POST'])
 @login_required
@@ -1337,6 +1478,7 @@ def account_delete(account_id):
 def account_sync(account_id):
     """重新拉取订阅，同步节点"""
     db = get_db()
+    apply_due_traffic_resets(db)
     account = db.execute('SELECT * FROM accounts WHERE id=?', (account_id,)).fetchone()
     if not account:
         flash('账号不存在', 'error')
@@ -1398,6 +1540,312 @@ def account_sync(account_id):
     audit_event('account.sync', 'success', account_id=account_id, node_count=len(nodes))
     flash(f'同步完成，更新了 {len(nodes)} 个节点', 'success')
     return redirect(url_for('account_detail', account_id=account_id))
+
+
+# ─── 用户服务 ──────────────────────────────────────────────
+
+def _service_form_values():
+    account_id = parse_nonnegative_int(request.form.get('account_id'), '专线账号')
+    wechat_id = validate_text(
+        request.form.get('wechat_id', ''), '微信号', MAX_NAME_CHARS, required=True
+    )
+    relationship = validate_text(
+        request.form.get('relationship', '自用'), '账号关系', 20, required=True
+    )
+    notes = validate_text(request.form.get('notes', ''), '备注', MAX_NOTES_CHARS)
+    started_on = parse_iso_date(request.form.get('started_on'), '开始日期')
+    expires_on = parse_iso_date(request.form.get('expires_on'), '到期日期')
+    if account_id < 1:
+        raise ValueError('专线账号无效')
+    if started_on > expires_on:
+        raise ValueError('到期日期不能早于开始日期')
+    return account_id, wechat_id, relationship, started_on, expires_on, notes
+
+
+@app.route('/services')
+@login_required
+def services_list():
+    db = get_db()
+    apply_due_traffic_resets(db)
+    services = db.execute(
+        '''SELECT cs.*, a.name AS account_name, a.expire_date AS account_expires_on,
+                  a.traffic_limit_gb, a.traffic_used_bytes, a.status AS account_status
+           FROM customer_services cs JOIN accounts a ON a.id=cs.account_id
+           ORDER BY CASE WHEN cs.status='active' THEN 0 ELSE 1 END,
+                    cs.expires_on, cs.id'''
+    ).fetchall()
+    accounts = db.execute(
+        '''SELECT a.*, COUNT(cs.id) AS service_count
+           FROM accounts a
+           LEFT JOIN customer_services cs
+             ON cs.account_id=a.id AND cs.status='active'
+                AND cs.started_on<=date('now') AND cs.expires_on>=date('now')
+           WHERE a.status='active'
+           GROUP BY a.id'''
+    ).fetchall()
+    accounts = sorted(
+        accounts,
+        key=lambda account: (
+            calc_traffic_percent(
+                account['traffic_used_bytes'] or 0,
+                account['traffic_limit_gb'] or 0,
+            ) >= 80,
+            calc_traffic_percent(
+                account['traffic_used_bytes'] or 0,
+                account['traffic_limit_gb'] or 0,
+            ),
+            account['service_count'],
+            account['id'],
+        ),
+    )
+    active_count = sum(
+        customer_service_state(service) == 'active' for service in services
+    )
+    expired_count = sum(
+        customer_service_state(service) == 'expired' for service in services
+    )
+    due_count = sum(
+        customer_service_state(service) == 'active'
+        and 0 <= days_until(service['expires_on']) <= 30
+        for service in services
+    )
+    return render_template(
+        'services.html',
+        services=services,
+        accounts=accounts,
+        active_count=active_count,
+        expired_count=expired_count,
+        due_count=due_count,
+    )
+
+
+@app.route('/services/add', methods=['POST'])
+@login_required
+def service_add():
+    try:
+        account_id, wechat_id, relationship, started_on, expires_on, notes = (
+            _service_form_values()
+        )
+    except ValueError as error:
+        flash(str(error), 'error')
+        return redirect(url_for('services_list'))
+    db = get_db()
+    account = db.execute(
+        'SELECT status FROM accounts WHERE id=?', (account_id,)
+    ).fetchone()
+    if not account or account['status'] != 'active':
+        flash('专线账号不存在或未启用', 'error')
+        return redirect(url_for('services_list'))
+    try:
+        service_id = db.execute(
+            '''INSERT INTO customer_services (
+                   account_id, wechat_id, relationship, started_on, expires_on,
+                   status, sub_token, notes
+               ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)''',
+            (
+                account_id,
+                wechat_id,
+                relationship,
+                started_on.isoformat(),
+                expires_on.isoformat(),
+                secrets.token_hex(16),
+                notes,
+            ),
+        ).lastrowid
+        db.commit()
+    except sqlite3.IntegrityError:
+        flash('相同用户、专线账号和开始日期的服务记录已存在', 'error')
+        return redirect(url_for('services_list'))
+    audit_event(
+        'customer_service.create', 'success', service_id=service_id,
+        account_id=account_id
+    )
+    flash(f'已为 {wechat_id} 创建用户服务', 'success')
+    return redirect(url_for('service_detail', service_id=service_id))
+
+
+@app.route('/services/<int:service_id>')
+@login_required
+def service_detail(service_id):
+    db = get_db()
+    service = db.execute(
+        '''SELECT cs.*, a.name AS account_name, a.expire_date AS account_expires_on,
+                  a.traffic_limit_gb, a.traffic_used_bytes, a.status AS account_status
+           FROM customer_services cs JOIN accounts a ON a.id=cs.account_id
+           WHERE cs.id=?''',
+        (service_id,),
+    ).fetchone()
+    if not service:
+        flash('用户服务不存在', 'error')
+        return redirect(url_for('services_list'))
+    accounts = db.execute(
+        '''SELECT * FROM accounts WHERE status='active' OR id=?
+           ORDER BY name''',
+        (service['account_id'],),
+    ).fetchall()
+    renewals = db.execute(
+        'SELECT * FROM service_renewals WHERE service_id=? ORDER BY id DESC',
+        (service_id,),
+    ).fetchall()
+    return render_template(
+        'service_detail.html', service=service, accounts=accounts, renewals=renewals
+    )
+
+
+@app.route('/services/<int:service_id>/edit', methods=['POST'])
+@login_required
+def service_edit(service_id):
+    try:
+        account_id, wechat_id, relationship, started_on, expires_on, notes = (
+            _service_form_values()
+        )
+    except ValueError as error:
+        flash(str(error), 'error')
+        return redirect(url_for('service_detail', service_id=service_id))
+    db = get_db()
+    account = db.execute(
+        'SELECT status FROM accounts WHERE id=?', (account_id,)
+    ).fetchone()
+    if not account or account['status'] != 'active':
+        flash('专线账号不存在或未启用', 'error')
+        return redirect(url_for('service_detail', service_id=service_id))
+    try:
+        cursor = db.execute(
+            '''UPDATE customer_services SET account_id=?, wechat_id=?, relationship=?,
+                      started_on=?, expires_on=?, notes=?, updated_at=CURRENT_TIMESTAMP
+               WHERE id=?''',
+            (
+                account_id, wechat_id, relationship, started_on.isoformat(),
+                expires_on.isoformat(), notes, service_id,
+            ),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        flash('修改后会与已有服务记录重复', 'error')
+        return redirect(url_for('service_detail', service_id=service_id))
+    if cursor.rowcount == 0:
+        flash('用户服务不存在', 'error')
+        return redirect(url_for('services_list'))
+    audit_event(
+        'customer_service.update', 'success', service_id=service_id,
+        account_id=account_id
+    )
+    flash('用户服务已更新', 'success')
+    return redirect(url_for('service_detail', service_id=service_id))
+
+
+@app.route('/services/<int:service_id>/renew', methods=['POST'])
+@login_required
+def service_renew(service_id):
+    try:
+        new_expires_on = parse_iso_date(
+            request.form.get('new_expires_on'), '新到期日期'
+        )
+        notes = validate_text(request.form.get('notes', ''), '续期备注', MAX_NOTES_CHARS)
+    except ValueError as error:
+        flash(str(error), 'error')
+        return redirect(url_for('service_detail', service_id=service_id))
+    db = get_db()
+    service = db.execute(
+        'SELECT started_on, expires_on FROM customer_services WHERE id=?',
+        (service_id,),
+    ).fetchone()
+    if not service:
+        flash('用户服务不存在', 'error')
+        return redirect(url_for('services_list'))
+    if new_expires_on < parse_iso_date(service['started_on'], '开始日期'):
+        flash('新到期日期不能早于开始日期', 'error')
+        return redirect(url_for('service_detail', service_id=service_id))
+    db.execute(
+        '''INSERT INTO service_renewals (
+               service_id, old_expires_on, new_expires_on, notes
+           ) VALUES (?, ?, ?, ?)''',
+        (service_id, service['expires_on'], new_expires_on.isoformat(), notes),
+    )
+    db.execute(
+        '''UPDATE customer_services SET expires_on=?, status='active',
+                  last_reminded_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?''',
+        (new_expires_on.isoformat(), service_id),
+    )
+    db.commit()
+    audit_event('customer_service.renew', 'success', service_id=service_id)
+    flash(f'续期成功，新到期日为 {new_expires_on.isoformat()}', 'success')
+    return redirect(url_for('service_detail', service_id=service_id))
+
+
+@app.route('/services/<int:service_id>/remind', methods=['POST'])
+@login_required
+def service_remind(service_id):
+    db = get_db()
+    cursor = db.execute(
+        '''UPDATE customer_services SET last_reminded_at=CURRENT_TIMESTAMP,
+                  updated_at=CURRENT_TIMESTAMP WHERE id=?''',
+        (service_id,),
+    )
+    db.commit()
+    if cursor.rowcount == 0:
+        flash('用户服务不存在', 'error')
+        return redirect(url_for('services_list'))
+    audit_event('customer_service.remind', 'success', service_id=service_id)
+    flash('已记录本次续费提醒', 'success')
+    return redirect(url_for('service_detail', service_id=service_id))
+
+
+@app.route('/services/<int:service_id>/status', methods=['POST'])
+@login_required
+def service_status(service_id):
+    status = request.form.get('status', '')
+    if status not in {'active', 'suspended', 'disabled'}:
+        flash('用户服务状态无效', 'error')
+        return redirect(url_for('service_detail', service_id=service_id))
+    db = get_db()
+    cursor = db.execute(
+        '''UPDATE customer_services SET status=?, updated_at=CURRENT_TIMESTAMP
+           WHERE id=?''',
+        (status, service_id),
+    )
+    db.commit()
+    if cursor.rowcount == 0:
+        flash('用户服务不存在', 'error')
+        return redirect(url_for('services_list'))
+    audit_event(
+        'customer_service.status', 'success', service_id=service_id, status=status
+    )
+    flash('用户服务状态已更新', 'success')
+    return redirect(url_for('service_detail', service_id=service_id))
+
+
+@app.route('/services/<int:service_id>/rotate-token', methods=['POST'])
+@login_required
+def service_rotate_token(service_id):
+    db = get_db()
+    cursor = db.execute(
+        '''UPDATE customer_services SET sub_token=?, updated_at=CURRENT_TIMESTAMP
+           WHERE id=?''',
+        (secrets.token_hex(16), service_id),
+    )
+    db.commit()
+    if cursor.rowcount == 0:
+        flash('用户服务不存在', 'error')
+        return redirect(url_for('services_list'))
+    audit_event('customer_service.token.rotate', 'success', service_id=service_id)
+    flash('该用户的订阅链接已重新生成', 'success')
+    return redirect(url_for('service_detail', service_id=service_id))
+
+
+@app.route('/services/<int:service_id>/delete', methods=['POST'])
+@login_required
+def service_delete(service_id):
+    db = get_db()
+    service = db.execute(
+        'SELECT wechat_id FROM customer_services WHERE id=?', (service_id,)
+    ).fetchone()
+    if service:
+        db.execute('DELETE FROM customer_services WHERE id=?', (service_id,))
+        db.commit()
+        audit_event('customer_service.delete', 'success', service_id=service_id)
+        flash(f'已删除 {service["wechat_id"]} 的用户服务', 'success')
+    return redirect(url_for('services_list'))
 
 
 
@@ -1511,6 +1959,7 @@ def api_report_traffic():
         }), 413
 
     db = get_db()
+    apply_due_traffic_resets(db)
     prune_traffic_logs(db)
     results = []
     for item in data:
@@ -1569,6 +2018,7 @@ def api_report_traffic_counter():
         return jsonify({"error": "counter_bytes must be a nonnegative integer"}), 400
 
     db = get_db()
+    apply_due_traffic_resets(db)
     db.execute('BEGIN IMMEDIATE')
     account_id, identity_error, identity_status = _resolve_traffic_account_id(db, data)
     if identity_error:
@@ -1640,6 +2090,7 @@ def api_set_traffic():
         return jsonify({"error": "total_bytes must be a nonnegative integer"}), 400
 
     db = get_db()
+    apply_due_traffic_resets(db)
     account_id, identity_error, identity_status = _resolve_traffic_account_id(db, data)
     if identity_error:
         return jsonify({"error": identity_error}), identity_status
@@ -1802,6 +2253,7 @@ def _check_node_connect(host, port, timeout=8):
 def api_sync_all():
     """一键同步所有账号的订阅"""
     db = get_db()
+    apply_due_traffic_resets(db)
     accounts = [dict(account) for account in db.execute(
         "SELECT * FROM accounts WHERE status='active' ORDER BY id LIMIT ?",
         (MAX_SYNC_ACCOUNTS + 1,),
@@ -2011,9 +2463,16 @@ def public_subscribe(token):
         return 'Invalid token', 404
 
     db = get_db()
-    account = db.execute(
-        "SELECT * FROM accounts WHERE sub_token=? AND status='active'",
+    apply_due_traffic_resets(db)
+    service = db.execute(
+        '''SELECT a.*, cs.id AS service_id, cs.expires_on AS service_expires_on
+           FROM customer_services cs JOIN accounts a ON a.id=cs.account_id
+           WHERE cs.sub_token=? AND cs.status='active' AND a.status='active'
+             AND cs.started_on<=date('now') AND cs.expires_on>=date('now')''',
         (token,),
+    ).fetchone()
+    account = service or db.execute(
+        "SELECT * FROM accounts WHERE sub_token=? AND status='active'", (token,)
     ).fetchone()
     if not account:
         return 'Not found', 404
@@ -2021,6 +2480,8 @@ def public_subscribe(token):
     db_nodes = db.execute('SELECT * FROM nodes WHERE account_id=? ORDER BY id', (account['id'],)).fetchall()
     nodes = _nodes_from_db_rows(db_nodes)
     traffic_info = _account_traffic_info(account)
+    if service:
+        traffic_info['expire_date'] = service['service_expires_on']
     if not nodes:
         return 'Subscription data is not ready', 503, {
             'Retry-After': '60',
@@ -2041,7 +2502,6 @@ def public_subscribe(token):
         if traffic_info.get('total_gb'):
             parts.append(f"total={int(traffic_info['total_gb'] * 1024**3)}")
         if traffic_info.get('expire_date'):
-            from datetime import datetime
             try:
                 ts = int(datetime.strptime(traffic_info['expire_date'], '%Y-%m-%d').timestamp())
                 parts.append(f"expire={ts}")

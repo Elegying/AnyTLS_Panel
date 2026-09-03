@@ -8,7 +8,7 @@ AnyTLS Panel 提供三类接口，鉴权方式不同。接入前先确认使用�
 | --- | --- | --- | --- |
 | 流量写入 API | `/api/traffic/*` | Bearer Token | 面向外部采集器，保持向后兼容 |
 | 管理 JSON 接口 | 其他 `/api/*` | 管理员登录 Session；写操作还需要 CSRF | 主要供 Web 界面使用，可能随界面演进 |
-| 公开订阅 | `/sub/<token>` | URL 中的账号分享 Token | 面向订阅客户端 |
+| 公开订阅 | `/sub/<token>` | URL 中的用户服务 Token；旧账号 Token 继续兼容 | 面向订阅客户端 |
 
 本文中的面板地址统一写作 `https://panel.example.com`，请替换为真实域名。
 
