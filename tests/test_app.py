@@ -2546,8 +2546,9 @@ proxies:
             with app.app.app_context():
                 db = app.get_db()
                 account_id = db.execute(
-                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
-                    ("demo", "trojan://pw@example.com:443?sni=example.com#demo"),
+                    "INSERT INTO accounts (name, subscribe_url, traffic_used_bytes) "
+                    "VALUES (?, ?, ?)",
+                    ("demo", "trojan://pw@example.com:443?sni=example.com#demo", 500),
                 ).lastrowid
                 db.commit()
 
@@ -2559,8 +2560,12 @@ proxies:
             self.assertEqual(response.status_code, 302)
             with closing(sqlite3.connect(database)) as db, db:
                 protocol, raw_uri = db.execute("SELECT protocol, raw_uri FROM nodes").fetchone()
+                used = db.execute(
+                    "SELECT traffic_used_bytes FROM accounts WHERE id=?", (account_id,)
+                ).fetchone()[0]
             self.assertEqual(protocol, "trojan")
             self.assertTrue(raw_uri.startswith("trojan://"))
+            self.assertEqual(used, 500)
 
     def test_public_subscribe_uses_branded_profile_title(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3264,7 +3269,7 @@ proxies:
         self.assertIn("total=10737418240", userinfo)
         self.assertIn("expire=", userinfo)
 
-    def test_account_sync_persists_traffic_metadata(self):
+    def test_account_sync_replaces_stale_total_with_upstream_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
             app = load_app(database)
@@ -3307,7 +3312,7 @@ proxies:
                 ).fetchone()
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(metadata, (500, 100, 200, 10, "2030-01-02"))
+        self.assertEqual(metadata, (300, 100, 200, 10, "2030-01-02"))
 
     def test_public_subscribe_does_not_convert_anytls_for_shadowrocket_clients(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3544,7 +3549,7 @@ proxies:
         self.assertEqual(response.status_code, 200)
         self.assertGreater(max_active, 1)
         self.assertTrue(all(item["status"] == "ok" for item in response.get_json()["results"]))
-        self.assertEqual(used_values, [500, 500, 500, 500])
+        self.assertEqual(used_values, [20, 20, 20, 20])
 
     def test_sync_all_rejects_oversized_batch_before_network_work(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4961,7 +4966,7 @@ proxies:
         self.assertIn("python3.12 -m venv .venv", operations)
         self.assertIn("brew install python@3.12 shellcheck actionlint", operations)
         self.assertIn("--require-hashes -r requirements-dev.txt", operations)
-        self.assertIn("git clone --depth 1 --branch v1.4.0", operations)
+        self.assertIn("git clone --depth 1 --branch v1.4.1", operations)
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
@@ -5061,8 +5066,8 @@ proxies:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.4.0}"', deploy)
-        self.assertIn("AnyTLS_Panel/v1.4.0/deploy.sh", readme)
+        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.4.1}"', deploy)
+        self.assertIn("AnyTLS_Panel/v1.4.1/deploy.sh", readme)
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)
