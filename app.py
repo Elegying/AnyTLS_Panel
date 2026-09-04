@@ -1523,10 +1523,7 @@ def account_sync(account_id):
     db.execute(
         '''UPDATE accounts SET
                node_count=?,
-               traffic_used_bytes=MAX(
-                   COALESCE(traffic_used_bytes, 0),
-                   COALESCE(?, traffic_used_bytes, 0)
-               ),
+               traffic_used_bytes=COALESCE(?, traffic_used_bytes, 0),
                traffic_upload_bytes=COALESCE(?, traffic_upload_bytes),
                traffic_download_bytes=COALESCE(?, traffic_download_bytes),
                traffic_limit_gb=COALESCE(?, traffic_limit_gb),
@@ -2315,10 +2312,7 @@ def api_sync_all():
             db.execute(
                 '''UPDATE accounts SET
                        node_count=?,
-                       traffic_used_bytes=MAX(
-                           COALESCE(traffic_used_bytes, 0),
-                           COALESCE(?, traffic_used_bytes, 0)
-                       ),
+                       traffic_used_bytes=COALESCE(?, traffic_used_bytes, 0),
                        traffic_upload_bytes=COALESCE(?, traffic_upload_bytes),
                        traffic_download_bytes=COALESCE(?, traffic_download_bytes),
                        traffic_limit_gb=COALESCE(?, traffic_limit_gb),
