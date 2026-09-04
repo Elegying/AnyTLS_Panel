@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-09-04
+
+### Fixed
+
+- 审计 logger 直接写入进程标准错误流，确保 Gunicorn/systemd 部署中的登录、同步、删除和安全拒绝事件进入 journald。
+
 ## [1.4.2] - 2026-09-04
 
 ### Fixed

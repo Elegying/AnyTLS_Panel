@@ -108,6 +108,8 @@ csrf = CSRFProtect(app)
 audit_logger = logging.getLogger('anytls.audit')
 audit_logger.setLevel(logging.INFO)
 audit_logger.propagate = False
+if not audit_logger.handlers:
+    audit_logger.addHandler(logging.StreamHandler())
 _BUSINESS_TIMEZONE = ZoneInfo('Asia/Shanghai')
 _REQUEST_ID_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,64}$')
 _AUDIT_DETAIL_FIELDS = {
@@ -2790,15 +2792,10 @@ def _development_server_options():
 
 def create_app():
     """Initialize persistent state explicitly and return the Flask application."""
-    for handler in logging.getLogger('gunicorn.error').handlers:
-        if handler not in audit_logger.handlers:
-            audit_logger.addHandler(handler)
     init_db()
     return app
 
 if __name__ == '__main__':
-    if not audit_logger.handlers:
-        audit_logger.addHandler(logging.StreamHandler())
     create_app()
     host, port, debug = _development_server_options()
     print(f"\n  AnyTLS Panel running at http://{host}:{port}")
