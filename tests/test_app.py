@@ -7,6 +7,7 @@ import importlib.util
 import inspect
 import io
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -875,9 +876,10 @@ proxies:
             app = load_app(Path(tmp) / "anytls.db")
             seen_user_agents = []
 
-            def fake_read(_url, user_agent, _deadline=None):
+            def fake_read(_url, user_agent, _deadline=None, include_headers=False):
                 seen_user_agents.append(user_agent)
-                return b"anytls://pw@example.com:443#demo"
+                raw = b"anytls://pw@example.com:443#demo"
+                return (raw, '') if include_headers else raw
 
             with mock.patch.object(app, "_assert_public_subscription_url"):
                 with mock.patch.object(app, "_read_subscription_url", side_effect=fake_read):
@@ -906,13 +908,15 @@ proxies:
             app = load_app(Path(tmp) / "anytls.db")
             seen_user_agents = []
 
-            def fake_read(_url, user_agent, _deadline=None):
+            def fake_read(_url, user_agent, _deadline=None, include_headers=False):
                 seen_user_agents.append(user_agent)
                 if "SSRVPN" in user_agent or "Clash.Meta" in user_agent:
                     raise OSError("blocked")
                 if "ClashForAndroid" in user_agent:
-                    return clash_trojan_only
-                return shadowrocket_native
+                    raw = clash_trojan_only
+                else:
+                    raw = shadowrocket_native
+                return (raw, '') if include_headers else raw
 
             with mock.patch.object(app, "_assert_public_subscription_url"):
                 with mock.patch.object(app, "_read_subscription_url", side_effect=fake_read):
@@ -925,6 +929,23 @@ proxies:
         self.assertEqual([node["protocol"] for node in nodes], ["anytls", "trojan"])
         self.assertTrue(nodes[0]["raw_uri"].startswith("anytls://"))
         self.assertTrue(nodes[1]["raw_uri"].startswith("trojan://"))
+
+    def test_http_subscription_reads_standard_traffic_response_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            response = (
+                b"anytls://pw@example.com:443#demo",
+                "upload=100; download=200; total=1073741824; expire=1893456000",
+            )
+            with mock.patch.object(app, "_read_subscription_url", return_value=response):
+                nodes, traffic_info = app.parse_subscribe_url(
+                    "https://sub.example/list"
+                )
+
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(traffic_info["used_bytes"], 300)
+        self.assertEqual(traffic_info["total_gb"], 1)
+        self.assertEqual(traffic_info["expire_date"], "2030-01-01")
 
     def test_http_subscription_reports_sanitized_user_agent_failures(self):
         subscription_url = "https://sub.example/private-token"
@@ -1155,6 +1176,7 @@ proxies:
 
     def test_http_subscription_connects_to_the_validated_ip(self):
         response = mock.Mock(status=200)
+        response.getheader.return_value = "upload=1; download=2; total=3"
         response.read1.side_effect = [
             b"anytls://pw@example.com:443#demo",
             b"",
@@ -1182,11 +1204,14 @@ proxies:
                             "HTTPConnection",
                             return_value=connection,
                         ):
-                            raw = app._read_subscription_url(
-                                "https://sub.example/list", "SSRVPN/2.4.0"
+                            raw, userinfo = app._read_subscription_url(
+                                "https://sub.example/list",
+                                "SSRVPN/2.4.0",
+                                include_headers=True,
                             )
 
         self.assertEqual(raw, b"anytls://pw@example.com:443#demo")
+        self.assertEqual(userinfo, "upload=1; download=2; total=3")
         self.assertEqual(connect.call_args.args[0], ("93.184.216.34", 443))
         self.assertEqual(
             tls_context.return_value.minimum_version,
@@ -1466,21 +1491,22 @@ proxies:
             database = Path(tmp) / "anytls.db"
             app = load_app(database)
             app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
-            with app.app.test_client() as client:
-                for _index in range(5):
+            with mock.patch("sqlite_rate_limit.time.time", return_value=1_700_000_001):
+                with app.app.test_client() as client:
+                    for _index in range(5):
+                        response = client.post(
+                            "/login",
+                            data={"username": "admin", "password": "wrong"},
+                        )
+                        self.assertEqual(response.status_code, 200)
+
+                reloaded = load_app(database)
+                reloaded.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+                with reloaded.app.test_client() as client:
                     response = client.post(
                         "/login",
                         data={"username": "admin", "password": "wrong"},
                     )
-                    self.assertEqual(response.status_code, 200)
-
-            reloaded = load_app(database)
-            reloaded.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
-            with reloaded.app.test_client() as client:
-                response = client.post(
-                    "/login",
-                    data={"username": "admin", "password": "wrong"},
-                )
 
         self.assertEqual(response.status_code, 429)
         self.assertIn("登录尝试过于频繁", response.get_data(as_text=True))
@@ -1629,6 +1655,23 @@ proxies:
                 )
         payload = json.loads(sanitized.records[0].getMessage())
         self.assertEqual(payload["username"], "adminforged-entry")
+
+    def test_audit_logger_accepts_info_events_without_test_reconfiguration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            stream = io.StringIO()
+            handler = logging.StreamHandler(stream)
+            gunicorn_logger = logging.getLogger("gunicorn.error")
+            gunicorn_logger.addHandler(handler)
+            try:
+                app.create_app()
+                app.audit_event("audit.delivery_check", "success")
+            finally:
+                gunicorn_logger.removeHandler(handler)
+                app.audit_logger.removeHandler(handler)
+
+        self.assertTrue(app.audit_logger.isEnabledFor(20))
+        self.assertIn('"action":"audit.delivery_check"', stream.getvalue())
 
     def test_debug_server_is_limited_to_loopback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1936,6 +1979,68 @@ proxies:
         self.assertEqual(lower.get_json()["total_bytes"], 1000)
         self.assertEqual(total, 1000)
         self.assertEqual(missing.status_code, 404)
+
+    def test_traffic_set_rejects_stale_monthly_cycle_samples(self):
+        from datetime import date
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            token_file = Path(tmp) / ".traffic_api_token"
+            token_file.write_text("traffic-token\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "ANYTLS_DATABASE": str(database),
+                "ANYTLS_TRAFFIC_API_TOKEN_FILE": str(token_file),
+            }, clear=False):
+                app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url, traffic_used_bytes, "
+                    "expire_date, last_traffic_reset_on) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "demo",
+                        "anytls://pw@example.com:443",
+                        119 * 1024**3,
+                        "2027-04-24",
+                        "2026-08-24",
+                    ),
+                ).lastrowid
+                db.commit()
+
+            headers = {"Authorization": "Bearer traffic-token"}
+            with mock.patch.object(
+                app, "_business_today", return_value=date(2026, 9, 25)
+            ):
+                with app.app.test_client() as client:
+                    missing_cycle = client.post(
+                        "/api/traffic/set",
+                        headers=headers,
+                        json={"account_id": account_id, "total_bytes": 22 * 1024**3},
+                    )
+                    stale_cycle = client.post(
+                        "/api/traffic/set",
+                        headers=headers,
+                        json={
+                            "account_id": account_id,
+                            "total_bytes": 119 * 1024**3,
+                            "cycle_started_on": "2026-08-24",
+                        },
+                    )
+                    current_cycle = client.post(
+                        "/api/traffic/set",
+                        headers=headers,
+                        json={
+                            "account_id": account_id,
+                            "total_bytes": 22 * 1024**3,
+                            "cycle_started_on": "2026-09-24",
+                        },
+                    )
+
+            self.assertEqual(missing_cycle.status_code, 400)
+            self.assertEqual(stale_cycle.status_code, 409)
+            self.assertEqual(current_cycle.status_code, 200)
+            self.assertEqual(current_cycle.get_json()["total_bytes"], 22 * 1024**3)
 
     def test_traffic_password_must_identify_exactly_one_account(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2497,6 +2602,89 @@ proxies:
                     0,
                 )
 
+    def test_account_delete_is_blocked_while_customer_services_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("protected", "anytls://pw@example.com:443"),
+                ).lastrowid
+                service_id = db.execute(
+                    "INSERT INTO customer_services ("
+                    "account_id, wechat_id, started_on, expires_on, sub_token"
+                    ") VALUES (?, ?, ?, ?, ?)",
+                    (account_id, "customer", "2026-01-01", "2027-01-01", "token"),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO service_renewals ("
+                    "service_id, old_expires_on, new_expires_on"
+                    ") VALUES (?, ?, ?)",
+                    (service_id, "2026-01-01", "2027-01-01"),
+                )
+                db.commit()
+
+            with app.app.test_client() as client:
+                authenticate_session(app, client)
+                response = client.post(f"/accounts/{account_id}/delete")
+
+            with closing(sqlite3.connect(database)) as db:
+                counts = tuple(db.execute(
+                    "SELECT (SELECT COUNT(*) FROM accounts), "
+                    "(SELECT COUNT(*) FROM customer_services), "
+                    "(SELECT COUNT(*) FROM service_renewals)"
+                ).fetchone())
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(f"/accounts/{account_id}", response.headers["Location"])
+        self.assertEqual(counts, (1, 1, 1))
+
+    def test_renewal_cannot_shorten_or_repeat_current_expiry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "anytls://pw@example.com:443"),
+                ).lastrowid
+                service_id = db.execute(
+                    "INSERT INTO customer_services ("
+                    "account_id, wechat_id, started_on, expires_on, sub_token"
+                    ") VALUES (?, ?, ?, ?, ?)",
+                    (account_id, "customer", "2026-01-01", "2027-01-01", "token"),
+                ).lastrowid
+                db.commit()
+
+            with app.app.test_client() as client:
+                authenticate_session(app, client)
+                shorter = client.post(
+                    f"/services/{service_id}/renew",
+                    data={"new_expires_on": "2026-12-31"},
+                )
+                same = client.post(
+                    f"/services/{service_id}/renew",
+                    data={"new_expires_on": "2027-01-01"},
+                )
+
+            with closing(sqlite3.connect(database)) as db:
+                expiry = db.execute(
+                    "SELECT expires_on FROM customer_services WHERE id=?", (service_id,)
+                ).fetchone()[0]
+                renewal_count = db.execute(
+                    "SELECT COUNT(*) FROM service_renewals"
+                ).fetchone()[0]
+
+        self.assertEqual(shorter.status_code, 302)
+        self.assertEqual(same.status_code, 302)
+        self.assertEqual(expiry, "2027-01-01")
+        self.assertEqual(renewal_count, 0)
+
     def test_customer_service_json_import_is_idempotent(self):
         import import_customer_services
 
@@ -2686,8 +2874,8 @@ proxies:
             self.assertEqual(response.headers["Cache-Control"], "no-store")
             decoded = base64.b64decode(response.get_data(as_text=True)).decode()
             self.assertIn("anytls://pw@example.com:443", decoded)
-            self.assertIn("#demo", decoded)
-            self.assertNotIn("#renamed", decoded)
+            self.assertIn("#renamed", decoded)
+            self.assertNotIn("#demo", decoded)
             self.assertNotIn("trojan://", decoded)
 
     def test_public_subscribe_prefers_synced_db_nodes_over_live_upstream(self):
@@ -2753,9 +2941,8 @@ proxies:
             decoded = base64.b64decode(response.get_data(as_text=True)).decode()
             self.assertIn("anytls://dbpw@db.example.com:443", decoded)
             self.assertIn("trojan://trojanpw@trojan.example.com:443", decoded)
-            self.assertIn("#demo", decoded)
+            self.assertIn("#renamed-node", decoded)
             self.assertIn("#demo-trojan", decoded)
-            self.assertNotIn("#renamed", decoded)
             parse.assert_not_called()
 
     def test_public_subscribe_never_fetches_upstream_when_local_nodes_are_empty(self):
@@ -2830,6 +3017,7 @@ proxies:
             self.assertIn("udp: true", content)
             self.assertIn("client-fingerprint: chrome", content)
             self.assertIn("skip-cert-verify: true", content)
+            self.assertIn("name: renamed", content)
 
     def test_public_clash_subscription_preserves_protocol_parameters(self):
         vmess_payload = base64.b64encode(json.dumps({
@@ -3157,6 +3345,62 @@ proxies:
         self.assertEqual(response.status_code, 302)
         self.assertEqual(rows, [("existing",)])
 
+    def test_account_sync_preserves_health_for_unchanged_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            node = {
+                "name": "renamed",
+                "host": "same.example.com",
+                "port": 443,
+                "password": "new-password",
+                "raw_uri": "anytls://new-password@same.example.com:443#renamed",
+                "protocol": "anytls",
+            }
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "https://sub.example/list"),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes ("
+                    "account_id, name, host, port, password, raw_uri, protocol, "
+                    "is_online, latency_ms, last_checked_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "old-name",
+                        "same.example.com",
+                        443,
+                        "old-password",
+                        "anytls://old-password@same.example.com:443#old-name",
+                        "anytls",
+                        1,
+                        42,
+                        "2026-09-04 01:02:03",
+                    ),
+                )
+                db.commit()
+
+            with mock.patch.object(app, "parse_subscribe_url", return_value=([node], {})):
+                with app.app.test_client() as client:
+                    authenticate_session(app, client)
+                    response = client.post(f"/accounts/{account_id}/sync")
+
+            with closing(sqlite3.connect(database)) as db:
+                saved = db.execute(
+                    "SELECT name, password, is_online, latency_ms, last_checked_at "
+                    "FROM nodes WHERE account_id=?",
+                    (account_id,),
+                ).fetchone()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            saved, ("renamed", "new-password", 1, 42, "2026-09-04 01:02:03")
+        )
+
     def test_sync_all_skips_account_deleted_during_fetch(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
@@ -3269,6 +3513,78 @@ proxies:
         self.assertIn("total=10737418240", userinfo)
         self.assertIn("expire=", userinfo)
 
+    def test_public_service_dates_use_shanghai_business_day(self):
+        from datetime import date, datetime
+        from zoneinfo import ZoneInfo
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "anytls.db"
+            app = load_app(database)
+            app.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+            with app.app.app_context():
+                db = app.get_db()
+                account_id = db.execute(
+                    "INSERT INTO accounts (name, subscribe_url) VALUES (?, ?)",
+                    ("demo", "anytls://pw@example.com:443#demo"),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO nodes (account_id, name, host, port, password, raw_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id,
+                        "demo",
+                        "example.com",
+                        443,
+                        "pw",
+                        "anytls://pw@example.com:443#demo",
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO customer_services ("
+                    "account_id, wechat_id, started_on, expires_on, sub_token"
+                    ") VALUES (?, ?, ?, ?, ?)",
+                    (account_id, "customer", "2040-01-02", "2040-01-02", "service-token"),
+                )
+                db.commit()
+
+            with mock.patch.object(
+                app, "_business_today", return_value=date(2040, 1, 2)
+            ):
+                with app.app.test_client() as client:
+                    response = client.get("/sub/service-token")
+
+        self.assertEqual(response.status_code, 200)
+        expected_expiry = int(
+            datetime(2040, 1, 3, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+        )
+        self.assertIn(
+            f"expire={expected_expiry}", response.headers["Subscription-Userinfo"]
+        )
+
+    def test_rename_rule_changes_vmess_display_name_only(self):
+        vmess = {
+            "v": "2",
+            "ps": "香港入口",
+            "add": "vmess.example.com",
+            "port": "443",
+            "id": "11111111-1111-1111-1111-111111111111",
+        }
+        raw = base64.urlsafe_b64encode(json.dumps(vmess).encode()).decode().rstrip("=")
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            renamed = app._rename_node_uri(
+                {"name": "香港入口", "raw_uri": f"vmess://{raw}"},
+                [{"old_text": "香港", "new_text": "HK"}],
+            )
+
+        payload = renamed.split("://", 1)[1]
+        decoded = json.loads(base64.urlsafe_b64decode(
+            payload + "=" * (-len(payload) % 4)
+        ))
+        self.assertEqual(decoded["ps"], "HK入口")
+        self.assertEqual(decoded["add"], "vmess.example.com")
+        self.assertEqual(decoded["id"], vmess["id"])
+
     def test_account_sync_replaces_stale_total_with_upstream_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
@@ -3352,9 +3668,8 @@ proxies:
             self.assertEqual(response.status_code, 200)
             decoded = base64.b64decode(response.get_data(as_text=True)).decode()
             self.assertIn("anytls://pw@example.com:443", decoded)
-            self.assertIn("#demo", decoded)
+            self.assertIn("#renamed", decoded)
             self.assertNotIn("trojan://", decoded)
-            self.assertNotIn("#renamed", decoded)
 
     def test_api_subscribe_preserves_synced_raw_uris(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4966,7 +5281,7 @@ proxies:
         self.assertIn("python3.12 -m venv .venv", operations)
         self.assertIn("brew install python@3.12 shellcheck actionlint", operations)
         self.assertIn("--require-hashes -r requirements-dev.txt", operations)
-        self.assertIn("git clone --depth 1 --branch v1.4.1", operations)
+        self.assertIn("git clone --depth 1 --branch v1.4.2", operations)
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
@@ -5066,8 +5381,8 @@ proxies:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.4.1}"', deploy)
-        self.assertIn("AnyTLS_Panel/v1.4.1/deploy.sh", readme)
+        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.4.2}"', deploy)
+        self.assertIn("AnyTLS_Panel/v1.4.2/deploy.sh", readme)
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)
