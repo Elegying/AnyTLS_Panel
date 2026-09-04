@@ -61,7 +61,7 @@ def _add_customer_services(db):
             "ALTER TABLE accounts ADD COLUMN last_traffic_reset_on TEXT DEFAULT ''"
         )
     db.execute(
-        "UPDATE accounts SET last_traffic_reset_on=date('now') "
+        "UPDATE accounts SET last_traffic_reset_on=date('now', '+8 hours') "
         "WHERE COALESCE(last_traffic_reset_on, '')=''"
     )
     db.execute(

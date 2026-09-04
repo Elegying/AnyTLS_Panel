@@ -99,18 +99,18 @@ curl --fail-with-body \
 
 `collector_id` 必须包含 8–128 个字母、数字、点、下划线、冒号或连字符，并且长期绑定同一个账号。首次上报只建立基线，`delta_bytes` 为 `0`。
 
-## 单调设置绝对值
+## 周期内单调设置绝对值
 
 `POST /api/traffic/set`
 
-把账号累计量提高到给定值，但永远不会降低已有总量，适合从可信外部指标系统同步绝对值。
+把账号在当前流量周期内的累计量提高到给定值，但不会降低同一周期已有总量。账号设置了到期日时，必须同时提交 `cycle_started_on`；它等于系统根据真实到期日日号推导出的本周期开始日。旧周期样本返回 HTTP `409`，不会覆盖新周期数据。
 
 ```bash
 curl --fail-with-body \
   -X POST https://panel.example.com/api/traffic/set \
   -H "Authorization: Bearer $ACCOUNT_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"account_id":1,"total_bytes":5368709120}'
+  -d '{"account_id":1,"total_bytes":5368709120,"cycle_started_on":"2026-08-24"}'
 ```
 
 成功响应：
@@ -118,6 +118,8 @@ curl --fail-with-body \
 ```json
 {"status":"ok","total_bytes":5368709120}
 ```
+
+没有设置账号到期日时无法推导月度周期，接口保持原有的单调绝对值行为。新采集器优先使用幂等累计计数接口 `/api/traffic/counter`。
 
 ## 兼容的密码定位
 
@@ -136,7 +138,7 @@ curl --fail-with-body \
 | `400` | JSON、字段、整数或采集器 ID 无效 | 修正请求，不要原样重试 |
 | `401` | Token 缺失或错误 | 检查 Token 来源和 Authorization 头 |
 | `404` | 账号不存在或分享 Token 已失效 | 刷新账号 ID或重新生成分享链接 |
-| `409` | 密码对应多个账号，或采集器 ID 已绑定其他账号 | 改用明确账号 ID或新的采集器 ID |
+| `409` | 密码对应多个账号、采集器 ID 已绑定其他账号，或绝对流量样本属于旧周期 | 改用明确账号 ID、新采集器 ID，或刷新当前流量周期 |
 | `413` | 请求体或批量项目超过上限 | 拆分请求 |
 | `429` | 请求过于频繁 | 按退避策略稍后重试 |
 

@@ -9,7 +9,7 @@
 
 ![AnyTLS Panel 仪表盘](docs/assets/dashboard.jpg)
 
-> 当前正式版本：`v1.4.1`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
+> 当前正式版本：`v1.4.2`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
 
 ## 你可以用它做什么
 
@@ -43,7 +43,7 @@
 
 ```bash
 curl -fL \
-  https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.1/deploy.sh \
+  https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.2/deploy.sh \
   -o /tmp/anytls-panel-deploy.sh
 less /tmp/anytls-panel-deploy.sh
 ```
@@ -59,7 +59,7 @@ bash /tmp/anytls-panel-deploy.sh
 如果你已经审查过脚本，也可以使用一行命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.1/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.2/deploy.sh)
 ```
 
 ### 2. 打开面板

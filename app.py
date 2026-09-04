@@ -20,10 +20,11 @@ import subprocess
 import threading
 import calendar
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import wraps
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -105,6 +106,9 @@ if _env_flag('ANYTLS_TRUST_PROXY'):
 csrf = CSRFProtect(app)
 
 audit_logger = logging.getLogger('anytls.audit')
+audit_logger.setLevel(logging.INFO)
+audit_logger.propagate = False
+_BUSINESS_TIMEZONE = ZoneInfo('Asia/Shanghai')
 _REQUEST_ID_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,64}$')
 _AUDIT_DETAIL_FIELDS = {
     'account_id', 'service_id', 'node_count', 'node_id', 'rule_id', 'status',
@@ -660,7 +664,9 @@ def _read_subscription_body(response, sock, deadline):
             raise ValueError("订阅响应过大（最大 2 MiB）")
 
 
-def _read_pinned_subscription_response(url, user_agent, deadline=None):
+def _read_pinned_subscription_response(
+    url, user_agent, deadline=None, include_headers=False
+):
     if deadline is None:
         deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_SECONDS
     parsed, addresses = _resolve_public_subscription_url(url, deadline)
@@ -711,14 +717,17 @@ def _read_pinned_subscription_response(url, user_agent, deadline=None):
                     raise _SubscriptionResponseError(
                         '订阅服务器返回了无 Location 的重定向'
                     )
-                return None, urljoin(url, location)
+                result = (None, urljoin(url, location), '')
+                return result if include_headers else result[:2]
             if not 200 <= response.status < 300:
                 raise _SubscriptionResponseError(
                     f'订阅服务器返回 HTTP {response.status}'
                 )
 
+            subscription_userinfo = response.getheader('Subscription-Userinfo') or ''
             raw = _read_subscription_body(response, sock, deadline)
-            return raw, None
+            result = (raw, None, subscription_userinfo)
+            return result if include_headers else result[:2]
         except (ValueError, _SubscriptionResponseError):
             raise
         except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
@@ -732,18 +741,19 @@ def _read_pinned_subscription_response(url, user_agent, deadline=None):
     raise OSError('订阅地址连接失败') from last_error
 
 
-def _read_subscription_url(url, user_agent, deadline=None):
+def _read_subscription_url(url, user_agent, deadline=None, include_headers=False):
     if deadline is None:
         deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_SECONDS
     current_url = url
     for _ in range(6):
-        raw, redirect_url = _read_pinned_subscription_response(
+        raw, redirect_url, subscription_userinfo = _read_pinned_subscription_response(
             current_url,
             user_agent,
             deadline,
+            include_headers=True,
         )
         if redirect_url is None:
-            return raw
+            return (raw, subscription_userinfo) if include_headers else raw
         current_url = redirect_url
     raise OSError('订阅重定向次数过多')
 
@@ -769,12 +779,22 @@ def parse_subscribe_url(url):
             'ClashForAndroid/2.5.12',
         ]:
             try:
-                raw = _read_subscription_url(content, ua, deadline)
+                response = _read_subscription_url(
+                    content, ua, deadline, include_headers=True
+                )
+                if isinstance(response, tuple):
+                    raw, subscription_userinfo = response
+                else:  # 兼容测试替身和第三方调用方。
+                    raw, subscription_userinfo = response, ''
                 text = _decode_subscription_response(raw)
                 parsed_nodes = _parse_subscription_content(text)
                 if parsed_nodes:
                     score = _subscription_candidate_score(parsed_nodes)
-                    candidates.append((score, text, _extract_subscription_traffic_info(text)))
+                    header_info = _parse_subscription_userinfo(
+                        subscription_userinfo
+                    )
+                    body_info = _extract_subscription_traffic_info(text)
+                    candidates.append((score, text, {**header_info, **body_info}))
                     if score[0] > 0:
                         break
                 else:
@@ -816,6 +836,46 @@ def _extract_subscription_traffic_info(content):
         if line.startswith('STATUS='):
             return _parse_status_line(line)
     return {}
+
+
+def _parse_subscription_userinfo(value):
+    """Parse standard Subscription-Userinfo response metadata."""
+    values = {}
+    for part in str(value or '').split(';'):
+        key, separator, raw_value = part.strip().partition('=')
+        if not separator:
+            continue
+        try:
+            parsed = int(raw_value.strip())
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if 0 <= parsed <= SQLITE_INTEGER_MAX:
+            values[key.strip().lower()] = parsed
+
+    info = {}
+    upload = values.get('upload')
+    download = values.get('download')
+    total = values.get('total')
+    if upload is not None:
+        info['upload_bytes'] = upload
+    if download is not None:
+        info['download_bytes'] = download
+    if (
+        upload is not None
+        and download is not None
+        and upload <= SQLITE_INTEGER_MAX - download
+    ):
+        info['used_bytes'] = upload + download
+    if total is not None:
+        info['total_gb'] = total / 1024**3
+    if values.get('expire'):
+        try:
+            info['expire_date'] = datetime.fromtimestamp(
+                values['expire'], _BUSINESS_TIMEZONE
+            ).date().isoformat()
+        except (OverflowError, OSError, ValueError):
+            pass
+    return info
 
 
 def _subscription_candidate_score(nodes):
@@ -931,6 +991,14 @@ def format_bytes(b):
         b /= 1024.0
     return f"{b:.2f} PB"
 
+
+def _business_now():
+    return datetime.now(_BUSINESS_TIMEZONE)
+
+
+def _business_today():
+    return _business_now().date()
+
 def calc_traffic_percent(used_bytes, limit_gb):
     if not limit_gb or limit_gb <= 0:
         return 0
@@ -945,7 +1013,7 @@ def days_until(expire_date):
         target_date = datetime.strptime(str(expire_date), '%Y-%m-%d').date()
     except (TypeError, ValueError):
         return None
-    return (target_date - datetime.now().date()).days
+    return (target_date - _business_today()).days
 
 
 def parse_iso_date(value, field_name):
@@ -967,7 +1035,7 @@ def traffic_reset_info(expire_date, today=None):
         reset_day = parse_iso_date(expire_date, '账号到期日').day
     except ValueError:
         return None
-    today = today or date.today()
+    today = today or _business_today()
     this_month = _date_with_day(today.year, today.month, reset_day)
     if today < this_month:
         next_reset = this_month
@@ -991,7 +1059,7 @@ def traffic_reset_info(expire_date, today=None):
 
 def apply_due_traffic_resets(db, today=None):
     """Reset counters once per derived monthly cycle without changing account expiry."""
-    today = today or date.today()
+    today = today or _business_today()
     reset_ids = []
     rows = db.execute(
         'SELECT id, expire_date, last_traffic_reset_on FROM accounts'
@@ -1024,7 +1092,7 @@ def apply_due_traffic_resets(db, today=None):
 
 
 def customer_service_state(service, today=None):
-    today = today or date.today()
+    today = today or _business_today()
     if _row_get(service, 'status', 'active') != 'active':
         return _row_get(service, 'status', 'disabled')
     try:
@@ -1117,7 +1185,7 @@ def inject_utils():
         'days_until': days_until,
         'traffic_reset_info': traffic_reset_info,
         'customer_service_state': customer_service_state,
-        'now': datetime.now(),
+        'now': _business_now(),
     }
 
 # ─── 认证 ──────────────────────────────────────────────
@@ -1184,7 +1252,10 @@ def logout():
 @login_required
 def dashboard():
     db = get_db()
-    apply_due_traffic_resets(db)
+    today = _business_today()
+    apply_due_traffic_resets(db, today=today)
+    today_text = today.isoformat()
+    due_text = (today + timedelta(days=30)).isoformat()
     accounts = db.execute('SELECT * FROM accounts ORDER BY id').fetchall()
 
     total_accounts = len(accounts)
@@ -1208,26 +1279,29 @@ def dashboard():
     )
     service_summary = db.execute(
         '''SELECT COUNT(*) AS total,
-                  SUM(CASE WHEN status='active' AND started_on<=date('now') AND expires_on>=date('now') THEN 1 ELSE 0 END) AS active,
-                  SUM(CASE WHEN status='active' AND expires_on<date('now') THEN 1 ELSE 0 END) AS expired,
-                  SUM(CASE WHEN status='active' AND started_on<=date('now') AND expires_on BETWEEN date('now') AND date('now', '+30 days') THEN 1 ELSE 0 END) AS due
-           FROM customer_services'''
+                  SUM(CASE WHEN status='active' AND started_on<=? AND expires_on>=? THEN 1 ELSE 0 END) AS active,
+                  SUM(CASE WHEN status='active' AND expires_on<? THEN 1 ELSE 0 END) AS expired,
+                  SUM(CASE WHEN status='active' AND started_on<=? AND expires_on BETWEEN ? AND ? THEN 1 ELSE 0 END) AS due
+           FROM customer_services''',
+        (today_text, today_text, today_text, today_text, today_text, due_text),
     ).fetchone()
     renewal_services = db.execute(
         '''SELECT cs.*, a.name AS account_name
            FROM customer_services cs JOIN accounts a ON a.id=cs.account_id
-           WHERE cs.status='active' AND cs.started_on<=date('now')
-             AND cs.expires_on<=date('now', '+30 days')
-           ORDER BY cs.expires_on, cs.id LIMIT 6'''
+           WHERE cs.status='active' AND cs.started_on<=?
+             AND cs.expires_on<=?
+           ORDER BY cs.expires_on, cs.id LIMIT 6''',
+        (today_text, due_text),
     ).fetchall()
     service_counts = {
         row['account_id']: row['service_count']
         for row in db.execute(
             '''SELECT account_id, COUNT(*) AS service_count
                FROM customer_services
-               WHERE status='active' AND started_on<=date('now')
-                 AND expires_on>=date('now')
-               GROUP BY account_id'''
+               WHERE status='active' AND started_on<=?
+                 AND expires_on>=?
+               GROUP BY account_id''',
+            (today_text, today_text),
         )
     }
 
@@ -1274,14 +1348,17 @@ def dashboard():
 @login_required
 def accounts_list():
     db = get_db()
-    apply_due_traffic_resets(db)
+    today = _business_today()
+    apply_due_traffic_resets(db, today=today)
+    today_text = today.isoformat()
     accounts = db.execute(
         '''SELECT a.*, COUNT(cs.id) AS service_count
            FROM accounts a
            LEFT JOIN customer_services cs
              ON cs.account_id=a.id AND cs.status='active'
-                AND cs.started_on<=date('now') AND cs.expires_on>=date('now')
-           GROUP BY a.id ORDER BY a.id'''
+                AND cs.started_on<=? AND cs.expires_on>=?
+           GROUP BY a.id ORDER BY a.id''',
+        (today_text, today_text),
     ).fetchall()
     return render_template('accounts.html', accounts=accounts)
 
@@ -1346,7 +1423,7 @@ def account_add():
             traffic_info.get('upload_bytes', 0),
             traffic_info.get('download_bytes', 0),
             traffic_info.get('expire_date', ''),
-            date.today().isoformat(),
+            _business_today().isoformat(),
         )
     )
     account_id = cursor.lastrowid
@@ -1462,8 +1539,24 @@ def account_edit(account_id):
 @login_required
 def account_delete(account_id):
     db = get_db()
+    db.execute('BEGIN IMMEDIATE')
     account = db.execute('SELECT name FROM accounts WHERE id=?', (account_id,)).fetchone()
     if account:
+        service_count = db.execute(
+            'SELECT COUNT(*) FROM customer_services WHERE account_id=?',
+            (account_id,),
+        ).fetchone()[0]
+        if service_count:
+            db.rollback()
+            audit_event(
+                'account.delete', 'failure', account_id=account_id,
+                reason='customer_services_attached',
+            )
+            flash(
+                f'该账号仍关联 {service_count} 条用户服务，请先迁移或删除这些服务',
+                'error',
+            )
+            return redirect(url_for('account_detail', account_id=account_id))
         db.execute('DELETE FROM traffic_logs WHERE account_id=?', (account_id,))
         db.execute('DELETE FROM traffic_collectors WHERE account_id=?', (account_id,))
         db.execute('DELETE FROM nodes WHERE account_id=?', (account_id,))
@@ -1471,7 +1564,44 @@ def account_delete(account_id):
         db.commit()
         audit_event('account.delete', 'success', account_id=account_id)
         flash(f'账号 "{account["name"]}" 已删除', 'success')
+    else:
+        db.rollback()
     return redirect(url_for('accounts_list'))
+
+
+def _replace_account_nodes(db, account_id, nodes):
+    health_by_endpoint = {
+        (row['protocol'], row['host'], row['port']): (
+            row['is_online'], row['latency_ms'], row['last_checked_at']
+        )
+        for row in db.execute(
+            '''SELECT protocol, host, port, is_online, latency_ms, last_checked_at
+               FROM nodes WHERE account_id=?''',
+            (account_id,),
+        )
+    }
+    db.execute('DELETE FROM nodes WHERE account_id=?', (account_id,))
+    for node in nodes:
+        protocol = node.get('protocol', 'anytls')
+        health = health_by_endpoint.get(
+            (protocol, node['host'], node['port']), (-1, -1, None)
+        )
+        db.execute(
+            '''INSERT INTO nodes (
+                   account_id, name, host, port, password, raw_uri, protocol,
+                   is_online, latency_ms, last_checked_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                account_id,
+                node['name'],
+                node['host'],
+                node['port'],
+                node['password'],
+                node.get('raw_uri', ''),
+                protocol,
+                *health,
+            ),
+        )
 
 @app.route('/accounts/<int:account_id>/sync', methods=['POST'])
 @login_required
@@ -1504,22 +1634,7 @@ def account_sync(account_id):
         flash('账号已被删除，已取消同步', 'error')
         return redirect(url_for('accounts_list'))
 
-    # 清除旧节点，重新插入
-    db.execute('DELETE FROM nodes WHERE account_id=?', (account_id,))
-    for n in nodes:
-        db.execute(
-            '''INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol)
-               VALUES (?, ?, ?, ?, ?, ?, ?)''',
-            (
-                account_id,
-                n['name'],
-                n['host'],
-                n['port'],
-                n['password'],
-                n.get('raw_uri', ''),
-                n.get('protocol', 'anytls'),
-            )
-        )
+    _replace_account_nodes(db, account_id, nodes)
     db.execute(
         '''UPDATE accounts SET
                node_count=?,
@@ -1563,7 +1678,9 @@ def _service_form_values():
 @login_required
 def services_list():
     db = get_db()
-    apply_due_traffic_resets(db)
+    today = _business_today()
+    apply_due_traffic_resets(db, today=today)
+    today_text = today.isoformat()
     services = db.execute(
         '''SELECT cs.*, a.name AS account_name, a.expire_date AS account_expires_on,
                   a.traffic_limit_gb, a.traffic_used_bytes, a.status AS account_status
@@ -1576,9 +1693,10 @@ def services_list():
            FROM accounts a
            LEFT JOIN customer_services cs
              ON cs.account_id=a.id AND cs.status='active'
-                AND cs.started_on<=date('now') AND cs.expires_on>=date('now')
+                AND cs.started_on<=? AND cs.expires_on>=?
            WHERE a.status='active'
-           GROUP BY a.id'''
+           GROUP BY a.id''',
+        (today_text, today_text),
     ).fetchall()
     accounts = sorted(
         accounts,
@@ -1685,7 +1803,13 @@ def service_detail(service_id):
         (service_id,),
     ).fetchall()
     return render_template(
-        'service_detail.html', service=service, accounts=accounts, renewals=renewals
+        'service_detail.html',
+        service=service,
+        accounts=accounts,
+        renewals=renewals,
+        renew_min_date=(
+            parse_iso_date(service['expires_on'], '到期日期') + timedelta(days=1)
+        ).isoformat(),
     )
 
 
@@ -1750,8 +1874,8 @@ def service_renew(service_id):
     if not service:
         flash('用户服务不存在', 'error')
         return redirect(url_for('services_list'))
-    if new_expires_on < parse_iso_date(service['started_on'], '开始日期'):
-        flash('新到期日期不能早于开始日期', 'error')
+    if new_expires_on <= parse_iso_date(service['expires_on'], '当前到期日期'):
+        flash('新到期日期必须晚于当前到期日期；日期纠错请使用编辑功能', 'error')
         return redirect(url_for('service_detail', service_id=service_id))
     db.execute(
         '''INSERT INTO service_renewals (
@@ -2074,7 +2198,7 @@ def api_report_traffic_counter():
 @rate_limit(get_db, "traffic-set", 60, 60)
 @require_traffic_api_token
 def api_set_traffic():
-    """设置流量绝对值: {"account_id": 1, "total_bytes": 999}"""
+    """Set a monotonic absolute value within an explicitly named traffic cycle."""
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
@@ -2087,18 +2211,40 @@ def api_set_traffic():
         return jsonify({"error": "total_bytes must be a nonnegative integer"}), 400
 
     db = get_db()
-    apply_due_traffic_resets(db)
+    today = _business_today()
+    apply_due_traffic_resets(db, today=today)
     account_id, identity_error, identity_status = _resolve_traffic_account_id(db, data)
     if identity_error:
         return jsonify({"error": identity_error}), identity_status
 
-    cursor = db.execute(
+    account = db.execute(
+        'SELECT traffic_used_bytes, expire_date FROM accounts WHERE id=?',
+        (account_id,),
+    ).fetchone()
+    if not account:
+        return jsonify({"error": "account not found"}), 404
+    cycle = traffic_reset_info(account['expire_date'], today=today)
+    if cycle:
+        try:
+            cycle_started_on = parse_iso_date(
+                data.get('cycle_started_on'), 'cycle_started_on'
+            ).isoformat()
+        except ValueError:
+            return jsonify({
+                "error": "cycle_started_on is required as YYYY-MM-DD",
+                "current_cycle_started_on": cycle['previous'],
+            }), 400
+        if cycle_started_on != cycle['previous']:
+            return jsonify({
+                "error": "traffic sample belongs to a different reset cycle",
+                "current_cycle_started_on": cycle['previous'],
+            }), 409
+
+    db.execute(
         'UPDATE accounts SET traffic_used_bytes=MAX(COALESCE(traffic_used_bytes, 0), ?), '
         'updated_at=CURRENT_TIMESTAMP WHERE id=?',
         (total_bytes, account_id)
     )
-    if cursor.rowcount == 0:
-        return jsonify({"error": "account not found"}), 404
     account = db.execute(
         'SELECT traffic_used_bytes FROM accounts WHERE id=?', (account_id,)
     ).fetchone()
@@ -2294,21 +2440,7 @@ def api_sync_all():
                     "msg": "订阅中未找到可用节点",
                 })
                 continue
-            db.execute('DELETE FROM nodes WHERE account_id=?', (account['id'],))
-            for n in nodes:
-                db.execute(
-                    '''INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                    (
-                        account['id'],
-                        n['name'],
-                        n['host'],
-                        n['port'],
-                        n['password'],
-                        n.get('raw_uri', ''),
-                        n.get('protocol', 'anytls'),
-                    )
-                )
+            _replace_account_nodes(db, account['id'], nodes)
             db.execute(
                 '''UPDATE accounts SET
                        node_count=?,
@@ -2413,6 +2545,28 @@ def _apply_rename(text, rules):
     return text
 
 
+def _rename_node_uri(node, rules):
+    raw_uri = node.get('raw_uri', '')
+    original_name = str(node.get('name', ''))
+    renamed = _apply_rename(original_name, rules)
+    if not raw_uri or renamed == original_name:
+        return raw_uri
+    if raw_uri.startswith('vmess://'):
+        try:
+            encoded = raw_uri.split('://', 1)[1]
+            payload = encoded + '=' * (-len(encoded) % 4)
+            data = json.loads(base64.urlsafe_b64decode(payload).decode())
+            data['ps'] = renamed
+            encoded = base64.urlsafe_b64encode(
+                json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode()
+            ).decode().rstrip('=')
+            return f'vmess://{encoded}'
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            return raw_uri
+    base, _separator, _fragment = raw_uri.partition('#')
+    return f"{base}#{quote(renamed, safe='')}"
+
+
 def _row_get(row, key, default=None):
     try:
         return row[key]
@@ -2457,13 +2611,15 @@ def public_subscribe(token):
         return 'Invalid token', 404
 
     db = get_db()
-    apply_due_traffic_resets(db)
+    today = _business_today()
+    apply_due_traffic_resets(db, today=today)
+    today_text = today.isoformat()
     service = db.execute(
         '''SELECT a.*, cs.id AS service_id, cs.expires_on AS service_expires_on
            FROM customer_services cs JOIN accounts a ON a.id=cs.account_id
            WHERE cs.sub_token=? AND cs.status='active' AND a.status='active'
-             AND cs.started_on<=date('now') AND cs.expires_on>=date('now')''',
-        (token,),
+             AND cs.started_on<=? AND cs.expires_on>=?''',
+        (token, today_text, today_text),
     ).fetchone()
     account = service or db.execute(
         "SELECT * FROM accounts WHERE sub_token=? AND status='active'", (token,)
@@ -2497,7 +2653,16 @@ def public_subscribe(token):
             parts.append(f"total={int(traffic_info['total_gb'] * 1024**3)}")
         if traffic_info.get('expire_date'):
             try:
-                ts = int(datetime.strptime(traffic_info['expire_date'], '%Y-%m-%d').timestamp())
+                expires_on = parse_iso_date(
+                    traffic_info['expire_date'], '到期日期'
+                )
+                expires_at = datetime(
+                    expires_on.year,
+                    expires_on.month,
+                    expires_on.day,
+                    tzinfo=_BUSINESS_TIMEZONE,
+                ) + timedelta(days=1)
+                ts = int(expires_at.timestamp())
                 parts.append(f"expire={ts}")
             except Exception:
                 pass
@@ -2506,7 +2671,12 @@ def public_subscribe(token):
 
     ua = request.headers.get('User-Agent', '')
 
-    lines = [n.get('raw_uri', '') for n in nodes if n.get('raw_uri', '')]
+    rename_rules = _get_rename_rules()
+    lines = [
+        _rename_node_uri(node, rename_rules)
+        for node in nodes
+        if node.get('raw_uri', '')
+    ]
 
     # 根据 User-Agent 返回不同格式
     content = '\n'.join(lines)
@@ -2620,10 +2790,15 @@ def _development_server_options():
 
 def create_app():
     """Initialize persistent state explicitly and return the Flask application."""
+    for handler in logging.getLogger('gunicorn.error').handlers:
+        if handler not in audit_logger.handlers:
+            audit_logger.addHandler(handler)
     init_db()
     return app
 
 if __name__ == '__main__':
+    if not audit_logger.handlers:
+        audit_logger.addHandler(logging.StreamHandler())
     create_app()
     host, port, debug = _development_server_options()
     print(f"\n  AnyTLS Panel running at http://{host}:{port}")
