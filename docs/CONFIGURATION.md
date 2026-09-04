@@ -21,7 +21,7 @@ AnyTLS Panel 使用环境变量覆盖默认配置。生产环境由 `deploy.sh` 
 | `ANYTLS_SERVICE_USER` | `anytls-panel` | 低权限运行用户，不能是 `root` |
 | `ANYTLS_BIND_HOST` | `127.0.0.1` | 生产 HTTPS 部署必须保持回环地址 |
 | `ANYTLS_REPO_URL` | 官方 GitHub 仓库 | 部署脚本拉取代码的 Git 仓库 |
-| `ANYTLS_REPO_REF` | `v1.4.2` | 要部署的正式标签或分支；生产环境建议使用不可变标签 |
+| `ANYTLS_REPO_REF` | `v1.4.3` | 要部署的正式标签或分支；生产环境建议使用不可变标签 |
 | `ANYTLS_REPO_SUBDIR` | 空 | 仓库中的项目子目录，常规部署不需要设置 |
 | `ANYTLS_ADMIN_USER` | 交互输入 | 首次无人值守安装时的管理员用户名 |
 | `ANYTLS_ADMIN_PASS` | 交互输入或安全随机值 | 首次无人值守安装时的 8–128 字符密码 |

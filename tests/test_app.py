@@ -32,6 +32,9 @@ def load_app(database_path):
     with mock.patch.dict(os.environ, {"ANYTLS_DATABASE": str(database_path)}, clear=False):
         spec.loader.exec_module(module)
         module.init_db()
+    for handler in module.audit_logger.handlers:
+        if isinstance(handler, logging.StreamHandler):
+            handler.setStream(io.StringIO())
     return module
 
 
@@ -1660,15 +1663,15 @@ proxies:
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")
             stream = io.StringIO()
-            handler = logging.StreamHandler(stream)
-            gunicorn_logger = logging.getLogger("gunicorn.error")
-            gunicorn_logger.addHandler(handler)
+            handler = next(
+                item for item in app.audit_logger.handlers
+                if isinstance(item, logging.StreamHandler)
+            )
+            previous_stream = handler.setStream(stream)
             try:
-                app.create_app()
                 app.audit_event("audit.delivery_check", "success")
             finally:
-                gunicorn_logger.removeHandler(handler)
-                app.audit_logger.removeHandler(handler)
+                handler.setStream(previous_stream)
 
         self.assertTrue(app.audit_logger.isEnabledFor(20))
         self.assertIn('"action":"audit.delivery_check"', stream.getvalue())
@@ -5281,7 +5284,7 @@ proxies:
         self.assertIn("python3.12 -m venv .venv", operations)
         self.assertIn("brew install python@3.12 shellcheck actionlint", operations)
         self.assertIn("--require-hashes -r requirements-dev.txt", operations)
-        self.assertIn("git clone --depth 1 --branch v1.4.2", operations)
+        self.assertIn("git clone --depth 1 --branch v1.4.3", operations)
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
@@ -5381,8 +5384,8 @@ proxies:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.4.2}"', deploy)
-        self.assertIn("AnyTLS_Panel/v1.4.2/deploy.sh", readme)
+        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.4.3}"', deploy)
+        self.assertIn("AnyTLS_Panel/v1.4.3/deploy.sh", readme)
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)
