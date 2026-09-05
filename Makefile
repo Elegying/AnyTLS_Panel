@@ -1,6 +1,6 @@
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PYTHON_FILES := app.py database_maintenance.py db_migrations.py import_customer_services.py input_limits.py node_probe.py protocol_codecs.py security_utils.py sqlite_rate_limit.py traffic_token.py
-SHELL_FILES := backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh
+SHELL_FILES := backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh tests/ubuntu24_e2e.sh
 
 .PHONY: help install-dev test coverage lint shellcheck security audit check
 
@@ -32,7 +32,7 @@ lint:
 	$(PYTHON) -m flake8 . --count --select=E9,F63,F7,F82,F401,F811 --show-source --statistics
 
 shellcheck:
-	bash -n $(SHELL_FILES)
+	@for script in $(SHELL_FILES); do bash -n "$$script" || exit; done
 	shellcheck $(SHELL_FILES)
 	@if command -v actionlint >/dev/null 2>&1; then actionlint; else printf '%s\n' 'actionlint 未安装，跳过 GitHub Actions 本地检查'; fi
 

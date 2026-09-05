@@ -34,6 +34,13 @@
             <form method="POST" action="{{ url_for('service_remind', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-ghost" type="submit">标记已提醒</button></form>
             <form method="POST" action="{{ url_for('service_rotate_token', service_id=service.id) }}" data-confirm="重新生成后，旧订阅链接将立即失效。确认继续？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-ghost" type="submit">重新生成链接</button></form>
         </div>
+        <form class="cell-actions" method="POST" action="{{ url_for('service_status', service_id=service.id) }}" style="margin-top:16px">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            {% if service.status != 'active' %}<button class="btn btn-primary" type="submit" name="status" value="active">恢复服务</button>{% endif %}
+            {% if service.status != 'suspended' %}<button class="btn btn-ghost" type="submit" name="status" value="suspended">暂停服务</button>{% endif %}
+            {% if service.status != 'disabled' %}<button class="btn btn-ghost" type="submit" name="status" value="disabled">停用服务</button>{% endif %}
+        </form>
+        <p class="form-hint">暂停、停用或到期会停止订阅下载。已导入客户端的节点凭据需在上游撤销，才能停止连接。</p>
     </div>
 </section>
 

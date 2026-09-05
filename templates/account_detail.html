@@ -40,7 +40,7 @@
     </div>
     <div class="system-metric">
         <div class="metric-label"><i class="bi bi-clock-history" aria-hidden="true"></i>最后同步</div>
-        <div class="metric-value" style="font-size:17px">{{ account.last_synced_at or '尚未同步' }}</div>
+        <div class="metric-value" style="font-size:17px">{{ account.last_synced_at[:19] if account.last_synced_at else '尚未同步' }}</div>
         <div class="metric-note">订阅数据更新时间</div>
     </div>
     <div class="system-metric">

@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import yaml
 
-from input_limits import MAX_SUBSCRIPTION_TEXT_CHARS
+from input_limits import MAX_HOST_CHARS, MAX_SUBSCRIPTION_TEXT_CHARS
 
 
 _MAX_YAML_NODES = 10_000
@@ -164,7 +164,14 @@ def parse_protocol_uri(uri, protocol='anytls'):
         uri = uri.strip()
         codec = CODECS.get(protocol, {})
         parser = codec.get('parse_uri', _parse_standard_uri)
-        return parser(uri, protocol)
+        node = parser(uri, protocol)
+        if not node or not all(
+            isinstance(node.get(field), str) for field in ('name', 'host', 'password')
+        ):
+            return None
+        if not 1 <= len(node['host']) <= MAX_HOST_CHARS or not 1 <= node['port'] <= 65535:
+            return None
+        return node
     except Exception:
         return None
 

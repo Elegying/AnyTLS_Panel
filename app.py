@@ -20,7 +20,7 @@ import subprocess
 import threading
 import calendar
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from urllib.parse import quote, urljoin, urlparse
 from pathlib import Path
@@ -85,6 +85,10 @@ def _database_path():
 
 app = Flask(__name__)
 app.config['DATABASE'] = _database_path()
+app.config['INITIAL_ADMIN_PASSWORD_FILE'] = str(
+    os.environ.get('ANYTLS_ADMIN_PASSWORD_FILE')
+    or Path(app.config['DATABASE']).with_name('.initial_admin_password')
+)
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = _env_flag('ANYTLS_SESSION_COOKIE_SECURE')
@@ -305,14 +309,10 @@ def get_initial_admin_credentials():
     if env_password:
         return admin_user, env_password, ''
 
-    password_file = Path(
-        os.environ.get('ANYTLS_ADMIN_PASSWORD_FILE')
-        or Path(app.config['DATABASE']).with_name('.initial_admin_password')
-    )
-    app.config['INITIAL_ADMIN_PASSWORD_FILE'] = str(password_file)
+    password_file = Path(app.config['INITIAL_ADMIN_PASSWORD_FILE'])
     try:
         if password_file.exists():
-            password = password_file.read_text(encoding='utf-8').strip()
+            password = password_file.read_text(encoding='utf-8').rstrip('\r\n')
             if password:
                 return admin_user, password, str(password_file)
 
@@ -324,8 +324,7 @@ def get_initial_admin_credentials():
         )
         return admin_user, password, str(password_file)
     except OSError:
-        password = secrets.token_urlsafe(18)
-        return admin_user, password, ''
+        raise RuntimeError('无法保存首次管理员密码，请检查密码文件及父目录权限') from None
 
 
 def get_traffic_api_token():
@@ -340,19 +339,9 @@ def get_traffic_api_token():
     app.config['TRAFFIC_API_TOKEN_FILE'] = str(token_file)
 
     try:
-        if token_file.exists():
-            token = token_file.read_text(encoding='utf-8').strip()
-            if token:
-                return token
-
-        token = secrets.token_urlsafe(32)
-        token_file.parent.mkdir(parents=True, exist_ok=True)
-        token_file.write_text(token + '\n', encoding='utf-8')
-        try:
-            token_file.chmod(0o600)
-        except OSError:
-            pass
-        return token
+        return _read_or_create_private_file(
+            token_file, lambda: secrets.token_urlsafe(32), trailing_newline=True
+        )
     except OSError:
         return ''
 
@@ -373,7 +362,7 @@ def generate_account_traffic_token(account_id):
 
 
 def _validate_traffic_api_token(supplied, master_token):
-    if hmac.compare_digest(supplied, master_token):
+    if hmac.compare_digest(supplied.encode('utf-8'), master_token.encode('utf-8')):
         return True, None
     try:
         prefix, raw_account_id, signature = supplied.split('.', 2)
@@ -383,7 +372,7 @@ def _validate_traffic_api_token(supplied, master_token):
         expected = generate_account_traffic_token(account_id)
     except (TypeError, ValueError, RuntimeError):
         return False, None
-    return hmac.compare_digest(supplied, expected), account_id
+    return hmac.compare_digest(supplied.encode('utf-8'), expected.encode('utf-8')), account_id
 
 
 def _payload_matches_traffic_scope(account_id):
@@ -962,7 +951,7 @@ def _parse_status_line(line):
         m = re.search(r'TOT[:\s]*([\d.]+)\s*(GB|MB|TB|KB)', text, re.IGNORECASE)
         if m:
             val, unit = float(m.group(1)), m.group(2).upper()
-            info['total_gb'] = val if unit == 'GB' else val / 1024 if unit == 'MB' else val * 1024 if unit == 'TB' else val / 1024**3
+            info['total_gb'] = val if unit == 'GB' else val / 1024 if unit == 'MB' else val * 1024 if unit == 'TB' else val / 1024**2
             info['total_display'] = f"{val}{unit}"
         # 提取到期时间
         m = re.search(r'Expires[:\s]*(\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
@@ -974,6 +963,9 @@ def _parse_status_line(line):
             info['used_display'] = format_bytes(info['used_bytes'])
     except Exception:
         pass
+    for field in ('upload_bytes', 'download_bytes', 'used_bytes'):
+        if field in info and not 0 <= info[field] <= SQLITE_INTEGER_MAX:
+            del info[field]
     return info
 
 
@@ -1207,9 +1199,9 @@ def login():
             username = validate_text(
                 request.form.get('username', ''), '用户名', MAX_NAME_CHARS, required=True
             )
-            password = validate_text(
-                request.form.get('password', ''), '密码', 128, required=True
-            )
+            password = request.form.get('password', '')
+            if not password or len(password) > 128:
+                raise ValueError('密码长度无效')
         except ValueError:
             audit_event('auth.login', 'failure', reason='invalid_input')
             flash('用户名或密码错误', 'error')
@@ -1605,6 +1597,15 @@ def _replace_account_nodes(db, account_id, nodes):
             ),
         )
 
+
+def _sync_snapshot_is_current(db, account):
+    current = db.execute('SELECT * FROM accounts WHERE id=?', (account['id'],)).fetchone()
+    return current is not None and all(
+        current[field] == account[field]
+        for field in ('subscribe_url', 'status', 'traffic_limit_gb', 'expire_date', 'last_synced_at')
+    )
+
+
 @app.route('/accounts/<int:account_id>/sync', methods=['POST'])
 @login_required
 def account_sync(account_id):
@@ -1629,11 +1630,11 @@ def account_sync(account_id):
         flash(f'同步失败: {e}', 'error')
         return redirect(url_for('account_detail', account_id=account_id))
 
-    # 拉取发生在事务外；写入前重新确认账号仍存在，防止并发删除留下孤儿节点。
+    # 网络请求不持有写锁；拒绝覆盖请求期间修改或同步过的账号。
     db.execute('BEGIN IMMEDIATE')
-    if not db.execute('SELECT 1 FROM accounts WHERE id=?', (account_id,)).fetchone():
+    if not _sync_snapshot_is_current(db, account):
         db.rollback()
-        flash('账号已被删除，已取消同步', 'error')
+        flash('账号已被修改、删除或同步，已取消本次同步，请重试', 'error')
         return redirect(url_for('accounts_list'))
 
     _replace_account_nodes(db, account_id, nodes)
@@ -1645,10 +1646,11 @@ def account_sync(account_id):
                traffic_download_bytes=COALESCE(?, traffic_download_bytes),
                traffic_limit_gb=COALESCE(?, traffic_limit_gb),
                expire_date=COALESCE(?, expire_date),
-               last_synced_at=CURRENT_TIMESTAMP,
+               last_synced_at=?,
                updated_at=CURRENT_TIMESTAMP
            WHERE id=?''',
-        (len(nodes), *_traffic_update_values(traffic_info), account_id),
+        (len(nodes), *_traffic_update_values(traffic_info),
+         datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f'), account_id),
     )
     db.commit()
     audit_event('account.sync', 'success', account_id=account_id, node_count=len(nodes))
@@ -1869,14 +1871,17 @@ def service_renew(service_id):
         flash(str(error), 'error')
         return redirect(url_for('service_detail', service_id=service_id))
     db = get_db()
+    db.execute('BEGIN IMMEDIATE')
     service = db.execute(
         'SELECT started_on, expires_on FROM customer_services WHERE id=?',
         (service_id,),
     ).fetchone()
     if not service:
+        db.rollback()
         flash('用户服务不存在', 'error')
         return redirect(url_for('services_list'))
     if new_expires_on <= parse_iso_date(service['expires_on'], '当前到期日期'):
+        db.rollback()
         flash('新到期日期必须晚于当前到期日期；日期纠错请使用编辑功能', 'error')
         return redirect(url_for('service_detail', service_id=service_id))
     db.execute(
@@ -2010,11 +2015,12 @@ def node_delete(node_id):
     db = get_db()
     node = db.execute('SELECT * FROM nodes WHERE id=?', (node_id,)).fetchone()
     if node:
-        db.execute('DELETE FROM nodes WHERE id=?', (node_id,))
-        db.execute(
-            'UPDATE accounts SET node_count = node_count - 1 WHERE id=?',
-            (node['account_id'],)
-        )
+        deleted = db.execute('DELETE FROM nodes WHERE id=?', (node_id,))
+        if deleted.rowcount:
+            db.execute(
+                'UPDATE accounts SET node_count = node_count - 1 WHERE id=?',
+                (node['account_id'],)
+            )
         db.commit()
         audit_event(
             'node.delete',
@@ -2041,6 +2047,8 @@ def _resolve_traffic_account_id(db, item):
         return account_id, None, None
 
     password = item.get('password')
+    if password is not None and not isinstance(password, str):
+        return None, 'password must be a string', 400
     if not password and item.get('password_b64'):
         try:
             password = base64.b64decode(
@@ -2060,6 +2068,21 @@ def _resolve_traffic_account_id(db, item):
     if len(matches) > 1:
         return None, 'ambiguous password; use account_id', 409
     return matches[0]['account_id'], None, None
+
+
+def _increment_account_traffic(db, account_id, bytes_used):
+    cursor = db.execute(
+        '''UPDATE accounts SET traffic_used_bytes=COALESCE(traffic_used_bytes, 0) + ?,
+           updated_at=CURRENT_TIMESTAMP WHERE id=?
+           AND COALESCE(traffic_used_bytes, 0) <= ?''',
+        (bytes_used, account_id, SQLITE_INTEGER_MAX - bytes_used),
+    )
+    account = db.execute(
+        'SELECT traffic_used_bytes FROM accounts WHERE id=?', (account_id,)
+    ).fetchone()
+    if account is not None and cursor.rowcount == 0:
+        raise ValueError('traffic total exceeds the supported integer range')
+    return account
 
 
 @app.route('/api/traffic/report', methods=['POST'])
@@ -2097,18 +2120,14 @@ def api_report_traffic():
         if identity_error:
             return jsonify({"error": identity_error}), identity_status
 
-        cursor = db.execute(
-            'UPDATE accounts SET traffic_used_bytes=COALESCE(traffic_used_bytes, 0) + ?, '
-            'updated_at=CURRENT_TIMESTAMP WHERE id=?',
-            (bytes_used, account_id)
-        )
-        if cursor.rowcount == 0:
+        try:
+            account = _increment_account_traffic(db, account_id, bytes_used)
+        except ValueError:
+            db.rollback()
+            return jsonify({"error": "traffic total exceeds the supported integer range"}), 400
+        if account is None:
             results.append({"status": "error", "msg": "account not found"})
             continue
-        account = db.execute(
-            'SELECT traffic_used_bytes FROM accounts WHERE id=?',
-            (account_id,)
-        ).fetchone()
         new_total = account['traffic_used_bytes']
         db.execute(
             'INSERT INTO traffic_logs (account_id, bytes_used) VALUES (?, ?)',
@@ -2163,12 +2182,12 @@ def api_report_traffic_counter():
         if counter_bytes >= previous_bytes
         else counter_bytes
     )
-    cursor = db.execute(
-        'UPDATE accounts SET traffic_used_bytes=COALESCE(traffic_used_bytes, 0) + ?, '
-        'updated_at=CURRENT_TIMESTAMP WHERE id=?',
-        (delta_bytes, account_id),
-    )
-    if cursor.rowcount == 0:
+    try:
+        account = _increment_account_traffic(db, account_id, delta_bytes)
+    except ValueError:
+        db.rollback()
+        return jsonify({"error": "traffic total exceeds the supported integer range"}), 400
+    if account is None:
         db.rollback()
         return jsonify({"error": "account not found"}), 404
 
@@ -2184,9 +2203,6 @@ def api_report_traffic_counter():
             '(collector_id, account_id, last_counter_bytes) VALUES (?, ?, ?)',
             (collector_id, account_id, counter_bytes),
         )
-    account = db.execute(
-        'SELECT traffic_used_bytes FROM accounts WHERE id=?', (account_id,)
-    ).fetchone()
     db.commit()
     return jsonify({
         "status": "ok",
@@ -2215,6 +2231,7 @@ def api_set_traffic():
     db = get_db()
     today = _business_today()
     apply_due_traffic_resets(db, today=today)
+    db.execute('BEGIN IMMEDIATE')
     account_id, identity_error, identity_status = _resolve_traffic_account_id(db, data)
     if identity_error:
         return jsonify({"error": identity_error}), identity_status
@@ -2424,14 +2441,12 @@ def api_sync_all():
     db.execute('BEGIN IMMEDIATE')
     for account, nodes, traffic_info, error in fetched_accounts:
         if error is None:
-            if not db.execute(
-                'SELECT 1 FROM accounts WHERE id=?', (account['id'],)
-            ).fetchone():
+            if not _sync_snapshot_is_current(db, account):
                 results.append({
                     "id": account['id'],
                     "name": account['name'],
                     "status": "skipped",
-                    "msg": "account was deleted during sync",
+                    "msg": "account was changed, deleted or synced during fetch; retry",
                 })
                 continue
             if not nodes:
@@ -2451,10 +2466,11 @@ def api_sync_all():
                        traffic_download_bytes=COALESCE(?, traffic_download_bytes),
                        traffic_limit_gb=COALESCE(?, traffic_limit_gb),
                        expire_date=COALESCE(?, expire_date),
-                       last_synced_at=CURRENT_TIMESTAMP,
+                       last_synced_at=?,
                        updated_at=CURRENT_TIMESTAMP
                    WHERE id=?''',
-                (len(nodes), *_traffic_update_values(traffic_info), account['id']),
+                (len(nodes), *_traffic_update_values(traffic_info),
+                 datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f'), account['id']),
             )
             results.append({"id": account['id'], "name": account['name'], "status": "ok", "nodes": len(nodes)})
         else:

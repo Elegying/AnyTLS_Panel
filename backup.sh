@@ -11,7 +11,7 @@ SECRET_KEY_FILE="${ANYTLS_SECRET_KEY_FILE:-$DATA_DIR/.secret_key}"
 TRAFFIC_API_TOKEN_FILE="${ANYTLS_TRAFFIC_API_TOKEN_FILE:-$DATA_DIR/.traffic_api_token}"
 ADMIN_PASSWORD_FILE="${ANYTLS_ADMIN_PASSWORD_FILE:-$DATA_DIR/.initial_admin_password}"
 DATABASE_FILE="${ANYTLS_DATABASE:-$DATA_DIR/anytls.db}"
-LOCK_FILE="/run/lock/${SERVICE_NAME}-backup.lock"
+LOCK_FILE="$BACKUP_ROOT/.backup.lock"
 PYTHON_BIN="${ANYTLS_BACKUP_PYTHON:-$PANEL_DIR/venv/bin/python}"
 BACKUP_STAGING=""
 BACKUP_PARTIAL=""
@@ -222,10 +222,10 @@ PY
     BACKUP_PARTIAL=""
     (cd "$BACKUP_ROOT" && sha256sum "$backup_name" > "${backup_name}.sha256")
     chmod 600 "${archive}.sha256"
+    verify_backup "$backup_name"
     printf '%s\n' "$backup_name" > "$BACKUP_ROOT/latest"
     chmod 600 "$BACKUP_ROOT/latest"
     rotate_backups
-    verify_backup "$backup_name"
     logger -p daemon.notice -t "${SERVICE_NAME}-backup" \
         "event=backup_success archive=$backup_name" || true
     log "created $archive"

@@ -28,7 +28,7 @@
                 <div class="account-card-meta">
                     <span><i class="bi bi-hdd-network" aria-hidden="true"></i>{{ a.node_count or 0 }} 个节点</span>
                     <span><i class="bi bi-person-check" aria-hidden="true"></i>{{ a.service_count or 0 }} 位有效用户</span>
-                    <span><i class="bi bi-arrow-repeat" aria-hidden="true"></i>{{ a.last_synced_at or '尚未同步' }}</span>
+                    <span><i class="bi bi-arrow-repeat" aria-hidden="true"></i>{{ a.last_synced_at[:19] if a.last_synced_at else '尚未同步' }}</span>
                 </div>
             </div>
             <span class="badge {{ 'badge-green' if a.status == 'active' else 'badge-orange' if a.status == 'suspended' else 'badge-red' }}">{{ '活跃' if a.status == 'active' else '暂停' if a.status == 'suspended' else '停用' }}</span>

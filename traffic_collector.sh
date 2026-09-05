@@ -175,9 +175,9 @@ get_traffic_bytes() {
         return 1
     fi
     in_bytes=$(printf '%s\n' "${input_rules}" | \
-        awk -v marker="${INPUT_RULE_COMMENT}" 'index($0, marker) {sum += $2} END {print sum + 0}')
+        awk -v marker="/* ${INPUT_RULE_COMMENT} */" 'index($0, marker) {sum += $2} END {printf "%.0f\n", sum + 0}')
     out_bytes=$(printf '%s\n' "${output_rules}" | \
-        awk -v marker="${OUTPUT_RULE_COMMENT}" 'index($0, marker) {sum += $2} END {print sum + 0}')
+        awk -v marker="/* ${OUTPUT_RULE_COMMENT} */" 'index($0, marker) {sum += $2} END {printf "%.0f\n", sum + 0}')
     in_bytes=${in_bytes:-0}
     out_bytes=${out_bytes:-0}
     echo $((in_bytes + out_bytes))

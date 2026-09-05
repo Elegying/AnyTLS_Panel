@@ -8,7 +8,7 @@
         <p class="page-description">集中查看专线流量、每月重置周期、用户续费和节点健康。</p>
     </div>
     <div class="page-actions">
-        <span class="page-meta">最后同步：{{ last_synced_at or '尚未同步' }}</span>
+        <span class="page-meta">最后同步：{{ last_synced_at[:19] if last_synced_at else '尚未同步' }}</span>
         <button class="btn btn-primary" id="syncAllBtn" type="button" data-action="sync-all">
             <i class="bi bi-arrow-repeat" aria-hidden="true"></i><span>立即同步</span>
         </button>

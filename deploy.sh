@@ -20,7 +20,7 @@ TRAFFIC_LOG_RETENTION_DAYS="${ANYTLS_TRAFFIC_LOG_RETENTION_DAYS:-90}"
 MAX_REQUEST_BYTES="${ANYTLS_MAX_REQUEST_BYTES:-4194304}"
 PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
-REPO_REF="${ANYTLS_REPO_REF:-v1.4.3}"
+REPO_REF="${ANYTLS_REPO_REF:-v1.4.4}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
@@ -131,6 +131,7 @@ cleanup_deploy_artifacts() {
 handle_deploy_error() {
     local status="$1"
     trap - ERR
+    trap '' HUP INT TERM
     if [[ "${CUTOVER_STARTED:-0}" -eq 1 && "${ROLLBACK_FINISHED:-0}" -eq 0 ]]; then
         rollback_deployment || true
     fi
@@ -138,6 +139,9 @@ handle_deploy_error() {
 }
 
 trap 'handle_deploy_error $?' ERR
+trap 'handle_deploy_error 129' HUP
+trap 'handle_deploy_error 130' INT
+trap 'handle_deploy_error 143' TERM
 trap cleanup_deploy_artifacts EXIT
 
 require_interactive_terminal() {
@@ -329,6 +333,11 @@ validate_secret_paths() {
     SECRET_KEY_FILE="${ANYTLS_SECRET_KEY_FILE:-$DATA_DIR/.secret_key}"
     TRAFFIC_API_TOKEN_FILE="${ANYTLS_TRAFFIC_API_TOKEN_FILE:-$DATA_DIR/.traffic_api_token}"
     ADMIN_PASSWORD_FILE="${ANYTLS_ADMIN_PASSWORD_FILE:-$DATA_DIR/.initial_admin_password}"
+    if [[ "$SECRET_KEY_FILE" == "$TRAFFIC_API_TOKEN_FILE" ||
+          "$SECRET_KEY_FILE" == "$ADMIN_PASSWORD_FILE" ||
+          "$TRAFFIC_API_TOKEN_FILE" == "$ADMIN_PASSWORD_FILE" ]]; then
+        fail "secret key, traffic token and admin password must use distinct files"
+    fi
     validate_secret_file_path "$SECRET_KEY_FILE" "$DATA_DIR/.secret_key" \
         "ANYTLS_SECRET_KEY_FILE"
     validate_secret_file_path "$TRAFFIC_API_TOKEN_FILE" "$DATA_DIR/.traffic_api_token" \
@@ -693,13 +702,14 @@ PY
 
 backup_current_release() {
     install -d -m 700 "$ROLLBACK_DIR/code"
-    # Mark the backup active before moving anything so a mid-loop failure
-    # restores even a partially moved release.
-    CODE_BACKED_UP=1
+    # Keep the entire old release in place until its snapshot is complete.
     if [[ -d "$PANEL_DIR" ]]; then
         while IFS= read -r -d '' entry; do
-            mv -- "$entry" "$ROLLBACK_DIR/code/"
+            cp -a -- "$entry" "$ROLLBACK_DIR/code/" || return
         done < <(find "$PANEL_DIR" -mindepth 1 -maxdepth 1 ! -name data -print0)
+        CODE_BACKED_UP=1
+        find "$PANEL_DIR" -mindepth 1 -maxdepth 1 ! -name data \
+            -exec rm -rf -- {} +
     fi
 }
 
@@ -890,6 +900,7 @@ delayed_rollback() {
     local requested="${1:-latest}"
     validate_configuration
     validate_supported_os
+    acquire_operation_lock
     validate_install_target
     validate_service_target
     ensure_runtime
@@ -1016,7 +1027,7 @@ rollback_deployment() {
         if [[ -d "$ROLLBACK_DIR/code" ]]; then
             while IFS= read -r -d '' entry; do
                 rollback_step "restore release file ${entry##*/}" \
-                    mv -- "$entry" "$PANEL_DIR/"
+                    cp -a -- "$entry" "$PANEL_DIR/"
             done < <(find "$ROLLBACK_DIR/code" -mindepth 1 -maxdepth 1 -print0)
         fi
     fi
@@ -1091,6 +1102,12 @@ rollback_deployment() {
         "${SERVICE_NAME}-backup.timer" \
         "$OLD_BACKUP_TIMER_UNIT_PRESENT" "$OLD_BACKUP_TIMER_ACTIVE" \
         "backup timer"
+    if [[ "$CONFIG_BACKED_UP" -eq 1 && "$OLD_PANEL_ACTIVE" -eq 1 ]]; then
+        local restored_address
+        restored_address="$(sed -n 's/.* --bind \([^ ]*\).*/\1/p' \
+            "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service")"
+        rollback_step "verify restored panel readiness" wait_for_backend "$restored_address"
+    fi
     if [[ "$ROLLBACK_FAILED" -ne 0 ]]; then
         printf '[anytls-panel] ERROR: rollback incomplete; manual recovery required\n' >&2
         return 1
@@ -1321,8 +1338,9 @@ prepare_traffic_api_token() {
     TRAFFIC_API_TOKEN="${ANYTLS_TRAFFIC_API_TOKEN:-}"
     FRESH_TRAFFIC_API_TOKEN=0
 
-    if [[ -z "$TRAFFIC_API_TOKEN" && -s "$TRAFFIC_API_TOKEN_FILE" ]]; then
+    if [[ -s "$TRAFFIC_API_TOKEN_FILE" ]]; then
         TRAFFIC_API_TOKEN="$(tr -d '\r\n' < "$TRAFFIC_API_TOKEN_FILE")"
+        return
     fi
     if [[ -z "$TRAFFIC_API_TOKEN" ]]; then
         TRAFFIC_API_TOKEN="$(generate_api_token)"
@@ -1472,6 +1490,14 @@ secure_panel_permissions() {
     fi
 }
 
+backend_address() {
+    if [[ "$BIND_HOST" == "::1" ]]; then
+        printf '[::1]:%s\n' "$PORT"
+    else
+        printf '%s:%s\n' "$BIND_HOST" "$PORT"
+    fi
+}
+
 write_service() {
     validate_service_target
     log "writing systemd service"
@@ -1486,7 +1512,7 @@ Type=simple
 User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
 WorkingDirectory=${PANEL_DIR}
-ExecStart=${PANEL_DIR}/venv/bin/gunicorn --workers 1 --threads 4 --no-control-socket --bind ${BIND_HOST}:${PORT} --timeout 120 app:create_app()
+ExecStart=${PANEL_DIR}/venv/bin/gunicorn --workers 1 --threads 4 --no-control-socket --bind $(backend_address) --timeout 120 app:create_app()
 Restart=always
 RestartSec=5
 UMask=0077
@@ -1515,6 +1541,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=ANYTLS_DATABASE=${DATA_DIR}/anytls.db
 Environment=ANYTLS_SECRET_KEY_FILE=${SECRET_KEY_FILE}
 Environment=ANYTLS_TRAFFIC_API_TOKEN_FILE=${TRAFFIC_API_TOKEN_FILE}
+Environment=ANYTLS_ADMIN_PASSWORD_FILE=${ADMIN_PASSWORD_FILE}
 Environment=ANYTLS_SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE}
 Environment=ANYTLS_TRUST_PROXY=${TRUST_PROXY}
 Environment=ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=${ALLOW_PRIVATE_SUBSCRIPTIONS}
@@ -1540,13 +1567,12 @@ write_keepalive_config() {
 #!/usr/bin/env bash
 set -u
 
-exec 9>/run/lock/${SERVICE_NAME}-healthcheck.lock
-flock -n 9 || exit 0
-
 STATE_DIR=/run/${SERVICE_NAME}-healthcheck
 FAILURE_THRESHOLD=3
 RECOVERY_COOLDOWN_SECONDS=300
 install -d -o root -g root -m 700 "\$STATE_DIR"
+exec 9>"\$STATE_DIR/healthcheck.lock"
+flock -n 9 || exit 0
 
 record_probe_failure() {
     local component="\$1"
@@ -1588,7 +1614,7 @@ recovery_is_suppressed() {
 probe_backend() {
     curl --fail --silent --show-error --output /dev/null \\
         --connect-timeout 3 --max-time 8 \\
-        http://127.0.0.1:${PORT}/readyz
+        http://$(backend_address)/readyz
 }
 
 probe_https() {
@@ -1728,7 +1754,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
-ReadWritePaths=${DATA_DIR} ${DAILY_BACKUP_ROOT} /run/lock
+ReadWritePaths=${DATA_DIR} ${DAILY_BACKUP_ROOT}
 TimeoutStartSec=10min
 Nice=10
 IOSchedulingClass=best-effort
@@ -1754,15 +1780,29 @@ EOF
     rm -f -- "$service_tmp" "$timer_tmp"
 }
 
+wait_for_backend() {
+    local address="$1"
+    [[ "$address" =~ ^(127\.0\.0\.1|\[::1\]):[0-9]+$ ]] || return 1
+    local _
+    for _ in {1..15}; do
+        if curl --fail --silent --output /dev/null --max-time 2 \
+            "http://${address}/readyz"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 start_service() {
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
     systemctl restart "$SERVICE_NAME"
-    sleep 2
-    systemctl is-active --quiet "$SERVICE_NAME" || {
+    if ! wait_for_backend "$(backend_address)" || \
+       ! systemctl is-active --quiet "$SERVICE_NAME"; then
         journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
         fail "service failed to start"
-    }
+    fi
 }
 
 verify_domain_resolution() {
@@ -1783,7 +1823,7 @@ PY
 render_caddy_site() {
     cat <<EOF
 ${PANEL_DOMAIN} {
-    reverse_proxy 127.0.0.1:${PORT}
+    reverse_proxy $(backend_address)
 }
 EOF
 }
@@ -1925,9 +1965,17 @@ print_summary() {
     echo
 }
 
+acquire_operation_lock() {
+    command -v flock >/dev/null 2>&1 || fail "flock is required (install util-linux)"
+    # All installations share Caddy; serialize deploy, rollback and uninstall host-wide.
+    exec 8>/run/anytls-panel-operation.lock
+    flock -n 8 || fail "another panel deployment, rollback or uninstall is running"
+}
+
 main() {
     validate_configuration
     validate_supported_os
+    acquire_operation_lock
     validate_install_target
     validate_service_target
     prepare_panel_domain
