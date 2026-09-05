@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs only on a disposable Ubuntu host: real deploy, HTTPS, upgrade and rollback.
 # The overrides below are called by main() in the sourced deployment script.
-# shellcheck disable=SC1091,SC2329
+# SC2317/SC2329: test overrides are invoked indirectly by sourced main().
+# shellcheck disable=SC1091,SC2317,SC2329
 set -Eeuo pipefail
 
 [[ "${ANYTLS_RUN_DEPLOY_E2E:-}" == 1 && "${EUID:-$(id -u)}" -eq 0 ]] || {
@@ -95,8 +96,17 @@ PY
 }
 
 run_deploy
-"$ANYTLS_PANEL_DIR/venv/bin/python" -m unittest discover \
-    -s "$REPO_ROOT/tests" -p test_reliability.py -q
+"$ANYTLS_PANEL_DIR/venv/bin/python" - "$REPO_ROOT/tests" <<'PY'
+import os
+import sys
+import unittest
+# Deployment fixture credentials and paths must not leak into independent tests.
+for key in list(os.environ):
+    if key.startswith('ANYTLS_'):
+        del os.environ[key]
+suite = unittest.defaultTestLoader.discover(sys.argv[1], pattern='test_reliability.py')
+raise SystemExit(not unittest.TextTestRunner(verbosity=1).run(suite).wasSuccessful())
+PY
 runuser -u "$ANYTLS_SERVICE_USER" -- "$ANYTLS_PANEL_DIR/venv/bin/python" - \
     "$ANYTLS_PANEL_DIR/data/anytls.db" <<'PY'
 import sqlite3
