@@ -72,6 +72,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
     display: flex;
     width: var(--sidebar-width);
     flex-direction: column;
+    overflow-y: auto;
     background: #0e131d;
     border-right: 1px solid var(--border);
     transition: transform 180ms ease;
@@ -133,6 +134,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
     border-top: 1px solid rgba(39, 49, 69, 0.72);
 }
 .sidebar-footer form { margin: 0; }
+.brand, .sidebar-nav, .sidebar-footer { flex-shrink: 0; }
+.panel-version { display: flex; justify-content: space-between; gap: 8px; padding: 0 13px 3px; color: var(--text-2); font-size: 12px; }
+.panel-version span { color: var(--text); font-variant-numeric: tabular-nums; }
+.sidebar-action:disabled { opacity: .65; cursor: wait; }
+.panel-update-result { padding: 0 13px; color: var(--text-2); font-size: 12px; overflow-wrap: anywhere; }
+.panel-update-result p { margin: 0; }
+.panel-update-result a { color: #b3aaff; text-underline-offset: 3px; }
+.panel-update-result a i { margin-left: 5px; font-size: 10px; }
+.panel-update-result p:not(:empty), .panel-update-result a:not([hidden]) { margin-bottom: 6px; }
 
 .mobile-header {
     position: fixed;

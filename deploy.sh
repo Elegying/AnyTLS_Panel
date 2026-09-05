@@ -20,7 +20,7 @@ TRAFFIC_LOG_RETENTION_DAYS="${ANYTLS_TRAFFIC_LOG_RETENTION_DAYS:-90}"
 MAX_REQUEST_BYTES="${ANYTLS_MAX_REQUEST_BYTES:-4194304}"
 PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
-REPO_REF="${ANYTLS_REPO_REF:-v1.4.4}"
+REPO_REF="${ANYTLS_REPO_REF:-v1.4.5}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
@@ -1240,13 +1240,24 @@ prepare_release_source() {
     RELEASE_SOURCE="$STAGE_DIR/source"
     install -d -m 755 "$RELEASE_SOURCE"
 
-    if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/app.py" ]]; then
+    # Explicit repository options must win over a nearby (possibly old) app.py.
+    local using_local_source=0
+    if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/app.py" &&
+          -z "${ANYTLS_REPO_REF:-}${ANYTLS_REPO_URL:-}${ANYTLS_REPO_SUBDIR:-}" ]]; then
+        using_local_source=1
         log "staging local project files before touching the active release"
         copy_release_files "$SCRIPT_DIR" "$RELEASE_SOURCE"
     else
         log "fetching project from $REPO_URL ($REPO_REF) before stopping the service"
         local clone_dir="$STAGE_DIR/clone"
-        git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$clone_dir" -q
+        git clone --quiet --depth 1 --branch "$REPO_REF" -- "$REPO_URL" "$clone_dir"
+        if [[ "$REPO_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            local tag_commit
+            tag_commit="$(git -C "$clone_dir" rev-parse --verify "refs/tags/${REPO_REF}^{commit}")" || \
+                fail "requested release ref is not a tag: $REPO_REF"
+            [[ "$(git -C "$clone_dir" rev-parse HEAD)" == "$tag_commit" ]] || \
+                fail "checked-out source does not match release tag: $REPO_REF"
+        fi
         local source_dir="$clone_dir"
         if [[ -n "$REPO_SUBDIR" ]]; then
             source_dir="$clone_dir/$REPO_SUBDIR"
@@ -1258,12 +1269,20 @@ prepare_release_source() {
     for required_file in \
         app.py database_maintenance.py db_migrations.py input_limits.py \
         node_probe.py protocol_codecs.py security_utils.py sqlite_rate_limit.py \
-        traffic_token.py requirements.txt; do
+        traffic_token.py requirements.txt VERSION; do
         [[ -f "$RELEASE_SOURCE/$required_file" ]] || \
             fail "staged project is missing $required_file"
     done
     [[ -f "$RELEASE_SOURCE/templates/base.html" ]] || \
         fail "staged project templates are incomplete"
+    local source_version
+    source_version="$(< "$RELEASE_SOURCE/VERSION")"
+    [[ "$source_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || \
+        fail "staged project VERSION is invalid"
+    if [[ "$using_local_source" -eq 0 && "$REPO_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ &&
+          "$REPO_REF" != "v$source_version" ]]; then
+        fail "staged project VERSION does not match requested release: $REPO_REF"
+    fi
 }
 
 generate_api_token() {
@@ -1945,6 +1964,7 @@ print_summary() {
         "event=deployment_success repo_ref=$REPO_REF" || true
     echo
     log "deployment succeeded"
+    echo "  Version:    v$(< "$PANEL_DIR/VERSION")"
     echo "  Panel URL:  https://${PANEL_DOMAIN}"
     echo "  HTTPS:      certificate managed and renewed automatically by Caddy"
     if [[ "$FRESH_DB" -eq 1 ]]; then

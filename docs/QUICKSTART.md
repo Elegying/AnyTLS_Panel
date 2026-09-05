@@ -23,26 +23,25 @@ dig +short panel.example.com AAAA
 
 ## 2. 下载固定版本的部署脚本
 
-在面板服务器上执行：
+在面板服务器上以 `root` 执行下面整段命令。完整下载后先显示脚本；确认内容后退出 `less`，开始部署：
 
 ```bash
-curl -fL \
-  https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.4/deploy.sh \
-  -o /tmp/anytls-panel-deploy.sh
-```
-
-建议先查看脚本，再运行：
-
-```bash
-less /tmp/anytls-panel-deploy.sh
-bash /tmp/anytls-panel-deploy.sh
+(
+  set -e
+  installer_dir="$(mktemp -d)"
+  trap 'rm -rf -- "$installer_dir"' EXIT
+  curl -fL --connect-timeout 10 --max-time 120 \
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.5/deploy.sh -o "$installer_dir/deploy.sh"
+  less "$installer_dir/deploy.sh"
+  bash "$installer_dir/deploy.sh"
+)
 ```
 
 部署过程中需要输入：
 
-1. 管理员用户名；
-2. 管理员密码，并再次确认；
-3. 面板域名，只填写域名，不要带 `https://` 或路径。
+1. 面板域名，只填写域名，不要带 `https://` 或路径；
+2. 管理员用户名；
+3. 管理员密码，并再次确认。
 
 脚本会自动安装运行依赖和 Caddy，创建低权限服务账号，初始化数据库，配置 HTTPS 和健康检查。它会在切换线上服务前完成依赖与数据库副本验证。
 

@@ -9,6 +9,7 @@ database_maintenance.py
 input_limits.py
 import_customer_services.py
 node_probe.py
+panel_updates.py
 deploy.sh
 docs/API.md
 docs/ARCHITECTURE.md

@@ -4056,7 +4056,7 @@ proxies:
     def test_deploy_script_supports_interactive_credentials_and_automatic_https(self):
         content = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
 
-        self.assertIn("git clone --depth 1 --branch", content)
+        self.assertIn("git clone --quiet --depth 1 --branch", content)
         self.assertIn("https://github.com/Elegying/AnyTLS_Panel.git", content)
         self.assertIn("ANYTLS_REPO_SUBDIR", content)
         self.assertIn('REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"', content)
@@ -4248,6 +4248,7 @@ proxies:
             (panel_dir / "templates" / "base.html").write_text(
                 "proof-template\n", encoding="utf-8"
             )
+            (panel_dir / "VERSION").write_text(RELEASE_VERSION + "\n", encoding="utf-8")
             (panel_dir / "static").mkdir()
             (panel_dir / "static" / "favicon.svg").write_text(
                 "proof-icon\n", encoding="utf-8"
@@ -4276,6 +4277,8 @@ proxies:
                 "release-files.txt\n",
                 encoding="utf-8",
             )
+            with (panel_dir / "release-files.txt").open("a", encoding="utf-8") as manifest:
+                manifest.write("VERSION\n")
             (panel_dir / ".secret_key").write_text(
                 "must-not-stage\n", encoding="utf-8"
             )

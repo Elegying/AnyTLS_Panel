@@ -62,6 +62,10 @@ from security_utils import hash_password, verify_password
 from sqlite_rate_limit import enforce_rate_limit, rate_limit
 from traffic_token import make_account_traffic_token
 from node_probe import check_node_connect
+from panel_updates import CURRENT_VERSION, ReleaseChecker
+
+
+_release_checker = ReleaseChecker()
 
 
 def _env_flag(name, default=False):
@@ -1174,6 +1178,7 @@ def single_bulk_operation(f):
 @app.context_processor
 def inject_utils():
     return {
+        'panel_version': CURRENT_VERSION,
         'format_bytes': format_bytes,
         'calc_traffic_percent': calc_traffic_percent,
         'days_until': days_until,
@@ -1183,6 +1188,12 @@ def inject_utils():
     }
 
 # ─── 认证 ──────────────────────────────────────────────
+
+@app.route('/api/updates/check', methods=['POST'])
+@login_required
+def check_panel_update():
+    result = _release_checker.check()
+    return jsonify(result), 503 if result['status'] == 'error' else 200
 
 @app.route('/login', methods=['GET', 'POST'])
 @rate_limit(
