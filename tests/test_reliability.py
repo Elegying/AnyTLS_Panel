@@ -48,18 +48,19 @@ class DeploymentReliabilityTests(unittest.TestCase):
     def test_deploy_and_uninstall_reject_concurrent_operations(self):
         result = run_shell('deploy.sh', r'''
 acquire_operation_lock
-set +e
-bash -c 'source "$1"; acquire_operation_lock' _ "$SCRIPT_DIR/deploy.sh"
-result=$?
-[[ "$result" -ne 0 ]] || exit 80
-bash -c 'source "$1"
+if bash -c 'source "$1"; acquire_operation_lock' _ "$SCRIPT_DIR/deploy.sh"; then
+    exit 80
+fi
+if bash -c 'source "$1"
 validate_panel_dir() { :; }
 validate_install_marker() { :; }
 validate_service_target() { :; }
 systemctl() { exit 80; }
-main --yes' _ "$SCRIPT_DIR/uninstall.sh"
+main --yes' _ "$SCRIPT_DIR/uninstall.sh"; then
+    exit 80
+fi
 ''')
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr.count('another panel deployment'), 2, result.stderr)
 
     @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'requires isolated Linux root')
