@@ -148,6 +148,9 @@ fi
 
 validate_install_marker
 validate_service_target
+command -v flock >/dev/null 2>&1 || fail "flock is required (install util-linux)"
+exec 8>/run/anytls-panel-operation.lock
+flock -n 8 || fail "another panel deployment, rollback or uninstall is running"
 
 if [[ -L "$CADDY_SITE_FILE" ]]; then
   fail "refusing to remove a symlinked Caddy site: $CADDY_SITE_FILE"

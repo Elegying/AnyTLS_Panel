@@ -222,10 +222,10 @@ PY
     BACKUP_PARTIAL=""
     (cd "$BACKUP_ROOT" && sha256sum "$backup_name" > "${backup_name}.sha256")
     chmod 600 "${archive}.sha256"
+    verify_backup "$backup_name"
     printf '%s\n' "$backup_name" > "$BACKUP_ROOT/latest"
     chmod 600 "$BACKUP_ROOT/latest"
     rotate_backups
-    verify_backup "$backup_name"
     logger -p daemon.notice -t "${SERVICE_NAME}-backup" \
         "event=backup_success archive=$backup_name" || true
     log "created $archive"

@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_PATH = REPO_ROOT / "app.py"
+RELEASE_VERSION = (REPO_ROOT / "VERSION").read_text().strip()
 
 
 def load_app(database_path):
@@ -5284,7 +5285,7 @@ proxies:
         self.assertIn("python3.12 -m venv .venv", operations)
         self.assertIn("brew install python@3.12 shellcheck actionlint", operations)
         self.assertIn("--require-hashes -r requirements-dev.txt", operations)
-        self.assertIn("git clone --depth 1 --branch v1.4.3", operations)
+        self.assertIn(f"git clone --depth 1 --branch v{RELEASE_VERSION}", operations)
         self.assertIn("flake8==7.3.0", dev_input)
         self.assertIn("bandit==1.9.4", dev_input)
         self.assertIn("pip-audit==2.10.1", dev_input)
@@ -5384,8 +5385,8 @@ proxies:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v1.4.3}"', deploy)
-        self.assertIn("AnyTLS_Panel/v1.4.3/deploy.sh", readme)
+        self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v' + RELEASE_VERSION + '}"', deploy)
+        self.assertIn(f"AnyTLS_Panel/v{RELEASE_VERSION}/deploy.sh", readme)
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)

@@ -62,12 +62,16 @@ jobs:
           security_utils.py sqlite_rate_limit.py traffic_token.py
 
       - name: Check shell syntax
-        run: bash -n backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh
+        run: |
+          for script in backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh \
+            tests/ubuntu24_integration.sh tests/ubuntu24_e2e.sh; do
+            bash -n "$script"
+          done
 
       - name: Lint shell scripts
         run: >-
           shellcheck backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh
-          tests/ubuntu24_integration.sh
+          tests/ubuntu24_integration.sh tests/ubuntu24_e2e.sh
 
       - name: Audit dependencies
         run: python -m pip_audit -r requirements.txt
@@ -86,3 +90,6 @@ jobs:
 
       - name: Verify Ubuntu deployment runtime
         run: sudo --preserve-env=PATH bash tests/ubuntu24_integration.sh
+
+      - name: Exercise deployment, failed update and rollback
+        run: sudo --preserve-env=PATH env ANYTLS_RUN_DEPLOY_E2E=1 bash tests/ubuntu24_e2e.sh

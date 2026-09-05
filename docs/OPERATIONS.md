@@ -16,18 +16,22 @@
 
 Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希的 `requirements.txt`。部署在停服前下载、校验并试装全部依赖，切换阶段不再访问 PyPI。
 
+更新会先完整复制旧代码和 venv，再替换安装目录；请预留旧代码、venv、数据库快照和新版本暂存所需磁盘空间。HUP、INT、TERM 会触发恢复；断电、主机崩溃或 SIGKILL 无法由 Shell 捕获，应按备份恢复流程处理。
+
+部署、延迟回滚和卸载共用主机操作锁；已有操作运行时会明确退出，请等其完成后重试。自定义密钥、流量 Token 和初始密码必须使用不同文件，避免相互覆盖。
+
 ## 部署
 
 在线部署：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.3/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.4/deploy.sh)
 ```
 
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.4.3 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.4 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -35,8 +39,8 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.4.3" \
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.3/deploy.sh)
+ANYTLS_REPO_REF="v1.4.4" \
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.4/deploy.sh)
 ```
 
 首次交互部署会要求输入管理员用户名、两次输入密码以及面板域名。密码输入不会回显。自定义端口、服务名和目录时仍会显示这些提示：
@@ -68,7 +72,7 @@ bash deploy.sh
 部署脚本自动完成以下工作：
 
 1. 校验输入的是公网 DNS 域名并确认其当前可解析。
-2. 从 Caddy 官方 Cloudsmith 稳定仓库安装并验证签名和最低版本，将 Gunicorn 保持在 `127.0.0.1:<面板端口>`。
+2. 从 Caddy 官方 Cloudsmith 稳定仓库安装并验证签名和最低版本，将 Gunicorn 保持在回环地址；默认 `127.0.0.1:<面板端口>`，也支持 `ANYTLS_BIND_HOST=::1`。
 3. 写入 `/etc/caddy/anytls-panel.d/<服务名>.caddy`，并安全地导入现有 Caddyfile。
 4. 使用 Caddy 默认的公开 ACME 签发方签发证书，自动将 HTTP 跳转至 HTTPS。
 5. 等待 `https://<域名>/login` 通过真实证书校验后才报告部署成功。
@@ -226,7 +230,7 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
 重新执行部署脚本即可更新应用文件和依赖，并保留现有数据库。脚本先完成源码暂存、带哈希依赖下载和现有数据库副本迁移测试，再停止服务进行短切换；切换后任一步失败都会自动恢复旧代码、数据库、systemd 和 Caddy 配置。成功更新还会在 `/var/backups/<服务名>/` 保留最近两份带 SHA-256 校验的上一版本快照：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.3/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.4/deploy.sh)
 ```
 
 更新时会再次询问面板域名，已有数据库不会再次询问或覆盖管理员凭据。自动化更新可设置 `ANYTLS_PANEL_DOMAIN`。如果使用自定义目录、服务名或 `/etc/anytls-panel/` 下的密钥文件，更新时需要继续传入相同环境变量。

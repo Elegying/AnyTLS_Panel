@@ -27,7 +27,7 @@ dig +short panel.example.com AAAA
 
 ```bash
 curl -fL \
-  https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.3/deploy.sh \
+  https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.4/deploy.sh \
   -o /tmp/anytls-panel-deploy.sh
 ```
 
