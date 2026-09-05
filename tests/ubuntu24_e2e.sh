@@ -104,7 +104,10 @@ import unittest
 for key in list(os.environ):
     if key.startswith('ANYTLS_'):
         del os.environ[key]
-suite = unittest.defaultTestLoader.discover(sys.argv[1], pattern='test_reliability.py')
+suite = unittest.TestSuite(
+    unittest.defaultTestLoader.discover(sys.argv[1], pattern=pattern)
+    for pattern in ('test_reliability.py', 'test_updates.py')
+)
 raise SystemExit(not unittest.TextTestRunner(verbosity=1).run(suite).wasSuccessful())
 PY
 runuser -u "$ANYTLS_SERVICE_USER" -- "$ANYTLS_PANEL_DIR/venv/bin/python" - \

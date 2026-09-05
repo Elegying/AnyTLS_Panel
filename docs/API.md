@@ -12,6 +12,10 @@ AnyTLS Panel 提供三类接口，鉴权方式不同。接入前先确认使用�
 
 本文中的面板地址统一写作 `https://panel.example.com`，请替换为真实域名。
 
+## 检查面板更新
+
+`POST /api/updates/check` 需要管理员 Session 和 `X-CSRFToken`，无请求正文。返回 `current_version`、`status`、中文 `message`；查询成功还包含 `latest_version` 和官方 `release_url`。状态为 `available`、`current`、`ahead`、`unknown` 或 `error`，上游查询失败时返回 HTTP `503`，不会把失败当作“已是最新”。此接口仅检查版本；安装更新由服务器部署脚本执行。成功结果缓存 5 分钟，失败缓存 1 分钟。
+
 ## Bearer Token
 
 部署会在面板服务器生成主 Token：

@@ -1,5 +1,5 @@
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
-PYTHON_FILES := app.py database_maintenance.py db_migrations.py import_customer_services.py input_limits.py node_probe.py protocol_codecs.py security_utils.py sqlite_rate_limit.py traffic_token.py
+PYTHON_FILES := app.py database_maintenance.py db_migrations.py import_customer_services.py input_limits.py node_probe.py panel_updates.py protocol_codecs.py security_utils.py sqlite_rate_limit.py traffic_token.py
 SHELL_FILES := backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_integration.sh tests/ubuntu24_e2e.sh
 
 .PHONY: help install-dev test coverage lint shellcheck security audit check
@@ -24,7 +24,7 @@ test:
 coverage:
 	$(PYTHON) -m coverage run --branch -m unittest discover -s tests -q
 	$(PYTHON) -m coverage report \
-		--include='app.py,database_maintenance.py,db_migrations.py,input_limits.py,node_probe.py,protocol_codecs.py,security_utils.py,sqlite_rate_limit.py,traffic_token.py' \
+		--include='app.py,database_maintenance.py,db_migrations.py,input_limits.py,node_probe.py,panel_updates.py,protocol_codecs.py,security_utils.py,sqlite_rate_limit.py,traffic_token.py' \
 		--fail-under=80
 
 lint:

@@ -46,19 +46,19 @@ jobs:
         run: |
           python -m coverage run --branch -m unittest discover -s tests -q
           python -m coverage report \
-            --include='app.py,database_maintenance.py,db_migrations.py,input_limits.py,node_probe.py,protocol_codecs.py,security_utils.py,sqlite_rate_limit.py,traffic_token.py' \
+            --include='app.py,database_maintenance.py,db_migrations.py,input_limits.py,node_probe.py,panel_updates.py,protocol_codecs.py,security_utils.py,sqlite_rate_limit.py,traffic_token.py' \
             --fail-under=80
 
       - name: Compile app
         run: >-
           python -m py_compile app.py database_maintenance.py db_migrations.py
-          input_limits.py node_probe.py protocol_codecs.py security_utils.py
+          input_limits.py node_probe.py panel_updates.py protocol_codecs.py security_utils.py
           sqlite_rate_limit.py traffic_token.py
 
       - name: Scan Python security issues
         run: >-
           python -m bandit -q -ll -r app.py database_maintenance.py
-          db_migrations.py input_limits.py node_probe.py protocol_codecs.py
+          db_migrations.py input_limits.py node_probe.py panel_updates.py protocol_codecs.py
           security_utils.py sqlite_rate_limit.py traffic_token.py
 
       - name: Check shell syntax

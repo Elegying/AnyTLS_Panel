@@ -27,6 +27,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$RELEASE_TAG" == "v$(cat VERSION)" ]]
           git fetch origin main --depth=1
           tag_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
           [[ "$(git rev-parse origin/main)" == "$tag_commit" ]]

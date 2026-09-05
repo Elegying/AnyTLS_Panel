@@ -47,6 +47,15 @@
             </a>
         </nav>
         <div class="sidebar-footer">
+            <div class="panel-version">当前版本 <span>{{ 'v' ~ panel_version if panel_version else '未知版本' }}</span></div>
+            <button class="sidebar-action" type="button" data-action="check-update" aria-describedby="updateStatus">
+                <i class="bi bi-arrow-repeat" aria-hidden="true"></i><span>检查更新</span>
+            </button>
+            <div class="panel-update-result">
+                <p id="updateStatus" role="status" aria-live="polite"></p>
+                <a id="updateReleaseLink" target="_blank" rel="noopener noreferrer" hidden>查看更新说明<i class="bi bi-box-arrow-up-right" aria-hidden="true"></i></a>
+                <p id="updateInstructions" hidden>更新请按发布说明在服务器执行部署。</p>
+            </div>
             <button class="sidebar-action" type="button" data-action="open-modal" data-modal="pwModal">
                 <i class="bi bi-key" aria-hidden="true"></i><span>修改密码</span>
             </button>
@@ -112,6 +121,45 @@
 
         function csrfHeaders(extra) {
             return Object.assign({'X-CSRFToken': CSRF_TOKEN}, extra || {});
+        }
+
+        async function checkPanelUpdate(button) {
+            if (button.disabled) return;
+            const status = document.getElementById('updateStatus');
+            const link = document.getElementById('updateReleaseLink');
+            const instructions = document.getElementById('updateInstructions');
+            const label = button.querySelector('span');
+            const controller = new AbortController();
+            const timeout = window.setTimeout(() => controller.abort(), 15000);
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+            label.textContent = '正在检查…';
+            status.textContent = '';
+            link.hidden = true;
+            instructions.hidden = true;
+            try {
+                const response = await fetch({{ url_for('check_panel_update') | tojson }}, {
+                    method: 'POST', headers: csrfHeaders(), signal: controller.signal
+                });
+                if (response.redirected || response.status === 400) {
+                    status.textContent = '登录或页面已过期，请刷新页面后重试。';
+                    return;
+                }
+                const result = await response.json();
+                status.textContent = result.message || '检查失败，请稍后再试。';
+                if (response.ok && result.release_url) {
+                    link.href = result.release_url;
+                    link.hidden = false;
+                    instructions.hidden = result.status !== 'available';
+                }
+            } catch (_error) {
+                status.textContent = '检查失败或请求超时，请稍后重试。';
+            } finally {
+                window.clearTimeout(timeout);
+                button.disabled = false;
+                button.removeAttribute('aria-busy');
+                label.textContent = '检查更新';
+            }
         }
 
         function toggleSidebar() {
@@ -199,6 +247,7 @@
             else if (action === 'navigate') location.href = target.dataset.href;
             else if (action === 'sync-all') window.syncAll(target);
             else if (action === 'check-all') window.checkAll();
+            else if (action === 'check-update') checkPanelUpdate(target);
             else if (action === 'open-share') window.openShareModal();
             else if (action === 'copy-value') copyText(target.dataset.copyValue);
             else if (action === 'copy-input') copyText(document.getElementById(target.dataset.inputId).value);
