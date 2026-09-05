@@ -1102,6 +1102,12 @@ rollback_deployment() {
         "${SERVICE_NAME}-backup.timer" \
         "$OLD_BACKUP_TIMER_UNIT_PRESENT" "$OLD_BACKUP_TIMER_ACTIVE" \
         "backup timer"
+    if [[ "$CONFIG_BACKED_UP" -eq 1 && "$OLD_PANEL_ACTIVE" -eq 1 ]]; then
+        local restored_address
+        restored_address="$(sed -n 's/.* --bind \([^ ]*\).*/\1/p' \
+            "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service")"
+        rollback_step "verify restored panel readiness" wait_for_backend "$restored_address"
+    fi
     if [[ "$ROLLBACK_FAILED" -ne 0 ]]; then
         printf '[anytls-panel] ERROR: rollback incomplete; manual recovery required\n' >&2
         return 1
@@ -1561,13 +1567,12 @@ write_keepalive_config() {
 #!/usr/bin/env bash
 set -u
 
-exec 9>/run/lock/${SERVICE_NAME}-healthcheck.lock
-flock -n 9 || exit 0
-
 STATE_DIR=/run/${SERVICE_NAME}-healthcheck
 FAILURE_THRESHOLD=3
 RECOVERY_COOLDOWN_SECONDS=300
 install -d -o root -g root -m 700 "\$STATE_DIR"
+exec 9>"\$STATE_DIR/healthcheck.lock"
+flock -n 9 || exit 0
 
 record_probe_failure() {
     local component="\$1"
@@ -1749,7 +1754,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
-ReadWritePaths=${DATA_DIR} ${DAILY_BACKUP_ROOT} /run/lock
+ReadWritePaths=${DATA_DIR} ${DAILY_BACKUP_ROOT}
 TimeoutStartSec=10min
 Nice=10
 IOSchedulingClass=best-effort
@@ -1775,15 +1780,29 @@ EOF
     rm -f -- "$service_tmp" "$timer_tmp"
 }
 
+wait_for_backend() {
+    local address="$1"
+    [[ "$address" =~ ^(127\.0\.0\.1|\[::1\]):[0-9]+$ ]] || return 1
+    local _
+    for _ in {1..15}; do
+        if curl --fail --silent --output /dev/null --max-time 2 \
+            "http://${address}/readyz"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 start_service() {
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
     systemctl restart "$SERVICE_NAME"
-    sleep 2
-    systemctl is-active --quiet "$SERVICE_NAME" || {
+    if ! wait_for_backend "$(backend_address)" || \
+       ! systemctl is-active --quiet "$SERVICE_NAME"; then
         journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
         fail "service failed to start"
-    }
+    fi
 }
 
 verify_domain_resolution() {

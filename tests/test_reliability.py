@@ -32,6 +32,19 @@ def run_shell(script, body, *, source_arguments=(), **environment):
 
 
 class DeploymentReliabilityTests(unittest.TestCase):
+    def test_backend_readiness_waits_for_startup_and_rejects_persistent_failure(self):
+        result = run_shell('deploy.sh', r'''
+attempts=0
+curl() { ((attempts+=1)); [[ "$attempts" -eq 3 ]]; }
+sleep() { :; }
+wait_for_backend '[::1]:18866'
+[[ "$attempts" -eq 3 ]]
+curl() { return 7; }
+if wait_for_backend '127.0.0.1:18866'; then exit 80; fi
+if wait_for_backend 'example.com:443'; then exit 81; fi
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_secret_files_cannot_overlap(self):
         for first, second in (
             ('ANYTLS_SECRET_KEY_FILE', 'ANYTLS_TRAFFIC_API_TOKEN_FILE'),
