@@ -9,7 +9,7 @@
 
 ![AnyTLS Panel 仪表盘](docs/assets/dashboard.jpg)
 
-> 当前正式版本：`v1.4.6`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
+> 当前正式版本：`v1.4.7`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
 
 ## 你可以用它做什么
 
@@ -22,7 +22,7 @@
 | 一键同步 | 单独同步一个账号，或并发更新全部活跃账号；失败不会覆盖上一次可用节点 |
 | 节点健康检测 | 检测 TCP/TLS 连通性并记录耗时，同时限制探测目标；结果不代表代理鉴权或 UDP/QUIC 可用性 |
 | 流量统计 | 显示上传、下载、累计使用量、配额占比和到期状态，可接入节点侧采集脚本 |
-| 安全分享 | 为账号生成独立订阅链接，停用账号后链接立即失效，Token 可随时轮换 |
+| 安全分享 | 分享订阅不附带流量、配额或到期信息；停用账号后链接立即失效，Token 可随时轮换 |
 | 生产级运维 | 自动配置 Caddy HTTPS、systemd 沙箱、健康检查、每日数据备份、数据库迁移和失败回滚 |
 | 版本检查 | 左下角显示当前版本，点击检查正式更新并查看发布说明 |
 
@@ -50,7 +50,7 @@
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.6/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.7/deploy.sh -o "$installer_dir/deploy.sh"
   less "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
@@ -61,7 +61,7 @@
 如果你已经审查过脚本，也可以使用一行命令：
 
 ```bash
-(set -e; installer_dir="$(mktemp -d)"; trap 'rm -rf -- "$installer_dir"' EXIT; curl -fL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.6/deploy.sh -o "$installer_dir/deploy.sh"; bash "$installer_dir/deploy.sh")
+(set -e; installer_dir="$(mktemp -d)"; trap 'rm -rf -- "$installer_dir"' EXIT; curl -fL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.7/deploy.sh -o "$installer_dir/deploy.sh"; bash "$installer_dir/deploy.sh")
 ```
 
 下载失败会停止执行并删除临时文件。更新操作见[运维手册](docs/OPERATIONS.md#更新)。

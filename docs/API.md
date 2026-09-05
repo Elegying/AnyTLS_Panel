@@ -169,6 +169,8 @@ curl --fail-with-body \
 
 `GET /sub/<token>` 不需要管理员 Session。普通客户端得到 Base64 内容；User-Agent 包含 `Clash` 时得到 Clash YAML。客户端中的订阅名称统一显示为 `SSRVPN.VIP`，不会暴露面板账号名。账号被停用、删除或 Token 轮换后，旧链接返回 `404`。
 
+分享响应不再输出 `Subscription-Userinfo`，不会附带上传量、下载量、总配额或到期日期。该规则同时适用于账号分享和用户独立订阅、Base64 与 Clash YAML。后台仍保存这些数据，用户服务的开始日、到期日与暂停/停用检查继续生效。
+
 公开订阅 URL 本身就是凭据：
 
 - 只通过 HTTPS 传输；

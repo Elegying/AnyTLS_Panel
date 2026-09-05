@@ -2602,26 +2602,6 @@ def _row_get(row, key, default=None):
         return default
 
 
-def _account_traffic_info(account):
-    info = {}
-    used_bytes = _row_get(account, 'traffic_used_bytes', 0) or 0
-    upload_bytes = _row_get(account, 'traffic_upload_bytes', 0) or 0
-    download_bytes = _row_get(account, 'traffic_download_bytes', 0) or 0
-    total_gb = _row_get(account, 'traffic_limit_gb', 0) or 0
-    expire_date = _row_get(account, 'expire_date', '') or ''
-    if upload_bytes:
-        info['upload_bytes'] = int(upload_bytes)
-    if download_bytes:
-        info['download_bytes'] = int(download_bytes)
-    elif used_bytes and not upload_bytes:
-        info['download_bytes'] = int(used_bytes)
-    if total_gb:
-        info['total_gb'] = float(total_gb)
-    if expire_date:
-        info['expire_date'] = expire_date
-    return info
-
-
 def _nodes_from_db_rows(db_nodes):
     return [
         {'raw_uri': n['raw_uri'], 'name': n['name']}
@@ -2643,7 +2623,7 @@ def public_subscribe(token):
     apply_due_traffic_resets(db, today=today)
     today_text = today.isoformat()
     service = db.execute(
-        '''SELECT a.*, cs.id AS service_id, cs.expires_on AS service_expires_on
+        '''SELECT a.*
            FROM customer_services cs JOIN accounts a ON a.id=cs.account_id
            WHERE cs.sub_token=? AND cs.status='active' AND a.status='active'
              AND cs.started_on<=? AND cs.expires_on>=?''',
@@ -2657,46 +2637,17 @@ def public_subscribe(token):
 
     db_nodes = db.execute('SELECT * FROM nodes WHERE account_id=? ORDER BY id', (account['id'],)).fetchall()
     nodes = _nodes_from_db_rows(db_nodes)
-    traffic_info = _account_traffic_info(account)
-    if service:
-        traffic_info['expire_date'] = service['service_expires_on']
     if not nodes:
         return 'Subscription data is not ready', 503, {
             'Retry-After': '60',
             'Cache-Control': 'no-store',
         }
 
-    # 所有客户端统一显示品牌名，避免把面板账号名（例如邮箱）暴露为订阅名称。
+    # 分享订阅只输出节点及品牌信息，不向客户端公开流量、配额或到期日期。
     resp_headers = {
         'profile-title': '"store-name=SSRVPN.VIP"',
         'Content-Disposition': 'attachment; filename="SSRVPN.VIP"',
     }
-    if traffic_info:
-        parts = []
-        if traffic_info.get('upload_bytes'):
-            parts.append(f"upload={traffic_info['upload_bytes']}")
-        if traffic_info.get('download_bytes'):
-            parts.append(f"download={traffic_info['download_bytes']}")
-        if traffic_info.get('total_gb'):
-            parts.append(f"total={int(traffic_info['total_gb'] * 1024**3)}")
-        if traffic_info.get('expire_date'):
-            try:
-                expires_on = parse_iso_date(
-                    traffic_info['expire_date'], '到期日期'
-                )
-                expires_at = datetime(
-                    expires_on.year,
-                    expires_on.month,
-                    expires_on.day,
-                    tzinfo=_BUSINESS_TIMEZONE,
-                ) + timedelta(days=1)
-                ts = int(expires_at.timestamp())
-                parts.append(f"expire={ts}")
-            except Exception:
-                pass
-        if parts:
-            resp_headers['Subscription-Userinfo'] = '; '.join(parts)
-
     ua = request.headers.get('User-Agent', '')
 
     rename_rules = _get_rename_rules()

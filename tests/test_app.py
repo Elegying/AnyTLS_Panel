@@ -2528,7 +2528,7 @@ proxies:
                 self.assertIn("当前上游有效期不能完整覆盖", detail.get_data(as_text=True))
                 public = client.get(f"/sub/{original_token}")
                 self.assertEqual(public.status_code, 200)
-                self.assertIn("expire=", public.headers["Subscription-Userinfo"])
+                self.assertNotIn("Subscription-Userinfo", public.headers)
 
                 self.assertEqual(
                     client.post(f"/services/{service_id}/remind").status_code, 302
@@ -3478,7 +3478,7 @@ proxies:
         self.assertEqual(response.get_json()["results"][0]["status"], "error")
         self.assertEqual(rows, [("existing",)])
 
-    def test_public_subscription_uses_persisted_traffic_metadata(self):
+    def test_public_subscriptions_hide_metadata_and_preserve_admin_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
             app = load_app(database)
@@ -3506,20 +3506,40 @@ proxies:
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (account_id, "demo", "example.com", 443, "pw", "anytls://pw@example.com:443#demo"),
                 )
+                db.execute(
+                    "INSERT INTO customer_services (account_id,wechat_id,started_on,expires_on,sub_token) "
+                    "VALUES (?, 'customer', '2030-01-01', '2030-01-02', 'service-token')",
+                    (account_id,),
+                )
                 db.commit()
 
-            with app.app.test_client() as client:
-                response = client.get("/sub/token")
+            with mock.patch.object(app, "_business_today", return_value=app.datetime(2030, 1, 2).date()):
+                with app.app.test_client() as client:
+                    for token in ("token", "service-token"):
+                        for agent in ("Shadowrocket", "Clash", "clash-verge", "SSRVPN", "generic"):
+                            with self.subTest(token=token, agent=agent):
+                                response = client.get(f"/sub/{token}", headers={"User-Agent": agent})
+                                self.assertEqual(response.status_code, 200)
+                                self.assertNotIn("Subscription-Userinfo", response.headers)
+                                self.assertEqual(response.headers['profile-title'], '"store-name=SSRVPN.VIP"')
+                                if 'clash' in agent.lower():
+                                    import yaml
+                                    payload = yaml.safe_load(response.data)
+                                    self.assertEqual(set(payload), {'proxies'})
+                                    self.assertEqual(len(payload['proxies']), 1)
+                                else:
+                                    payload = base64.b64decode(response.data, validate=True).decode()
+                                    self.assertEqual(payload, 'anytls://pw@example.com:443#demo')
 
-        userinfo = response.headers["Subscription-Userinfo"]
-        self.assertIn("upload=100", userinfo)
-        self.assertIn("download=200", userinfo)
-        self.assertIn("total=10737418240", userinfo)
-        self.assertIn("expire=", userinfo)
+                with app.app.app_context():
+                    row = app.get_db().execute(
+                        "SELECT traffic_used_bytes,traffic_upload_bytes,traffic_download_bytes,"
+                        "traffic_limit_gb,expire_date FROM accounts WHERE id=?", (account_id,)
+                    ).fetchone()
+                    self.assertEqual(tuple(row), (300, 100, 200, 10, '2030-01-02'))
 
-    def test_public_service_dates_use_shanghai_business_day(self):
-        from datetime import date, datetime
-        from zoneinfo import ZoneInfo
+    def test_public_service_dates_are_enforced_without_metadata(self):
+        from datetime import date
 
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
@@ -3551,19 +3571,12 @@ proxies:
                 )
                 db.commit()
 
-            with mock.patch.object(
-                app, "_business_today", return_value=date(2040, 1, 2)
-            ):
-                with app.app.test_client() as client:
-                    response = client.get("/sub/service-token")
-
-        self.assertEqual(response.status_code, 200)
-        expected_expiry = int(
-            datetime(2040, 1, 3, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
-        )
-        self.assertIn(
-            f"expire={expected_expiry}", response.headers["Subscription-Userinfo"]
-        )
+            for today, expected_status in ((date(2040, 1, 1), 404), (date(2040, 1, 2), 200), (date(2040, 1, 3), 404)):
+                with self.subTest(today=today), mock.patch.object(app, "_business_today", return_value=today):
+                    with app.app.test_client() as client:
+                        response = client.get("/sub/service-token")
+                    self.assertEqual(response.status_code, expected_status)
+                    self.assertNotIn("Subscription-Userinfo", response.headers)
 
     def test_rename_rule_changes_vmess_display_name_only(self):
         vmess = {
