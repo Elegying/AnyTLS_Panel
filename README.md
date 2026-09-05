@@ -9,7 +9,7 @@
 
 ![AnyTLS Panel 仪表盘](docs/assets/dashboard.jpg)
 
-> 当前正式版本：`v1.4.5`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
+> 当前正式版本：`v1.4.6`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
 
 ## 你可以用它做什么
 
@@ -50,7 +50,7 @@
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.5/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.6/deploy.sh -o "$installer_dir/deploy.sh"
   less "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
@@ -61,7 +61,7 @@
 如果你已经审查过脚本，也可以使用一行命令：
 
 ```bash
-(set -e; installer_dir="$(mktemp -d)"; trap 'rm -rf -- "$installer_dir"' EXIT; curl -fL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.5/deploy.sh -o "$installer_dir/deploy.sh"; bash "$installer_dir/deploy.sh")
+(set -e; installer_dir="$(mktemp -d)"; trap 'rm -rf -- "$installer_dir"' EXIT; curl -fL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.6/deploy.sh -o "$installer_dir/deploy.sh"; bash "$installer_dir/deploy.sh")
 ```
 
 下载失败会停止执行并删除临时文件。更新操作见[运维手册](docs/OPERATIONS.md#更新)。
@@ -84,7 +84,7 @@ Caddy 会自动申请受信任的 HTTPS 证书、将 HTTP 跳转到 HTTPS，并�
 4. 在「监控」中检测节点，在「重命名规则」中统一整理节点名称；
 5. 在「用户服务」里登记每位用户的开始日、到期日和所用专线账号，再把该用户的独立订阅链接发给对方。
 
-用户服务即使迁移到另一条专线，订阅链接也不会改变；详情页可暂停、恢复或停用服务。暂停、到期或重新生成链接后，旧链接无法再次下载订阅；已导入客户端的节点凭据需在上游撤销，才能停止连接。仪表盘会集中显示未来 30 天需要续费提醒的用户。
+用户服务即使迁移到另一条专线，订阅链接也不会改变；详情页可暂停、恢复或停用服务。暂停、到期或重新生成链接后，旧链接无法再次下载订阅；已导入客户端的节点凭据需在上游撤销，才能停止连接。首页「需要处理」集中显示用户续费、账号到期、流量告警和节点异常。到期提醒包含未来 30 天及已过期项目，分组折叠、列表内滚动，标记已提醒后留在首页。
 
 更细的图文式步骤见[快速开始](docs/QUICKSTART.md)。
 
