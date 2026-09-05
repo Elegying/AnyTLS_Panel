@@ -100,7 +100,10 @@ class ReleaseCheckTests(unittest.TestCase):
                 connection.close.assert_called_once()
 
     def test_network_errors_are_safe_and_expire_so_retry_can_recover(self):
-        for failure in (TimeoutError('secret detail'), http.client.HTTPException('secret detail')):
+        for failure in (
+            TimeoutError('secret detail'), http.client.HTTPException('secret detail'),
+            RuntimeError('secret detail'),
+        ):
             checker = panel_updates.ReleaseChecker('1.4.0')
             with mock.patch.object(panel_updates, '_fetch_latest_release', side_effect=failure) as fetch, \
                     mock.patch.object(panel_updates.time, 'monotonic', return_value=100):

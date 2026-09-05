@@ -13,6 +13,10 @@ _VERSION_PATTERN = re.compile(r'(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-
 _MAX_RESPONSE_BYTES = 256 * 1024
 
 
+class _RateLimitError(Exception):
+    """GitHub asked this installation to wait before checking again."""
+
+
 def parse_version(value):
     if not isinstance(value, str) or not _VERSION_PATTERN.fullmatch(value):
         raise ValueError('invalid release version')
@@ -43,7 +47,7 @@ def _fetch_latest_release():
         })
         response = connection.getresponse()
         if response.status in (403, 429):
-            raise RuntimeError('GitHub 暂时限制了请求，请稍后再试。')
+            raise _RateLimitError
         if response.status != 200:
             raise RuntimeError('暂时无法获取正式版本，请稍后再试。')
         payload = response.read(_MAX_RESPONSE_BYTES + 1)
@@ -92,8 +96,10 @@ class ReleaseChecker:
                     result.update(status='current', message='已是最新正式版')
                 else:
                     result.update(status='ahead', message=f'当前版本高于最新正式版 v{latest}')
-            except RuntimeError as exc:
-                result['message'] = str(exc)
+            except _RateLimitError:
+                result['message'] = 'GitHub 暂时限制了请求，请稍后再试。'
+            except RuntimeError:
+                result['message'] = '暂时无法获取正式版本，请稍后再试。'
             except (OSError, http.client.HTTPException):
                 result['message'] = '无法连接 GitHub，请检查服务器网络后重试。'
             except (ValueError, RecursionError):
