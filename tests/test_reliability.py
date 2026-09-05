@@ -359,6 +359,17 @@ class AdversarialStateTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM traffic_logs').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT last_counter_bytes FROM traffic_collectors')
                              .fetchone()[0], 0)
+        with mock.patch.object(self.app, '_increment_account_traffic',
+                               side_effect=ValueError('private internal context')):
+            with self.app.app.test_client() as client:
+                for endpoint, fields in (
+                    ('report', {'bytes_used': 1}),
+                    ('counter', {'counter_bytes': 1, 'collector_id': 'overflow-collector'}),
+                ):
+                    response = client.post(f'/api/traffic/{endpoint}', headers=self.headers,
+                                           json={'account_id': self.account_id, **fields})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertNotIn(b'private internal context', response.data)
 
     def test_sync_cannot_overwrite_changes_made_while_fetching(self):
         for endpoint in (f'/accounts/{self.account_id}/sync', '/api/sync-all'):

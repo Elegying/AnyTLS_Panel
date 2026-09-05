@@ -2122,9 +2122,9 @@ def api_report_traffic():
 
         try:
             account = _increment_account_traffic(db, account_id, bytes_used)
-        except ValueError as error:
+        except ValueError:
             db.rollback()
-            return jsonify({"error": str(error)}), 400
+            return jsonify({"error": "traffic total exceeds the supported integer range"}), 400
         if account is None:
             results.append({"status": "error", "msg": "account not found"})
             continue
@@ -2184,9 +2184,9 @@ def api_report_traffic_counter():
     )
     try:
         account = _increment_account_traffic(db, account_id, delta_bytes)
-    except ValueError as error:
+    except ValueError:
         db.rollback()
-        return jsonify({"error": str(error)}), 400
+        return jsonify({"error": "traffic total exceeds the supported integer range"}), 400
     if account is None:
         db.rollback()
         return jsonify({"error": "account not found"}), 404
