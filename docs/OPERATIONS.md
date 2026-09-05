@@ -30,7 +30,7 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.5/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.6/deploy.sh -o "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
 ```
@@ -38,7 +38,7 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.4.5 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.6 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -46,7 +46,7 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.4.5" bash /opt/anytls-panel/deploy.sh
+ANYTLS_REPO_REF="v1.4.6" bash /opt/anytls-panel/deploy.sh
 ```
 
 上述本机更新命令适用于已安装 `v1.4.5` 或更新版本的部署脚本；更早版本请使用前面的完整下载命令。指定 `ANYTLS_REPO_REF`、`ANYTLS_REPO_URL` 或 `ANYTLS_REPO_SUBDIR` 时会从仓库拉取；均未指定且脚本旁有完整项目源码时使用本地文件。形如 `vX.Y.Z` 的版本必须是真实标签，且源码 `VERSION` 必须匹配，检查在停服前完成。
@@ -247,7 +247,7 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.5/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.6/deploy.sh -o "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
 ```

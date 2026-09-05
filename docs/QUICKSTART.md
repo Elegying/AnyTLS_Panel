@@ -31,7 +31,7 @@ dig +short panel.example.com AAAA
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.5/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.6/deploy.sh -o "$installer_dir/deploy.sh"
   less "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
@@ -85,7 +85,7 @@ journalctl -u caddy -n 50 --no-pager
 - 打开「用户服务」，登记用户微信号、服务开始日、真实到期日和当前专线账号；
 - 把该用户自己的订阅链接发给对方，不要多人共用账号级分享链接；
 - 续费时使用“续期”保留历史；流量或有效期需要调整时可迁移专线，用户链接保持不变；
-- 仪表盘会显示未来 30 天的续费待办，联系用户后点击“标记已提醒”；
+- 首页「需要处理」中的「用户续费」显示未来 30 天及已过期的待办；联系用户后点击“标记已提醒”，页面会返回首页；
 - 在「重命名规则」中批量替换节点名称中的固定文字；
 - 分享链接相当于访问凭据，只发给可信对象；怀疑泄露时立即重新生成。
 

@@ -1282,22 +1282,15 @@ def dashboard():
         (a['last_synced_at'] for a in accounts if a['last_synced_at']),
         default=None,
     )
-    service_summary = db.execute(
-        '''SELECT COUNT(*) AS total,
-                  SUM(CASE WHEN status='active' AND started_on<=? AND expires_on>=? THEN 1 ELSE 0 END) AS active,
-                  SUM(CASE WHEN status='active' AND expires_on<? THEN 1 ELSE 0 END) AS expired,
-                  SUM(CASE WHEN status='active' AND started_on<=? AND expires_on BETWEEN ? AND ? THEN 1 ELSE 0 END) AS due
-           FROM customer_services''',
-        (today_text, today_text, today_text, today_text, today_text, due_text),
-    ).fetchone()
     renewal_services = db.execute(
         '''SELECT cs.*, a.name AS account_name
            FROM customer_services cs JOIN accounts a ON a.id=cs.account_id
            WHERE cs.status='active' AND cs.started_on<=?
              AND cs.expires_on<=?
-           ORDER BY cs.expires_on, cs.id LIMIT 6''',
+           ORDER BY cs.expires_on, cs.id''',
         (today_text, due_text),
     ).fetchall()
+    expired_services = sum(service['expires_on'] < today_text for service in renewal_services)
     service_counts = {
         row['account_id']: row['service_count']
         for row in db.execute(
@@ -1311,10 +1304,15 @@ def dashboard():
     }
 
     warning_accounts = []
+    expiring_accounts = []
     for a in accounts:
         pct = calc_traffic_percent(a['traffic_used_bytes'] or 0, a['traffic_limit_gb'] or 250)
         if pct >= 80:
             warning_accounts.append({**dict(a), 'usage_pct': pct})
+        remaining = days_until(a['expire_date'])
+        if a['status'] == 'active' and remaining is not None and remaining <= 30:
+            expiring_accounts.append({**dict(a), 'remaining': remaining})
+    expiring_accounts.sort(key=lambda account: (account['remaining'], account['id']))
     attention_nodes = db.execute('''
         SELECT id, account_id, name, host, port, is_online, last_checked_at
         FROM nodes
@@ -1322,7 +1320,6 @@ def dashboard():
         ORDER BY CASE WHEN is_online = 0 THEN 0 ELSE 1 END,
                  last_checked_at DESC,
                  id DESC
-        LIMIT 3
     ''').fetchall()
 
     return render_template('dashboard.html',
@@ -1333,16 +1330,16 @@ def dashboard():
         total_traffic_used=total_traffic_used,
         total_traffic_limit=total_traffic_limit,
         warning_accounts=warning_accounts,
+        expiring_accounts=expiring_accounts,
         attention_nodes=attention_nodes,
-        attention_total=len(warning_accounts) + offline_nodes + unknown_nodes,
+        attention_total=(len(renewal_services) + len(expiring_accounts)
+                         + len(warning_accounts) + len(attention_nodes)),
         online_nodes=online_nodes,
         offline_nodes=offline_nodes,
         unknown_nodes=unknown_nodes,
         last_synced_at=last_synced_at,
-        service_total=int(service_summary['total'] or 0),
-        active_services=int(service_summary['active'] or 0),
-        expired_services=int(service_summary['expired'] or 0),
-        due_services=int(service_summary['due'] or 0),
+        expired_services=expired_services,
+        due_services=len(renewal_services) - expired_services,
         renewal_services=renewal_services,
         service_counts=service_counts,
     )
@@ -1927,6 +1924,8 @@ def service_remind(service_id):
         return redirect(url_for('services_list'))
     audit_event('customer_service.remind', 'success', service_id=service_id)
     flash('已记录本次续费提醒', 'success')
+    if request.form.get('return_to') == 'dashboard':
+        return redirect(url_for('dashboard'))
     return redirect(url_for('service_detail', service_id=service_id))
 
 

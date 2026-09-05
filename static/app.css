@@ -46,7 +46,7 @@ body {
 button, input, textarea, select { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
 a { color: inherit; }
-button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+summary:focus-visible, button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible {
     outline: 3px solid rgba(119, 104, 232, 0.42);
     outline-offset: 2px;
 }
@@ -268,6 +268,23 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .alert-icon { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 8px; background: var(--orange-soft); color: var(--orange); }
 .alert-name, .health-name { overflow: hidden; font-weight: 650; white-space: nowrap; text-overflow: ellipsis; }
 .alert-detail, .health-detail { margin-top: 2px; color: var(--text-3); font-size: 11px; }
+
+.attention-group { border-bottom: 1px solid var(--border); }
+.attention-group summary { display: flex; min-height: 44px; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+.attention-group summary::-webkit-details-marker { display: none; }
+.attention-group summary::before { content: "›"; color: var(--text-3); font-size: 19px; transition: transform 140ms ease; }
+.attention-group[open] summary::before { transform: rotate(90deg); }
+.attention-group summary > span:first-of-type { display: inline-flex; align-items: center; gap: 8px; flex: 1; font-weight: 650; }
+.attention-group summary i { color: var(--text-3); }
+.attention-list { max-height: 208px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.attention-item { padding: 10px 4px 10px 0; border-top: 1px solid var(--border); }
+.attention-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.attention-heading .alert-name { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.attention-heading .badge { flex-shrink: 0; }
+.attention-item .alert-detail { overflow-wrap: anywhere; }
+.attention-item .cell-actions { margin-top: 8px; }
+.attention-note { margin: 10px 0 0; color: var(--text-3); font-size: 11px; }
+.attention-footer { justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 
 .traffic-summary { display: flex; min-height: 245px; flex-direction: column; justify-content: center; }
 .traffic-number { font-size: 27px; font-weight: 750; letter-spacing: -.03em; }

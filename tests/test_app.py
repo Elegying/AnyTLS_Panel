@@ -3999,6 +3999,113 @@ proxies:
         self.assertNotIn("value=\"' + data.url", content)
         self.assertIn("shareUrl.value = data.url", content)
 
+    def test_dashboard_attention_combines_all_items_and_reminder_returns_home(self):
+        from datetime import date, timedelta
+
+        today = date(2026, 9, 5)
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True)
+            with app.app.app_context():
+                db = app.get_db()
+                account_ids = []
+                for name, offset, status in (
+                    ("expired-account", -1, "active"),
+                    ("today-account", 0, "active"),
+                    ("due-account", 30, "active"),
+                    ("later-account", 31, "active"),
+                    ("paused-account", -1, "suspended"),
+                    ("disabled-account", -1, "disabled"),
+                    ("invalid-account", None, "active"),
+                ):
+                    account_ids.append(db.execute(
+                        "INSERT INTO accounts (name, subscribe_url, expire_date, status, "
+                        "traffic_limit_gb, traffic_used_bytes) VALUES (?, ?, ?, ?, 100, ?)",
+                        (name, "anytls://test@example.com:443",
+                         (today + timedelta(days=offset)).isoformat() if offset is not None else "invalid",
+                         status, 90 * 1024**3 if len(account_ids) < 3 else 0),
+                    ).lastrowid)
+                service_ids = []
+                for index, (offset, status, pending) in enumerate(
+                    [(offset, "active", False) for offset in (-10, -2, -1, 0, 1, 7, 14, 30)]
+                    + [(31, "active", False), (0, "suspended", False),
+                       (0, "disabled", False), (7, "active", True)]
+                ):
+                    service_ids.append(db.execute(
+                        "INSERT INTO customer_services (account_id, wechat_id, started_on, "
+                        "expires_on, status, sub_token) VALUES (?, ?, ?, ?, ?, ?)",
+                        (account_ids[0], f"<b>customer-{index}</b>",
+                         (today + timedelta(days=1 if pending else -60)).isoformat(),
+                         (today + timedelta(days=offset)).isoformat(), status, f"dummy-token-{index}"),
+                    ).lastrowid)
+                for index, online in enumerate((0, 0, None, -1, 1)):
+                    db.execute(
+                        "INSERT INTO nodes (account_id, name, host, port, password, is_online) "
+                        "VALUES (?, ?, ?, 443, 'test', ?)",
+                        (account_ids[0], f"node-{index}", "2001:db8::1", online),
+                    )
+                db.commit()
+
+            with mock.patch.object(app, "_business_today", return_value=today), app.app.test_client() as client:
+                authenticate_session(app, client)
+                response = client.get("/")
+                self.assertEqual(response.status_code, 200)
+                html = response.get_data(as_text=True)
+                card = html.split('class="panel attention-panel"', 1)[1].split("</article>", 1)[0]
+                self.assertIn('aria-label="共 18 项待办"', card)
+                self.assertEqual(card.count('<details '), 4)
+                self.assertEqual(card.count('name="dashboard-attention" open'), 1)
+                self.assertNotIn("当前没有待办", card)
+                self.assertNotIn(">续费提醒</h2>", html)
+                for index in range(8):
+                    self.assertIn(f"&lt;b&gt;customer-{index}&lt;/b&gt;", card)
+                    self.assertNotIn(f"<b>customer-{index}</b>", card)
+                for index in range(8, 12):
+                    self.assertNotIn(f"customer-{index}", card)
+                for name in ("expired-account", "today-account", "due-account"):
+                    self.assertIn(name, card)
+                for name in ("later-account", "paused-account", "disabled-account", "invalid-account"):
+                    self.assertNotIn(name, card)
+                for index in range(4):
+                    self.assertIn(f"node-{index}", card)
+                self.assertNotIn("node-4", card)
+                self.assertIn("[2001:db8::1]:443", card)
+                self.assertIn("今日到期", card)
+                self.assertIn("剩余30天", card)
+                self.assertIn("已过期10天", card)
+                self.assertLess(card.index("customer-0"), card.index("customer-7"))
+
+                path = f"/services/{service_ids[0]}/remind"
+                self.assertEqual(client.post(path, data={"return_to": "dashboard"}).status_code, 400)
+                csrf = extract_csrf_token(html)
+                marked = client.post(path, data={"csrf_token": csrf, "return_to": "dashboard"})
+                self.assertEqual(marked.status_code, 302)
+                self.assertEqual(marked.location, "/")
+                with app.app.app_context():
+                    self.assertIsNotNone(app.get_db().execute(
+                        "SELECT last_reminded_at FROM customer_services WHERE id=?", (service_ids[0],)
+                    ).fetchone()[0])
+                self.assertIn("已记录本次续费提醒", client.get("/").get_data(as_text=True))
+                rejected_destination = client.post(
+                    path, data={"csrf_token": csrf, "return_to": "https://untrusted.example"}
+                )
+                self.assertEqual(rejected_destination.location, f"/services/{service_ids[0]}")
+
+    def test_dashboard_attention_empty_state_covers_all_categories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = load_app(Path(tmp) / "anytls.db")
+            app.app.config.update(TESTING=True)
+            with app.app.test_client() as client:
+                authenticate_session(app, client)
+                response = client.get("/")
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            self.assertIn('aria-label="共 0 项待办"', html)
+            self.assertIn("当前没有待办", html)
+            self.assertIn("暂无用户续费、账号到期、流量或节点异常提醒。", html)
+            self.assertNotIn('<details class="attention-group"', html)
+            self.assertNotIn("当前没有流量告警", html)
+
     def test_dashboard_account_overview_shows_expiration_in_aligned_column(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = load_app(Path(tmp) / "anytls.db")

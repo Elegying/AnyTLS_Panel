@@ -44,47 +44,81 @@
 </section>
 
 <section class="dashboard-grid" aria-label="运营详情">
-    <article class="panel">
+    <article class="panel attention-panel" aria-labelledby="attention-title">
         <header class="panel-header">
-            <h2 class="panel-title"><i class="bi bi-exclamation-triangle" aria-hidden="true"></i>需要处理</h2>
-            <span class="badge {{ 'badge-orange' if attention_total else 'badge-green' }}">{{ attention_total }}</span>
+            <h2 class="panel-title" id="attention-title"><i class="bi bi-exclamation-triangle" aria-hidden="true"></i>需要处理</h2>
+            <span class="badge {{ 'badge-orange' if attention_total else 'badge-green' }}" aria-label="共 {{ attention_total }} 项待办">{{ attention_total }}</span>
         </header>
         <div class="panel-body">
-            {% if warning_accounts or attention_nodes %}
-            <ul class="alert-list">
-                {% for a in warning_accounts[:2] %}
-                <li class="alert-item">
-                    <span class="alert-icon"><i class="bi bi-speedometer2" aria-hidden="true"></i></span>
-                    <div>
-                        <div class="alert-name">{{ a.name }}</div>
+            {% if attention_total %}
+            {% if renewal_services %}
+            <details class="attention-group" name="dashboard-attention" open>
+                <summary><span><i class="bi bi-person-check" aria-hidden="true"></i>用户续费</span><span class="badge badge-orange">{{ renewal_services | length }}</span></summary>
+                <ul class="alert-list attention-list" tabindex="0" aria-label="用户续费待办">
+                    {% for service in renewal_services %}
+                    {% set remaining = days_until(service.expires_on) %}
+                    <li class="attention-item">
+                        <div class="attention-heading"><a class="alert-name text-link" href="{{ url_for('service_detail', service_id=service.id) }}">{{ service.wechat_id }}</a><span class="badge {{ 'badge-red' if remaining < 0 else 'badge-orange' if remaining <= 7 else 'badge-blue' }}">{{ '已过期' ~ (-remaining) ~ '天' if remaining < 0 else '今日到期' if remaining == 0 else '剩余' ~ remaining ~ '天' }}</span></div>
+                        <div class="alert-detail">{{ service.account_name }} · {{ service.relationship }} · {{ service.expires_on }} 到期</div>
+                        <div class="alert-detail">最近提醒：{{ service.last_reminded_at or '尚未提醒' }}</div>
+                        <div class="cell-actions"><form method="POST" action="{{ url_for('service_remind', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="return_to" value="dashboard"><button class="btn btn-sm btn-ghost" type="submit">标记已提醒</button></form><a class="btn btn-sm btn-primary" href="{{ url_for('service_detail', service_id=service.id) }}">续期</a></div>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </details>
+            {% endif %}
+            {% if expiring_accounts %}
+            <details class="attention-group" name="dashboard-attention" {% if not renewal_services %}open{% endif %}>
+                <summary><span><i class="bi bi-calendar2-event" aria-hidden="true"></i>账号到期</span><span class="badge badge-orange">{{ expiring_accounts | length }}</span></summary>
+                <ul class="alert-list attention-list" tabindex="0" aria-label="账号到期待办">
+                    {% for a in expiring_accounts %}
+                    <li class="attention-item">
+                        <div class="attention-heading"><a class="alert-name text-link" href="{{ url_for('account_detail', account_id=a.id) }}">{{ a.name }}</a><span class="badge {{ 'badge-red' if a.remaining < 0 else 'badge-orange' if a.remaining <= 7 else 'badge-blue' }}">{{ '已过期' ~ (-a.remaining) ~ '天' if a.remaining < 0 else '今日到期' if a.remaining == 0 else '剩余' ~ a.remaining ~ '天' }}</span></div>
+                        <div class="alert-detail">{{ a.expire_date }} 到期 · 请续费上游账号或迁移用户</div>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </details>
+            {% endif %}
+            {% if warning_accounts %}
+            <details class="attention-group" name="dashboard-attention" {% if not renewal_services and not expiring_accounts %}open{% endif %}>
+                <summary><span><i class="bi bi-speedometer2" aria-hidden="true"></i>流量告警</span><span class="badge badge-orange">{{ warning_accounts | length }}</span></summary>
+                <ul class="alert-list attention-list" tabindex="0" aria-label="账号流量告警">
+                    {% for a in warning_accounts %}
+                    <li class="attention-item">
+                        <div class="attention-heading"><a class="alert-name text-link" href="{{ url_for('account_detail', account_id=a.id) }}">{{ a.name }}</a><span class="badge {{ 'badge-red' if a.usage_pct >= 90 else 'badge-orange' }}">{{ a.usage_pct }}%</span></div>
                         <div class="alert-detail">已用 {{ format_bytes(a.traffic_used_bytes or 0) }} / {{ a.traffic_limit_gb }} GB</div>
-                    </div>
-                    <a class="btn btn-sm btn-ghost" href="{{ url_for('account_detail', account_id=a.id) }}">查看</a>
-                </li>
-                {% endfor %}
-                {% for n in attention_nodes[:2] %}
-                {% set endpoint = ('[' ~ n.host ~ ']:' ~ n.port) if ':' in n.host else (n.host ~ ':' ~ n.port) %}
-                <li class="alert-item">
-                    <span class="alert-icon"><i class="bi {{ 'bi-wifi-off' if n.is_online == 0 else 'bi-question-circle' }}" aria-hidden="true"></i></span>
-                    <div>
-                        <div class="alert-name">{{ n.name }}</div>
-                        <div class="alert-detail">{{ '节点离线' if n.is_online == 0 else '节点尚未检测' }} · {{ endpoint }}</div>
-                    </div>
-                    <a class="btn btn-sm btn-ghost" href="{{ url_for('account_detail', account_id=n.account_id) }}">查看</a>
-                </li>
-                {% endfor %}
-            </ul>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </details>
+            {% endif %}
+            {% if attention_nodes %}
+            <details class="attention-group" name="dashboard-attention" {% if not renewal_services and not expiring_accounts and not warning_accounts %}open{% endif %}>
+                <summary><span><i class="bi bi-hdd-network" aria-hidden="true"></i>节点异常</span><span class="badge badge-orange">{{ attention_nodes | length }}</span></summary>
+                <ul class="alert-list attention-list" tabindex="0" aria-label="节点异常待办">
+                    {% for n in attention_nodes %}
+                    {% set endpoint = ('[' ~ n.host ~ ']:' ~ n.port) if ':' in n.host else (n.host ~ ':' ~ n.port) %}
+                    <li class="attention-item">
+                        <div class="attention-heading"><a class="alert-name text-link" href="{{ url_for('account_detail', account_id=n.account_id) }}">{{ n.name }}</a><span class="badge {{ 'badge-red' if n.is_online == 0 else 'badge-orange' }}">{{ '离线' if n.is_online == 0 else '未检测' }}</span></div>
+                        <div class="alert-detail">{{ endpoint }}</div>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </details>
+            {% endif %}
+            <p class="attention-note">到期提醒包含未来 30 天及已过期项目。</p>
             {% else %}
             <div class="empty-state">
                 <div class="empty-state-inner">
                     <span class="empty-icon"><i class="bi bi-check2-circle" aria-hidden="true"></i></span>
-                    <h3>当前没有流量告警</h3>
-                    <p>所有账号的配额使用率均低于 80%。</p>
+                    <h3>当前没有待办</h3>
+                    <p>暂无用户续费、账号到期、流量或节点异常提醒。</p>
                 </div>
             </div>
             {% endif %}
         </div>
-        <footer class="panel-footer"><a class="panel-link" href="{{ url_for('accounts_list') }}">查看全部账号<i class="bi bi-arrow-right" aria-hidden="true"></i></a></footer>
+        <footer class="panel-footer attention-footer"><a class="panel-link" href="{{ url_for('services_list') }}">用户服务<i class="bi bi-arrow-right" aria-hidden="true"></i></a><a class="panel-link" href="{{ url_for('accounts_list') }}">全部账号<i class="bi bi-arrow-right" aria-hidden="true"></i></a></footer>
     </article>
 
     <article class="panel">
@@ -130,36 +164,6 @@
         </div>
         <footer class="panel-footer"><a class="panel-link" href="{{ url_for('accounts_list') }}">查看流量详情<i class="bi bi-arrow-right" aria-hidden="true"></i></a></footer>
     </article>
-</section>
-
-<section class="panel dashboard-bottom">
-    <header class="panel-header">
-        <h2 class="panel-title"><i class="bi bi-calendar2-check" aria-hidden="true"></i>续费提醒</h2>
-        <span class="panel-meta">有效服务 {{ active_services }} / 全部 {{ service_total }}</span>
-    </header>
-    {% if renewal_services %}
-    <div class="table-scroll">
-        <table class="rwd-table">
-            <thead><tr><th>微信号</th><th>专线账号</th><th>到期日</th><th>剩余时间</th><th>最近提醒</th><th>操作</th></tr></thead>
-            <tbody>
-            {% for service in renewal_services %}
-            {% set remaining = days_until(service.expires_on) %}
-            <tr>
-                <td data-label="微信号"><strong>{{ service.wechat_id }}</strong><span class="cell-subtitle">{{ service.relationship }}</span></td>
-                <td data-label="专线账号"><span class="cell-title">{{ service.account_name }}</span></td>
-                <td data-label="到期日"><span class="cell-title">{{ service.expires_on }}</span></td>
-                <td data-label="剩余时间"><span class="badge {{ 'badge-red' if remaining < 0 else 'badge-orange' if remaining <= 7 else 'badge-blue' }}">{{ '已过期' ~ (-remaining) ~ '天' if remaining < 0 else '剩余' ~ remaining ~ '天' }}</span></td>
-                <td data-label="最近提醒"><span class="cell-subtitle">{{ service.last_reminded_at or '尚未提醒' }}</span></td>
-                <td data-label="操作"><div class="cell-actions"><form method="POST" action="{{ url_for('service_remind', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-ghost" type="submit">标记已提醒</button></form><a class="btn btn-sm btn-primary" href="{{ url_for('service_detail', service_id=service.id) }}">续期</a></div></td>
-            </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-    </div>
-    {% else %}
-    <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-check2-circle" aria-hidden="true"></i></span><h3>未来 30 天没有续费待办</h3><p>用户服务临近到期时会自动出现在这里。</p></div></div>
-    {% endif %}
-    <footer class="panel-footer"><a class="panel-link" href="{{ url_for('services_list') }}">管理全部用户服务<i class="bi bi-arrow-right" aria-hidden="true"></i></a></footer>
 </section>
 
 <section class="panel dashboard-bottom">
