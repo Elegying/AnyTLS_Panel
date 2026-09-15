@@ -765,7 +765,6 @@ def parse_subscribe_url(url):
     traffic_info = {}
     if content.startswith('http://') or content.startswith('https://'):
         candidates = []
-        attempt_errors = []
         deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_SECONDS
         for ua in [
             'SSRVPN/2.4.0',
@@ -792,24 +791,17 @@ def parse_subscribe_url(url):
                     candidates.append((score, text, {**header_info, **body_info}))
                     if score[0] > 0:
                         break
-                else:
-                    attempt_errors.append(
-                        f'{ua.split("/", 1)[0]}: 响应中未找到可用节点'
-                    )
             except ValueError:
                 raise
-            except Exception as exc:
-                attempt_errors.append(f'{ua.split("/", 1)[0]}: {exc}')
+            except Exception:
                 continue
         if not candidates:
-            detail = '；'.join(attempt_errors) or '所有 UA 均无法访问'
-            raise ValueError(f'拉取订阅失败（{detail}）')
+            raise ValueError('订阅拉取失败，请检查地址和上游服务后重试')
         _score, content, traffic_info = max(candidates, key=lambda item: item[0])
 
     nodes = _parse_subscription_content(content)
     if not nodes:
-        preview = content[:100].replace('\n', ' ').replace('\r', '')
-        raise ValueError(f"订阅中未找到可用节点 (内容前100字符: {preview})")
+        raise ValueError('订阅中未找到可用节点')
     return nodes, traffic_info
 
 
@@ -1346,6 +1338,29 @@ def dashboard():
 
 def _form_error(message, endpoint, **values):
     """Keep enhanced forms in place; preserve ordinary POST redirect behavior."""
+    # Return only application-owned validation text, never exception details.
+    safe_messages = [
+        '专线账号无效', '专线账号不存在或未启用', '到期日期不能早于开始日期',
+        '相同用户、专线账号和开始日期的服务记录已存在', '修改后会与已有服务记录重复',
+        '用户服务不存在', '用户服务已更新', '未解析到节点',
+        '新到期日期必须晚于当前到期日期；日期纠错请使用编辑功能',
+        '订阅地址无法解析', '订阅地址解析结果无效', '订阅地址必须是有效的 HTTP(S) URL',
+        '默认只允许 HTTPS 上游订阅', '订阅地址必须指向公网 IP',
+        '订阅响应过大（最大 2 MiB）', '订阅中未找到可用节点',
+        '订阅拉取失败，请检查地址和上游服务后重试',
+        f'订阅节点超过安全上限 {MAX_NODES_PER_SUBSCRIPTION}',
+    ]
+    for label, limit in [('微信号', MAX_NAME_CHARS), ('账号名称', MAX_NAME_CHARS),
+                         ('备注', MAX_NOTES_CHARS), ('续期备注', MAX_NOTES_CHARS),
+                         ('账号关系', 20), ('订阅内容', MAX_SUBSCRIPTION_TEXT_CHARS)]:
+        safe_messages.extend([f'{label}不能为空', f'{label}不能超过{limit}个字符'])
+    for label in ['专线账号', '流量限制', '开始日期', '到期日期', '新到期日期']:
+        safe_messages.extend(label + suffix for suffix in [
+            '必须是非负整数', '必须是有效数字', '不能为负数', '数值过大', '必须是有效日期',
+        ])
+    fallback = ('订阅导入失败，请检查链接和节点内容后重试。' if endpoint == 'accounts_list'
+                else '无法保存，请检查输入后重试。')
+    message = next((safe for safe in safe_messages if safe == message), fallback)
     if request.headers.get('X-Panel-Form') == '1':
         fields = {
             '微信号': 'wechat_id', '账号关系': 'relationship',

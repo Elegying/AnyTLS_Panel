@@ -80,6 +80,26 @@ class FormFeedbackTests(unittest.TestCase):
         response = self.client.post('/services/add', headers={'X-Panel-Form': '1'}, data=self.values())
         self.assertEqual(response.status_code, 400)
 
+    def test_exception_details_are_not_exposed(self):
+        secret = 'private-token-do-not-display'
+        for enhanced in (True, False):
+            headers = dict(self.headers)
+            if not enhanced:
+                headers.pop('X-Panel-Form')
+            with mock.patch.object(self.module, 'parse_subscribe_url',
+                                   side_effect=ValueError('订阅解析异常: ' + secret)):
+                response = self.client.post('/accounts/add', headers=headers,
+                                            data={'subscribe_url': secret}, follow_redirects=True)
+            self.assertNotIn(secret, response.get_data(as_text=True))
+            self.assertIn('订阅导入失败', response.get_data(as_text=True) if not enhanced else response.json['error'])
+        with self.assertRaises(ValueError) as error:
+            self.module.parse_subscribe_url(secret)
+        self.assertNotIn(secret, str(error.exception))
+        with mock.patch.object(self.module, '_read_subscription_url', side_effect=OSError(secret)):
+            with self.assertRaises(ValueError) as error:
+                self.module.parse_subscribe_url('https://example.invalid')
+        self.assertNotIn(secret, str(error.exception))
+
     def test_monitor_timestamp_and_durable_probe_state(self):
         with self.module.app.app_context():
             db = self.module.get_db()
