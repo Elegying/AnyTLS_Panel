@@ -15,7 +15,7 @@
     </div>
 </header>
 
-<section class="system-strip" aria-label="系统概览">
+<section class="system-strip dashboard-metrics" aria-label="系统概览">
     <div class="system-metric">
         <div class="metric-label"><i class="bi bi-people" aria-hidden="true"></i>账号总数</div>
         <div class="metric-value is-blue">{{ total_accounts }}</div>
@@ -43,6 +43,8 @@
     </div>
 </section>
 
+<div id="syncFeedback" class="operation-feedback" role="status" hidden><p id="syncMessage"></p><ul id="syncFailures"></ul><button type="button" class="btn btn-ghost" data-action="navigate" data-href="{{ url_for('dashboard') }}">刷新最新数据</button></div>
+
 <section class="dashboard-grid" aria-label="运营详情">
     <article class="panel attention-panel" aria-labelledby="attention-title">
         <header class="panel-header">
@@ -54,14 +56,14 @@
             {% if renewal_services %}
             <details class="attention-group" name="dashboard-attention" open>
                 <summary><span><i class="bi bi-person-check" aria-hidden="true"></i>用户续费</span><span class="badge badge-orange">{{ renewal_services | length }}</span></summary>
-                <ul class="alert-list attention-list" tabindex="0" aria-label="用户续费待办">
+                <ul class="alert-list attention-list" aria-label="用户续费待办">
                     {% for service in renewal_services %}
                     {% set remaining = days_until(service.expires_on) %}
                     <li class="attention-item">
                         <div class="attention-heading"><a class="alert-name text-link" href="{{ url_for('service_detail', service_id=service.id) }}">{{ service.wechat_id }}</a><span class="badge {{ 'badge-red' if remaining < 0 else 'badge-orange' if remaining <= 7 else 'badge-blue' }}">{{ '已过期' ~ (-remaining) ~ '天' if remaining < 0 else '今日到期' if remaining == 0 else '剩余' ~ remaining ~ '天' }}</span></div>
                         <div class="alert-detail">{{ service.account_name }} · {{ service.relationship }} · {{ service.expires_on }} 到期</div>
                         <div class="alert-detail">最近提醒：{{ service.last_reminded_at or '尚未提醒' }}</div>
-                        <div class="cell-actions"><form method="POST" action="{{ url_for('service_remind', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="return_to" value="dashboard"><button class="btn btn-sm btn-ghost" type="submit">标记已提醒</button></form><a class="btn btn-sm btn-primary" href="{{ url_for('service_detail', service_id=service.id) }}">续期</a></div>
+                        <div class="cell-actions"><form method="POST" action="{{ url_for('service_remind', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="return_to" value="dashboard"><button class="btn btn-sm btn-ghost" type="submit">标记已提醒</button></form><a class="btn btn-sm btn-primary" href="{{ url_for('service_detail', service_id=service.id, renew='1', return_to='dashboard') }}">续期</a></div>
                     </li>
                     {% endfor %}
                 </ul>
@@ -70,7 +72,7 @@
             {% if expiring_accounts %}
             <details class="attention-group" name="dashboard-attention" {% if not renewal_services %}open{% endif %}>
                 <summary><span><i class="bi bi-calendar2-event" aria-hidden="true"></i>账号到期</span><span class="badge badge-orange">{{ expiring_accounts | length }}</span></summary>
-                <ul class="alert-list attention-list" tabindex="0" aria-label="账号到期待办">
+                <ul class="alert-list attention-list" aria-label="账号到期待办">
                     {% for a in expiring_accounts %}
                     <li class="attention-item">
                         <div class="attention-heading"><a class="alert-name text-link" href="{{ url_for('account_detail', account_id=a.id) }}">{{ a.name }}</a><span class="badge {{ 'badge-red' if a.remaining < 0 else 'badge-orange' if a.remaining <= 7 else 'badge-blue' }}">{{ '已过期' ~ (-a.remaining) ~ '天' if a.remaining < 0 else '今日到期' if a.remaining == 0 else '剩余' ~ a.remaining ~ '天' }}</span></div>
@@ -83,7 +85,7 @@
             {% if warning_accounts %}
             <details class="attention-group" name="dashboard-attention" {% if not renewal_services and not expiring_accounts %}open{% endif %}>
                 <summary><span><i class="bi bi-speedometer2" aria-hidden="true"></i>流量告警</span><span class="badge badge-orange">{{ warning_accounts | length }}</span></summary>
-                <ul class="alert-list attention-list" tabindex="0" aria-label="账号流量告警">
+                <ul class="alert-list attention-list" aria-label="账号流量告警">
                     {% for a in warning_accounts %}
                     <li class="attention-item">
                         <div class="attention-heading"><a class="alert-name text-link" href="{{ url_for('account_detail', account_id=a.id) }}">{{ a.name }}</a><span class="badge {{ 'badge-red' if a.usage_pct >= 90 else 'badge-orange' }}">{{ a.usage_pct }}%</span></div>
@@ -96,7 +98,7 @@
             {% if attention_nodes %}
             <details class="attention-group" name="dashboard-attention" {% if not renewal_services and not expiring_accounts and not warning_accounts %}open{% endif %}>
                 <summary><span><i class="bi bi-hdd-network" aria-hidden="true"></i>节点异常</span><span class="badge badge-orange">{{ attention_nodes | length }}</span></summary>
-                <ul class="alert-list attention-list" tabindex="0" aria-label="节点异常待办">
+                <ul class="alert-list attention-list" aria-label="节点异常待办">
                     {% for n in attention_nodes %}
                     {% set endpoint = ('[' ~ n.host ~ ']:' ~ n.port) if ':' in n.host else (n.host ~ ':' ~ n.port) %}
                     <li class="attention-item">
@@ -203,20 +205,54 @@
 
 <script nonce="{{ g.csp_nonce }}">
 async function syncAll(button) {
-    if (!confirm('确认同步所有账号的订阅？')) return;
+    if (button.disabled) return;
     const original = button.innerHTML;
+    const feedback = document.getElementById('syncFeedback');
+    const message = document.getElementById('syncMessage');
+    const failures = document.getElementById('syncFailures');
+    feedback.hidden = false;
+    feedback.classList.remove('is-error');
+    message.textContent = '正在同步账号，请稍候…';
+    failures.replaceChildren();
     button.innerHTML = '<i class="bi bi-arrow-repeat" aria-hidden="true"></i><span>同步中…</span>';
     button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 120000);
     try {
-        const response = await fetch('/api/sync-all', {method: 'POST', headers: csrfHeaders()});
-        const data = await response.json();
-        const successCount = (data.results || []).filter(result => result.status === 'ok').length;
-        showToast('同步完成：' + successCount + ' 个账号更新成功', true);
-        window.setTimeout(() => location.reload(), 700);
+        const response = await fetch('/api/sync-all', {method: 'POST', headers: csrfHeaders(), signal: controller.signal});
+        const data = await readPanelResponse(response);
+        if (!Array.isArray(data.results) || data.results.some(result =>
+            !result || !['ok', 'error', 'skipped'].includes(result.status))) {
+            throw new Error('同步响应异常，请先刷新数据确认结果。');
+        }
+        const failed = data.results.filter(result => result.status !== 'ok');
+        const success = data.results.length - failed.length;
+        feedback.classList.toggle('is-error', failed.length > 0);
+        message.textContent = !data.results.length ? '没有需要同步的活跃账号。' :
+            failed.length ? '同步结束：' + success + ' 个成功，' + failed.length + ' 个未完成。可前往对应账号重试。' :
+            '同步成功：' + success + ' 个账号已更新。点击“刷新最新数据”查看。';
+        failed.forEach(result => {
+            const item = document.createElement('li');
+            if (Number.isSafeInteger(result.id) && result.id > 0) {
+                const link = document.createElement('a');
+                link.href = '/accounts/' + result.id;
+                link.textContent = result.name || '账号 #' + result.id;
+                item.appendChild(link);
+            } else item.textContent = result.name || '账号';
+            item.appendChild(document.createTextNode('：' + (result.msg || '同步未完成，请重试')));
+            failures.appendChild(item);
+        });
     } catch (error) {
-        showToast('同步失败：' + error.message, false);
+        feedback.classList.add('is-error');
+        message.textContent = error.name === 'AbortError' || error instanceof TypeError
+            ? '连接中断或等待超时，结果尚未确认。请刷新数据核对后再重试。'
+            : '同步未完成：' + error.message;
+    } finally {
+        window.clearTimeout(timeout);
         button.innerHTML = original;
         button.disabled = false;
+        button.removeAttribute('aria-busy');
     }
 }
 </script>

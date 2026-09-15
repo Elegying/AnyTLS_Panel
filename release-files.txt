@@ -33,6 +33,7 @@ sqlite_rate_limit.py
 start.sh
 static/favicon.svg
 static/app.css
+static/panel.js
 static/vendor/LICENSE.bootstrap-icons
 static/vendor/bootstrap-icons.min.css
 static/vendor/fonts/bootstrap-icons.woff
