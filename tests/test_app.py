@@ -951,7 +951,7 @@ proxies:
         self.assertEqual(traffic_info["total_gb"], 1)
         self.assertEqual(traffic_info["expire_date"], "2030-01-01")
 
-    def test_http_subscription_reports_sanitized_user_agent_failures(self):
+    def test_http_subscription_reports_sanitized_failure(self):
         subscription_url = "https://sub.example/private-token"
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -963,7 +963,7 @@ proxies:
             ):
                 with self.assertRaisesRegex(
                     ValueError,
-                    "SSRVPN: 订阅服务器返回 HTTP 403",
+                    "订阅拉取失败，请检查地址和上游服务后重试",
                 ) as raised:
                     app.parse_subscribe_url(subscription_url)
 
