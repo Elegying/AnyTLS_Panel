@@ -71,7 +71,7 @@
             <button type="button" class="icon-button modal-close" data-action="close-modal" data-modal="addModal" aria-label="关闭导入订阅弹窗"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
         </div>
         <div class="modal-body">
-            <form method="POST" action="{{ url_for('account_add') }}">
+            <form method="POST" data-preserve-form action="{{ url_for('account_add') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="account-name">账号名称</label>

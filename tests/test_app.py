@@ -4157,7 +4157,7 @@ proxies:
         self.assertIn('data-host="{{ n.host }}"', content)
         self.assertIn('data-action="check-host"', content)
         self.assertNotIn("checkOne('{{ n.host }}'", content)
-        self.assertIn("row.querySelector('button[data-host][data-port]')", content)
+        self.assertIn("action.dataset.host, Number(action.dataset.port)", content)
         self.assertNotIn("hostPort.textContent.split(':')", content)
 
     def test_logged_in_fetch_calls_send_csrf_header(self):
@@ -4168,7 +4168,7 @@ proxies:
 
         self.assertIn("function csrfHeaders", base)
         self.assertIn("X-CSRFToken", base)
-        self.assertIn("fetch('/api/sync-all', {method: 'POST', headers: csrfHeaders()}", dashboard)
+        self.assertIn("fetch('/api/sync-all', {method: 'POST', headers: csrfHeaders(),", dashboard)
         self.assertIn("generate-token", detail)
         self.assertIn("headers: csrfHeaders({'Content-Type': 'application/json'})", detail)
         self.assertIn("headers: csrfHeaders({'Content-Type': 'application/json'})", monitor)
@@ -4331,6 +4331,7 @@ proxies:
         required_assets = {
             "static/favicon.svg",
             "static/app.css",
+            "static/panel.js",
             "static/vendor/LICENSE.bootstrap-icons",
             "static/vendor/bootstrap-icons.min.css",
             "static/vendor/fonts/bootstrap-icons.woff",

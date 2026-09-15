@@ -24,7 +24,7 @@
     <div class="summary-card"><div class="metric-label"><i class="bi bi-hdd-stack" aria-hidden="true"></i>唯一节点</div><div class="summary-card-value is-blue">{{ nodes | length }}</div></div>
     <div class="summary-card"><div class="metric-label"><i class="bi bi-check-circle" aria-hidden="true"></i>在线</div><div class="summary-card-value" id="stat-online" style="color:var(--green)">{{ health.online }}</div></div>
     <div class="summary-card"><div class="metric-label"><i class="bi bi-x-circle" aria-hidden="true"></i>离线</div><div class="summary-card-value" id="stat-offline" style="color:var(--red)">{{ health.offline }}</div></div>
-    <div class="summary-card"><div class="metric-label"><i class="bi bi-question-circle" aria-hidden="true"></i>未检测</div><div class="summary-card-value" id="stat-unknown" style="color:var(--text-2)">{{ health.unknown }}</div></div>
+    <div class="summary-card"><div class="metric-label"><i class="bi bi-question-circle" aria-hidden="true"></i>未确认</div><div class="summary-card-value" id="stat-unknown" style="color:var(--text-2)">{{ health.unknown }}</div></div>
 </section>
 
 <section class="panel">
@@ -36,14 +36,14 @@
             <tbody>
             {% for n in nodes %}
             {% set endpoint = ('[' ~ n.host ~ ']:' ~ n.port) if ':' in n.host else (n.host ~ ':' ~ n.port) %}
-            <tr>
+            <tr data-state="{{ 'online' if n.is_online == 1 else 'offline' if n.is_online == 0 else 'unknown' }}">
                 <td data-label="#" class="hide-mobile"><span class="cell-subtitle">{{ loop.index }}</span></td>
                 <td data-label="节点"><span class="cell-title">{{ n.name }}</span>{% if n.account_count > 1 %}<span class="cell-subtitle">关联 {{ n.account_count }} 个账号</span>{% endif %}</td>
                 <td data-label="协议"><span class="badge badge-blue">{{ n.protocol or 'anytls' }}</span></td>
                 <td data-label="地址" class="hide-mobile"><code class="code-value">{{ endpoint }}</code></td>
                 <td data-label="状态" id="status-{{ n.host }}-{{ n.port }}"><span class="badge {{ 'badge-green' if n.is_online == 1 else 'badge-red' if n.is_online == 0 else 'badge-neutral' }}">{{ '在线' if n.is_online == 1 else '离线' if n.is_online == 0 else '未检测' }}</span></td>
                 <td data-label="延迟" id="latency-{{ n.host }}-{{ n.port }}">{% if n.latency_ms is not none and n.latency_ms >= 0 %}<span style="color:{{ 'var(--green)' if n.latency_ms < 200 else 'var(--orange)' if n.latency_ms < 500 else 'var(--red)' }}">{{ n.latency_ms }} ms</span>{% else %}<span class="cell-subtitle">—</span>{% endif %}</td>
-                <td data-label="检测时间" class="hide-mobile"><span class="cell-subtitle">{{ n.last_checked_at or '—' }}</span></td>
+                <td data-label="检测时间" class="hide-mobile" id="checked-{{ n.host }}-{{ n.port }}"><span class="cell-subtitle">{{ n.last_checked_at or '—' }}</span></td>
                 <td data-label="操作"><button class="btn btn-sm btn-ghost" type="button" data-host="{{ n.host }}" data-port="{{ n.port }}" data-action="check-host"><i class="bi bi-play-circle" aria-hidden="true"></i>检测</button></td>
             </tr>
             {% endfor %}
@@ -57,58 +57,91 @@
 
 <script nonce="{{ g.csp_nonce }}">
 function setNodeResult(host, port, data) {
-    const statusElement = document.getElementById('status-' + host + '-' + port);
-    const latencyElement = document.getElementById('latency-' + host + '-' + port);
-    statusElement.innerHTML = data.online ? '<span class="badge badge-green">在线</span>' : '<span class="badge badge-red">离线</span>';
-    if (data.latency >= 0) {
-        const color = data.latency < 200 ? 'var(--green)' : data.latency < 500 ? 'var(--orange)' : 'var(--red)';
-        latencyElement.innerHTML = '<span style="color:' + color + '">' + data.latency + ' ms</span>';
-    } else latencyElement.innerHTML = '<span class="cell-subtitle">—</span>';
+    const status = document.getElementById('status-' + host + '-' + port);
+    const latency = document.getElementById('latency-' + host + '-' + port);
+    status.innerHTML = data.online ? '<span class="badge badge-green">在线</span>' : '<span class="badge badge-red">离线</span>';
+    status.closest('tr').dataset.state = data.online ? 'online' : 'offline';
+    latency.textContent = Number.isFinite(data.latency) && data.latency >= 0 ? data.latency + ' ms' : '—';
+    document.getElementById('checked-' + host + '-' + port).textContent = data.checked_at || '刚刚';
 }
 
-async function checkOne(host, port) {
-    const statusElement = document.getElementById('status-' + host + '-' + port);
-    const latencyElement = document.getElementById('latency-' + host + '-' + port);
-    statusElement.innerHTML = '<span class="badge badge-blue">检测中…</span>';
-    latencyElement.innerHTML = '<span class="cell-subtitle">…</span>';
+const runningChecks = new Map();
+function checkOne(host, port) {
+    const key = host + ':' + port;
+    if (runningChecks.has(key)) return runningChecks.get(key);
+    const task = performCheck(host, port).finally(() => runningChecks.delete(key));
+    runningChecks.set(key, task);
+    return task;
+}
+
+async function performCheck(host, port) {
+    const status = document.getElementById('status-' + host + '-' + port);
+    const row = status.closest('tr');
+    const button = row.querySelector('[data-action="check-host"]');
+    const previous = status.textContent;
+    const previousResult = status.dataset.lastResult || previous;
+    status.dataset.lastResult = previousResult;
+    status.textContent = '检测中…';
+    button.disabled = true;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
     try {
-        const response = await fetch('/api/check-by-host', {method: 'POST', headers: csrfHeaders({'Content-Type': 'application/json'}), body: JSON.stringify({host, port})});
-        const data = await response.json();
+        const response = await fetch('/api/check-by-host', {
+            method: 'POST', headers: csrfHeaders({'Content-Type': 'application/json'}),
+            body: JSON.stringify({host, port}), signal: controller.signal
+        });
+        const data = await readPanelResponse(response);
+        if (typeof data.online !== 'boolean') throw new Error(data.msg || '检测响应异常');
         setNodeResult(host, port, data);
-        updateStats();
+        status.dataset.lastResult = status.textContent;
+        return true;
     } catch (error) {
-        statusElement.innerHTML = '<span class="badge badge-red">检测失败</span>';
-        latencyElement.innerHTML = '<span class="cell-subtitle">—</span>';
+        row.dataset.state = 'unknown';
+        status.replaceChildren();
+        const badge = document.createElement('span');
+        badge.className = 'badge badge-orange';
+        badge.textContent = '检测失败';
+        const detail = document.createElement('span');
+        detail.className = 'cell-subtitle';
+        detail.textContent = '上次：' + previousResult + '。' +
+            (error.name === 'AbortError' ? '检测超时，请重试。' : error.message);
+        status.append(badge, detail);
+        return false;
+    } finally {
+        window.clearTimeout(timeout);
+        button.disabled = false;
         updateStats();
     }
 }
 
 async function checkAll() {
     const button = document.getElementById('checkAllBtn');
+    if (button.disabled) return;
     const status = document.getElementById('check-status');
-    const rows = Array.from(document.querySelectorAll('#monitorTable tbody tr'));
+    const actions = Array.from(document.querySelectorAll('#monitorTable [data-action="check-host"]'));
+    let succeeded = 0;
     button.disabled = true;
     button.innerHTML = '<i class="bi bi-radar" aria-hidden="true"></i><span>检测中…</span>';
-    for (let index = 0; index < rows.length; index += 1) {
-        const row = rows[index];
-        const action = row.querySelector('button[data-host][data-port]');
-        if (!action) continue;
-        status.textContent = (index + 1) + ' / ' + rows.length;
-        await checkOne(action.dataset.host, Number(action.dataset.port));
+    try {
+        for (let index = 0; index < actions.length; index += 1) {
+            status.textContent = '正在检测 ' + (index + 1) + ' / ' + actions.length;
+            const action = actions[index];
+            if (await checkOne(action.dataset.host, Number(action.dataset.port))) succeeded += 1;
+        }
+        status.textContent = actions.length ? '已取得 ' + succeeded + ' 项结果，' + (actions.length - succeeded) + ' 项检测失败' : '暂无节点可检测';
+    } finally {
+        button.disabled = false;
+        button.innerHTML = '<i class="bi bi-radar" aria-hidden="true"></i><span>检测全部</span>';
     }
-    button.disabled = false;
-    button.innerHTML = '<i class="bi bi-radar" aria-hidden="true"></i><span>检测全部</span>';
-    status.textContent = '检测完成';
-    showToast('全部节点检测完成', true);
 }
 
 function updateStats() {
-    const statuses = Array.from(document.querySelectorAll('#monitorTable td[id^="status-"]'));
-    const online = statuses.filter(element => element.textContent.trim() === '在线').length;
-    const offline = statuses.filter(element => ['离线', '检测失败'].includes(element.textContent.trim())).length;
+    const rows = Array.from(document.querySelectorAll('#monitorTable tbody tr'));
+    const online = rows.filter(row => row.dataset.state === 'online').length;
+    const offline = rows.filter(row => row.dataset.state === 'offline').length;
     document.getElementById('stat-online').textContent = online;
     document.getElementById('stat-offline').textContent = offline;
-    document.getElementById('stat-unknown').textContent = statuses.length - online - offline;
+    document.getElementById('stat-unknown').textContent = rows.length - online - offline;
 }
 </script>
 {% endblock %}

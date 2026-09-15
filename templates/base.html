@@ -22,6 +22,7 @@
     <div class="sidebar-overlay" id="sidebarOverlay" data-action="toggle-sidebar" aria-hidden="true"></div>
 
     <aside class="sidebar" id="sidebar" aria-label="主导航">
+        <button class="icon-button sidebar-close" type="button" data-action="toggle-sidebar" aria-label="关闭导航菜单"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
         <div class="brand">
             <span class="brand-mark"><i class="bi bi-lightning-charge-fill" aria-hidden="true"></i></span>
             <div class="brand-copy">
@@ -115,9 +116,9 @@
         </section>
     </div>
 
+    <script src="{{ url_for('static', filename='panel.js') }}"></script>
     <script nonce="{{ g.csp_nonce }}">
         const CSRF_TOKEN = "{{ csrf_token() }}";
-        let lastFocusedElement = null;
 
         function csrfHeaders(extra) {
             return Object.assign({'X-CSRFToken': CSRF_TOKEN}, extra || {});
@@ -160,36 +161,6 @@
                 button.removeAttribute('aria-busy');
                 label.textContent = '检查更新';
             }
-        }
-
-        function toggleSidebar() {
-            const sidebar = document.getElementById('sidebar');
-            const overlay = document.getElementById('sidebarOverlay');
-            const toggle = document.querySelector('.mobile-header [data-action="toggle-sidebar"]');
-            const isOpen = sidebar.classList.toggle('open');
-            overlay.classList.toggle('show', isOpen);
-            toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
-            document.body.style.overflow = isOpen ? 'hidden' : '';
-        }
-
-        function openModal(id) {
-            const modal = document.getElementById(id);
-            if (!modal) return;
-            lastFocusedElement = document.activeElement;
-            modal.classList.add('show');
-            modal.setAttribute('aria-hidden', 'false');
-            document.body.style.overflow = 'hidden';
-            const first = modal.querySelector('input:not([type="hidden"]), textarea, select, button');
-            if (first) window.setTimeout(() => first.focus(), 0);
-        }
-
-        function closeModal(id) {
-            const modal = document.getElementById(id);
-            if (!modal) return;
-            modal.classList.remove('show');
-            modal.setAttribute('aria-hidden', 'true');
-            document.body.style.overflow = '';
-            if (lastFocusedElement) lastFocusedElement.focus();
         }
 
         function showToast(message, success) {
@@ -260,6 +231,7 @@
         });
 
         document.addEventListener('keydown', event => {
+            trapLayerFocus(event);
             if (event.key === 'Escape') {
                 const open = document.querySelector('.modal-overlay.show');
                 if (open) closeModal(open.id);

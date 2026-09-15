@@ -1344,6 +1344,30 @@ def dashboard():
         service_counts=service_counts,
     )
 
+def _form_error(message, endpoint, **values):
+    """Keep enhanced forms in place; preserve ordinary POST redirect behavior."""
+    if request.headers.get('X-Panel-Form') == '1':
+        fields = {
+            '微信号': 'wechat_id', '账号关系': 'relationship',
+            '专线账号': 'account_id', '开始日期': 'started_on',
+            '到期日期': 'expires_on', '新到期日期': 'new_expires_on',
+            '续期备注': 'notes', '备注': 'notes', '账号名称': 'name',
+            '订阅': 'subscribe_url', '流量': 'traffic_limit_gb',
+        }
+        field = next((value for key, value in fields.items()
+                      if message.startswith(key)), '')
+        return jsonify(error=message, field=field), 422
+    flash(message, 'error')
+    return redirect(url_for(endpoint, **values))
+
+
+def _form_redirect(endpoint, **values):
+    target = url_for(endpoint, **values)
+    if request.headers.get('X-Panel-Form') == '1':
+        return jsonify(redirect=target)
+    return redirect(target)
+
+
 # ─── 账号管理 ──────────────────────────────────────────────
 
 @app.route('/accounts')
@@ -1377,22 +1401,18 @@ def account_add():
         )
         notes = validate_text(request.form.get('notes', ''), '备注', MAX_NOTES_CHARS)
     except ValueError as e:
-        flash(str(e), 'error')
-        return redirect(url_for('accounts_list'))
+        return _form_error(str(e), 'accounts_list')
     traffic_limit = request.form.get('traffic_limit_gb', '250').strip()
 
     try:
         nodes, traffic_info = parse_subscribe_url(subscribe_url)
     except ValueError as e:
-        flash(str(e), 'error')
-        return redirect(url_for('accounts_list'))
+        return _form_error(str(e), 'accounts_list')
 
     if not nodes:
-        flash('未解析到节点', 'error')
-        return redirect(url_for('accounts_list'))
+        return _form_error('未解析到节点', 'accounts_list')
     if len(nodes) > MAX_NODES_PER_SUBSCRIPTION:
-        flash(f'订阅节点超过安全上限 {MAX_NODES_PER_SUBSCRIPTION}', 'error')
-        return redirect(url_for('accounts_list'))
+        return _form_error(f'订阅节点超过安全上限 {MAX_NODES_PER_SUBSCRIPTION}', 'accounts_list')
 
     if not name:
         # 自动用第一个节点名作为账号名
@@ -1405,8 +1425,7 @@ def account_add():
     try:
         traffic_limit = parse_nonnegative_float(traffic_limit, '流量限制')
     except ValueError as e:
-        flash(str(e), 'error')
-        return redirect(url_for('accounts_list'))
+        return _form_error(str(e), 'accounts_list')
 
     db = get_db()
     cursor = db.execute(
@@ -1453,7 +1472,7 @@ def account_add():
 
     audit_event('account.create', 'success', account_id=account_id, node_count=len(nodes))
     flash(f'账号 "{name}" 添加成功，已导入 {len(nodes)} 个节点', 'success')
-    return redirect(url_for('account_detail', account_id=account_id))
+    return _form_redirect('account_detail', account_id=account_id)
 
 @app.route('/accounts/<int:account_id>')
 @login_required
@@ -1754,15 +1773,13 @@ def service_add():
             _service_form_values()
         )
     except ValueError as error:
-        flash(str(error), 'error')
-        return redirect(url_for('services_list'))
+        return _form_error(str(error), 'services_list')
     db = get_db()
     account = db.execute(
         'SELECT status FROM accounts WHERE id=?', (account_id,)
     ).fetchone()
     if not account or account['status'] != 'active':
-        flash('专线账号不存在或未启用', 'error')
-        return redirect(url_for('services_list'))
+        return _form_error('专线账号不存在或未启用', 'services_list')
     try:
         service_id = db.execute(
             '''INSERT INTO customer_services (
@@ -1781,14 +1798,13 @@ def service_add():
         ).lastrowid
         db.commit()
     except sqlite3.IntegrityError:
-        flash('相同用户、专线账号和开始日期的服务记录已存在', 'error')
-        return redirect(url_for('services_list'))
+        return _form_error('相同用户、专线账号和开始日期的服务记录已存在', 'services_list')
     audit_event(
         'customer_service.create', 'success', service_id=service_id,
         account_id=account_id
     )
     flash(f'已为 {wechat_id} 创建用户服务', 'success')
-    return redirect(url_for('service_detail', service_id=service_id))
+    return _form_redirect('service_detail', service_id=service_id)
 
 
 @app.route('/services/<int:service_id>')
@@ -1833,15 +1849,13 @@ def service_edit(service_id):
             _service_form_values()
         )
     except ValueError as error:
-        flash(str(error), 'error')
-        return redirect(url_for('service_detail', service_id=service_id))
+        return _form_error(str(error), 'service_detail', service_id=service_id)
     db = get_db()
     account = db.execute(
         'SELECT status FROM accounts WHERE id=?', (account_id,)
     ).fetchone()
     if not account or account['status'] != 'active':
-        flash('专线账号不存在或未启用', 'error')
-        return redirect(url_for('service_detail', service_id=service_id))
+        return _form_error('专线账号不存在或未启用', 'service_detail', service_id=service_id)
     try:
         cursor = db.execute(
             '''UPDATE customer_services SET account_id=?, wechat_id=?, relationship=?,
@@ -1854,17 +1868,15 @@ def service_edit(service_id):
         )
         db.commit()
     except sqlite3.IntegrityError:
-        flash('修改后会与已有服务记录重复', 'error')
-        return redirect(url_for('service_detail', service_id=service_id))
+        return _form_error('修改后会与已有服务记录重复', 'service_detail', service_id=service_id)
     if cursor.rowcount == 0:
-        flash('用户服务不存在', 'error')
-        return redirect(url_for('services_list'))
+        return _form_error('用户服务不存在', 'services_list')
     audit_event(
         'customer_service.update', 'success', service_id=service_id,
         account_id=account_id
     )
     flash('用户服务已更新', 'success')
-    return redirect(url_for('service_detail', service_id=service_id))
+    return _form_redirect('service_detail', service_id=service_id)
 
 
 @app.route('/services/<int:service_id>/renew', methods=['POST'])
@@ -1876,8 +1888,7 @@ def service_renew(service_id):
         )
         notes = validate_text(request.form.get('notes', ''), '续期备注', MAX_NOTES_CHARS)
     except ValueError as error:
-        flash(str(error), 'error')
-        return redirect(url_for('service_detail', service_id=service_id))
+        return _form_error(str(error), 'service_detail', service_id=service_id)
     db = get_db()
     db.execute('BEGIN IMMEDIATE')
     service = db.execute(
@@ -1886,12 +1897,10 @@ def service_renew(service_id):
     ).fetchone()
     if not service:
         db.rollback()
-        flash('用户服务不存在', 'error')
-        return redirect(url_for('services_list'))
+        return _form_error('用户服务不存在', 'services_list')
     if new_expires_on <= parse_iso_date(service['expires_on'], '当前到期日期'):
         db.rollback()
-        flash('新到期日期必须晚于当前到期日期；日期纠错请使用编辑功能', 'error')
-        return redirect(url_for('service_detail', service_id=service_id))
+        return _form_error('新到期日期必须晚于当前到期日期；日期纠错请使用编辑功能', 'service_detail', service_id=service_id)
     db.execute(
         '''INSERT INTO service_renewals (
                service_id, old_expires_on, new_expires_on, notes
@@ -1906,7 +1915,9 @@ def service_renew(service_id):
     db.commit()
     audit_event('customer_service.renew', 'success', service_id=service_id)
     flash(f'续期成功，新到期日为 {new_expires_on.isoformat()}', 'success')
-    return redirect(url_for('service_detail', service_id=service_id))
+    if request.form.get('return_to') == 'dashboard':
+        return _form_redirect('dashboard', _anchor='attention-title')
+    return _form_redirect('service_detail', service_id=service_id)
 
 
 @app.route('/services/<int:service_id>/remind', methods=['POST'])
@@ -2325,6 +2336,9 @@ def api_check_by_host():
         'success',
         status='online' if result['online'] else 'offline',
     )
+    result['checked_at'] = db.execute(
+        'SELECT CURRENT_TIMESTAMP'
+    ).fetchone()[0] + ' UTC'
     return jsonify(result)
 
 @app.route('/api/nodes/<int:node_id>/check', methods=['POST'])
