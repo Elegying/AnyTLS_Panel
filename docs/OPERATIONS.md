@@ -30,7 +30,7 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.10/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.11/deploy.sh -o "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
 ```
@@ -38,7 +38,7 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.4.10 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.11 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -46,7 +46,7 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.4.10" bash /opt/anytls-panel/deploy.sh
+ANYTLS_REPO_REF="v1.4.11" bash /opt/anytls-panel/deploy.sh
 ```
 
 上述本机更新命令适用于已安装 `v1.4.5` 或更新版本的部署脚本；更早版本请使用前面的完整下载命令。指定 `ANYTLS_REPO_REF`、`ANYTLS_REPO_URL` 或 `ANYTLS_REPO_SUBDIR` 时会从仓库拉取；均未指定且脚本旁有完整项目源码时使用本地文件。形如 `vX.Y.Z` 的版本必须是真实标签，且源码 `VERSION` 必须匹配，检查在停服前完成。
@@ -247,7 +247,7 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.10/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.11/deploy.sh -o "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
 ```
@@ -370,3 +370,5 @@ schema 6 迁移由应用初始化自动、幂等执行，保留旧字段和历�
 本次本地验证采用虚构节点与独立临时数据库，不代表生产服务器路径或客户端网络已验证。
 
 检测不会自动运行。旧版记录显示“旧版结果待复测”，点击单项“检测”或“检测全部”获取新证据。批量优先处理待确认和最早尝试的节点，最多四路并发、每次启动间隔 400 毫秒、每轮最多两分钟；点击“继续检测”处理未完成项目。遇到请求限流会保留结果及队列，按照提示等待后继续。刷新页面会重新按持久化状态排序，未检测的旧结果优先处理。
+
+监控页按协议、地址、端口、SNI、TLS 及传输参数合并重复账号节点，仅凭据或显示名不同的配置共用一个代表入口检查。每组显示关联账号数和配置数，单项与批量操作都只检测代表节点；结果仍仅代表入口检查，不证明组内所有账号认证可用。账号详情保留独立记录；删除代表节点后，会选择现存节点及其自身结果，不继承被删除账号的证据。无法解析的配置不合并。

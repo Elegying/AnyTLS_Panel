@@ -9,7 +9,7 @@
 
 ![AnyTLS Panel 仪表盘](docs/assets/dashboard.jpg)
 
-> 当前正式版本：`v1.4.10`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
+> 当前正式版本：`v1.4.11`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
 
 ## 你可以用它做什么
 
@@ -50,7 +50,7 @@
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.10/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.11/deploy.sh -o "$installer_dir/deploy.sh"
   less "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
@@ -61,7 +61,7 @@
 如果你已经审查过脚本，也可以使用一行命令：
 
 ```bash
-(set -e; installer_dir="$(mktemp -d)"; trap 'rm -rf -- "$installer_dir"' EXIT; curl -fL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.10/deploy.sh -o "$installer_dir/deploy.sh"; bash "$installer_dir/deploy.sh")
+(set -e; installer_dir="$(mktemp -d)"; trap 'rm -rf -- "$installer_dir"' EXIT; curl -fL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.11/deploy.sh -o "$installer_dir/deploy.sh"; bash "$installer_dir/deploy.sh")
 ```
 
 下载失败会停止执行并删除临时文件。更新操作见[运维手册](docs/OPERATIONS.md#更新)。

@@ -80,6 +80,24 @@ def probe_options(node):
             'note': '仅验证入口；传输升级、代理认证和代理访问均未验证'}
 
 
+def entry_probe_key(node):
+    """Group entry checks only; never use this key for account authentication."""
+    node = dict(node)
+    protocol = (node.get('protocol') or 'anytls').lower()
+    uri = node.get('raw_uri') or ''
+    parsed = parse_protocol_uri(uri, protocol) if uri else None
+    if uri and not parsed:
+        return None  # Unparseable configurations must remain independent.
+    extra = dict((parsed or {}).get('extra', {}))
+    if protocol == 'vmess':
+        extra.pop('id', None)  # Account UUID; entry checks do not authenticate.
+        extra.pop('ps', None)  # Display name.
+    elif uri:
+        extra.update(parse_qs(urlparse(uri).query))  # Includes SS plugin options.
+    return (protocol, node['host'].lower(), node['port'],
+            json.dumps([probe_options(node), extra], sort_keys=True, ensure_ascii=False))
+
+
 def check_node_connect(host, port, timeout, resolver, *, allow_private=False, node=None):
     """Every socket uses the validated literal address and one absolute deadline."""
     options = probe_options(node)

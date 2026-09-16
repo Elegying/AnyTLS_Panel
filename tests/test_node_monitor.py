@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import socket
@@ -211,6 +212,58 @@ class NodeMonitorIntegrationTests(unittest.TestCase):
         self.assertIn('检测未完成', self.client.get('/nodes/monitor').text)
         self.assertEqual(self.client.post('/api/check-by-host', headers=self.headers,
             json={'host': 'entry.example', 'port': 443}).status_code, 409)
+
+    def test_monitor_groups_credentials_but_keeps_results_account_scoped(self):
+        with self.module.app.app_context():
+            db = self.module.get_db()
+            db.execute("UPDATE nodes SET raw_uri=replace(raw_uri, 'tls2', 'tls1') WHERE id=2")
+            db.commit()
+        page = self.client.get('/nodes/monitor').text
+        self.assertEqual(page.count('class="node-health"'), 1)
+        self.assertIn('关联 2 个账号', page)
+        self.assertNotIn('fake-1', page)
+        with mock.patch.object(self.module, '_check_node_connect', return_value=entry_result()) as check:
+            response = self.client.post('/api/nodes/1/check', headers=self.headers)
+        self.assertEqual(check.call_count, 1)
+        self.assertEqual(response.json['health']['status'], 'entry')
+        self.assertEqual(self.rows()[1]['probe_result'], '')
+        refreshed = self.client.get('/nodes/monitor').text
+        self.assertEqual(refreshed.count('class="node-health"'), 1)
+        self.assertIn('id="status-1"', refreshed)
+        self.assertIn('入口可达，代理未验证', refreshed)
+        with self.module.app.app_context():
+            db = self.module.get_db()
+            db.execute("DELETE FROM nodes WHERE id=1"); db.commit()
+        refreshed = self.client.get('/nodes/monitor').text
+        self.assertIn('id="status-2"', refreshed)
+        self.assertIn('未检测', refreshed)
+
+    def test_monitor_keeps_sni_and_transport_variants_separate(self):
+        self.assertEqual(self.client.get('/nodes/monitor').text.count('class="node-health"'), 2)
+        a, b = self.rows()
+        b.update(raw_uri=a['raw_uri'].replace('fake-1', 'fake-2'))
+        self.assertEqual(probe.entry_probe_key(a), probe.entry_probe_key(b))
+        for suffix in ('&type=ws&path=/socket', '&alpn=h2', '&allowInsecure=1', '&security=reality'):
+            self.assertNotEqual(probe.entry_probe_key(a), probe.entry_probe_key(dict(b, raw_uri=b['raw_uri']+suffix)))
+        self.assertNotEqual(probe.entry_probe_key(a), probe.entry_probe_key(dict(b, protocol='vless')))
+        self.assertIsNone(probe.entry_probe_key(dict(b, raw_uri='malformed')))
+
+    def test_entry_group_keys_cover_vmess_credentials_and_ss_plugins(self):
+        def vmess(uuid, name, sni='tls.example'):
+            payload = {'add': 'entry.example', 'port': 443, 'id': uuid, 'ps': name,
+                       'net': 'ws', 'path': '/socket', 'tls': 'tls', 'sni': sni}
+            return {'host': 'entry.example', 'port': 443, 'protocol': 'vmess',
+                    'raw_uri': 'vmess://' + base64.b64encode(json.dumps(payload).encode()).decode()}
+        self.assertEqual(probe.entry_probe_key(vmess('fake-1', 'one')),
+                         probe.entry_probe_key(vmess('fake-2', 'two')))
+        self.assertNotEqual(probe.entry_probe_key(vmess('fake-1', 'one')),
+                            probe.entry_probe_key(vmess('fake-2', 'two', 'other.example')))
+        a = {'host': 'entry.example', 'port': 443, 'protocol': 'shadowsocks',
+             'raw_uri': 'ss://aes-128-gcm:fake-one@entry.example:443?plugin=obfs-local'}
+        b = dict(a, raw_uri=a['raw_uri'].replace('fake-one', 'fake-two'))
+        self.assertEqual(probe.entry_probe_key(a), probe.entry_probe_key(b))
+        self.assertNotEqual(probe.entry_probe_key(a), probe.entry_probe_key(
+            dict(b, raw_uri=b['raw_uri'].replace('obfs-local', 'other-plugin'))))
 
     def test_csrf_auth_private_policy_and_duplicate_global_limit(self):
         self.assertEqual(self.client.post('/api/nodes/1/check').status_code, 400)
