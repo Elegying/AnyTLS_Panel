@@ -102,7 +102,7 @@
                     {% for n in attention_nodes %}
                     {% set endpoint = ('[' ~ n.host ~ ']:' ~ n.port) if ':' in n.host else (n.host ~ ':' ~ n.port) %}
                     <li class="attention-item">
-                        <div class="attention-heading"><a class="alert-name text-link" href="{{ url_for('account_detail', account_id=n.account_id) }}">{{ n.name }}</a><span class="badge badge-{{ n.health.tone }}" data-probe-expires="{{ n.health.expires_at or '' }}" data-probe-status="{{ n.health.status }}">{{ n.health.label }}</span></div>
+                        <div class="attention-heading"><a class="alert-name text-link" href="{{ url_for('account_detail', account_id=n.account_id) }}">{{ n.name }}</a><span class="badge badge-{{ n.health.tone }}" data-probe-health="{{ {'status': n.health.status, 'age_seconds': n.health.age_seconds, 'ttl_seconds': n.health.ttl_seconds} | tojson | forceescape }}">{{ n.health.label }}</span></div>
                         <div class="alert-detail">{{ endpoint }} · {{ n.health.checked_at or '尚未检测' }}{% if n.health.age_seconds is not none %} · {{ n.health.age_seconds // 60 }} 分钟前{% endif %}</div>
                     </li>
                     {% endfor %}

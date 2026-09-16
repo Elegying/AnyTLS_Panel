@@ -104,6 +104,8 @@ class LayeredProbeTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         legacy = probe.node_health({'is_online': 1, 'last_checked_at': now.isoformat()}, now)
         self.assertEqual(legacy['status'], 'expired')
+        self.assertEqual(legacy['label'], '旧版结果待复测')
+        self.assertIn('点击检测', legacy['msg'])
         self.assertIn('历史入口', legacy['previous'])
         result = entry_result()
         result['status'] = 'verified'
