@@ -7,24 +7,24 @@
         <p class="eyebrow">节点检测</p><h1 class="page-title">监控</h1>
         <p class="page-description">从面板服务器检测，不代表所有运营商和客户端网络均可达。入口可达不等于代理可用。</p>
         <p class="page-description">结果有效期 15 分钟；当前仅支持入口检测，代理认证与代理访问均未验证。</p>
-        <p class="page-description">检测由按钮触发，不会自动复测。批量优先检测待确认及旧结果，每轮最多 2 分钟；未完成时点击“继续检测”。</p>
+        <p class="page-description">共 {{ total_nodes }} 条账号节点，合并为 {{ nodes | length }} 个入口组；仅账号凭据不同不重复检测。检测由按钮触发，不会自动复测。批量优先检测待确认及旧结果，每轮最多 2 分钟；未完成时点击“继续检测”。</p>
     </div>
     <div class="page-actions"><span class="page-meta" id="check-status" role="status"></span><button class="btn btn-primary" id="checkAllBtn" type="button" data-action="check-all"><i class="bi bi-radar" aria-hidden="true"></i>检测全部</button></div>
 </header>
 <section class="monitor-summary" aria-label="节点状态汇总">
-    <div class="summary-card"><div class="metric-label">节点配置</div><div class="summary-card-value is-blue">{{ nodes | length }}</div></div>
+    <div class="summary-card"><div class="metric-label">入口组</div><div class="summary-card-value is-blue">{{ nodes | length }}</div></div>
     <div class="summary-card"><div class="metric-label">当前代理验证通过</div><div class="summary-card-value is-green" id="stat-verified">{{ nodes | selectattr('health.status', 'equalto', 'verified') | list | length }}</div></div>
     <div class="summary-card"><div class="metric-label">入口可达 · 代理未验证</div><div class="summary-card-value is-orange" id="stat-entry">{{ nodes | selectattr('health.status', 'equalto', 'entry') | list | length }}</div></div>
     <div class="summary-card"><div class="metric-label">失败 / 过期 / 待确认</div><div class="summary-card-value" id="stat-other">{{ nodes | rejectattr('health.status', 'in', ['verified', 'entry']) | list | length }}</div></div>
 </section>
 <section class="panel">
-    <header class="panel-header"><h2 class="panel-title">节点配置列表</h2><span class="panel-meta">按账号及配置独立记录，避免同入口状态互相覆盖</span></header>
+    <header class="panel-header"><h2 class="panel-title">入口检测列表</h2><span class="panel-meta">相同入口配置合并；每组只检测一个代表节点</span></header>
     {% if nodes %}
     <div class="table-scroll"><table class="rwd-table" id="monitorTable">
-        <thead><tr><th>节点 / 账号</th><th>协议 / 入口</th><th>检测结论与时间</th><th>操作</th></tr></thead>
+        <thead><tr><th>节点 / 关联账号</th><th>协议 / 入口</th><th>检测结论与时间</th><th>操作</th></tr></thead>
         <tbody>{% for n in nodes %}<tr>
-            <td data-label="节点 / 账号"><span class="cell-title">{{ n.name }}</span><a class="cell-subtitle" href="{{ url_for('account_detail', account_id=n.account_id) }}">账号 #{{ n.account_id }}</a></td>
-            <td data-label="协议 / 入口"><span class="badge badge-blue">{{ n.protocol or 'anytls' }}</span><span class="cell-subtitle">{{ '[' ~ n.host ~ ']' if ':' in n.host else n.host }}:{{ n.port }}</span></td>
+            <td data-label="节点 / 关联账号"><div class="cell-stack"><span class="cell-title">{{ n.name }}</span><span class="cell-subtitle">关联 {{ n.account_ids | length }} 个账号 · {{ n.node_count }} 条配置</span><a class="cell-subtitle" href="{{ url_for('account_detail', account_id=n.account_id) }}">代表账号 #{{ n.account_id }}</a></div></td>
+            <td data-label="协议 / 入口"><div class="cell-stack"><span class="badge badge-blue">{{ n.protocol or 'anytls' }}</span><span class="cell-subtitle">{{ '[' ~ n.host ~ ']' if ':' in n.host else n.host }}:{{ n.port }}</span></div></td>
             {{ node_health_cell(n) }}
             <td data-label="操作"><button class="btn btn-sm btn-ghost" type="button" data-action="check-node" data-node-id="{{ n.id }}">检测</button></td>
         </tr>{% endfor %}</tbody>

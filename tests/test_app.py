@@ -3912,7 +3912,7 @@ proxies:
         self.assertEqual(response.status_code, 413)
         parse.assert_not_called()
 
-    def test_nodes_monitor_separates_configurations_at_duplicate_endpoint(self):
+    def test_nodes_monitor_groups_same_entry_with_different_accounts(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
             app = load_app(database)
@@ -3943,9 +3943,10 @@ proxies:
 
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("latest-status", html)
+        self.assertNotIn("latest-status", html)
         self.assertIn("older-status", html)
-        self.assertIn("按账号及配置独立记录", html)
+        self.assertIn("关联 2 个账号", html)
+        self.assertEqual(html.count('class="node-health"'), 1)
 
     def test_check_by_host_rejects_invalid_port(self):
         with tempfile.TemporaryDirectory() as tmp:

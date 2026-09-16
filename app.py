@@ -61,7 +61,7 @@ from protocol_codecs import (
 from security_utils import hash_password, verify_password
 from sqlite_rate_limit import enforce_rate_limit, rate_limit
 from traffic_token import make_account_traffic_token
-from node_probe import check_node_connect, node_health
+from node_probe import check_node_connect, entry_probe_key, node_health
 from panel_updates import CURRENT_VERSION, ReleaseChecker
 
 
@@ -2000,7 +2000,14 @@ def service_delete(service_id):
 def nodes_monitor():
     db = get_db()
     nodes = db.execute('SELECT * FROM nodes ORDER BY host, port, account_id, id').fetchall()
-    return render_template('monitor.html', nodes=_nodes_with_health(nodes))
+    groups = {}
+    for node in _nodes_with_health(nodes):
+        key = entry_probe_key(node) or ('unparsed', node['id'])
+        # Stable representative keeps single/bulk checks and refresh consistent.
+        group = groups.setdefault(key, dict(node, account_ids=set(), node_count=0))
+        group['account_ids'].add(node['account_id'])
+        group['node_count'] += 1
+    return render_template('monitor.html', nodes=list(groups.values()), total_nodes=len(nodes))
 
 
 def _nodes_with_health(nodes):
