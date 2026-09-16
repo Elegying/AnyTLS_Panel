@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from probe_fixtures import entry_result
 from test_app import authenticate_session, extract_csrf_token, load_app
 
 
@@ -105,7 +106,7 @@ class FormFeedbackTests(unittest.TestCase):
             db = self.module.get_db()
             db.execute("INSERT INTO nodes(account_id,name,host,port,password) VALUES(1,'demo','example.invalid',443,'fake')")
             db.commit()
-        with mock.patch.object(self.module, '_check_node_connect', return_value={'online': True, 'latency': 12}):
+        with mock.patch.object(self.module, '_check_node_connect', return_value=entry_result(12)):
             response = self.client.post('/api/check-by-host', headers=self.headers,
                                         json={'host': 'example.invalid', 'port': 443})
         self.assertTrue(response.json['online'])

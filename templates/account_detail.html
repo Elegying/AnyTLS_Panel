@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_node_health.html" import node_health_cell %}
 {% block title %}{{ account.name }} - AnyTLS Panel{% endblock %}
 {% block content %}
 <nav class="breadcrumb" aria-label="面包屑">
@@ -15,7 +16,7 @@
         <p class="page-description">查看专线节点、流量周期和关联的下游用户服务。</p>
     </div>
     <div class="page-actions">
-        <button class="btn btn-ghost" type="button" data-action="check-all"><i class="bi bi-radar" aria-hidden="true"></i>检测全部</button>
+        <span id="check-status" class="page-meta" role="status"></span><button id="checkAllBtn" class="btn btn-ghost" type="button" data-action="check-all"><i class="bi bi-radar" aria-hidden="true"></i>检测全部</button>
         <form method="POST" action="{{ url_for('account_sync', account_id=account.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn btn-success" type="submit"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>同步</button>
@@ -82,13 +83,13 @@
 
 <section class="panel">
     <header class="panel-header">
-        <h2 class="panel-title"><i class="bi bi-hdd-stack" aria-hidden="true"></i>节点列表</h2>
+        <div><h2 class="panel-title"><i class="bi bi-hdd-stack" aria-hidden="true"></i>节点列表</h2><p class="cell-subtitle">从面板服务器检测，不代表所有运营商和客户端网络均可达。入口可达不等于代理可用，结果有效期 15 分钟。</p></div>
         <div class="cell-row"><span class="panel-meta">共 {{ nodes | length }} 个节点</span><button class="btn btn-sm btn-ghost" type="button" data-action="open-modal" data-modal="renameModal"><i class="bi bi-pencil" aria-hidden="true"></i>重命名账号</button></div>
     </header>
     {% if nodes %}
     <div class="table-scroll">
         <table class="rwd-table">
-            <thead><tr><th class="hide-mobile">#</th><th>节点名称</th><th>连接地址</th><th>访问密钥</th><th>状态</th><th class="hide-mobile">最后检测</th><th>操作</th></tr></thead>
+            <thead><tr><th class="hide-mobile">#</th><th>节点名称</th><th>连接地址</th><th>访问密钥</th><th>检测结论与时间</th><th>操作</th></tr></thead>
             <tbody>
             {% for n in nodes %}
             {% set endpoint = ('[' ~ n.host ~ ']:' ~ n.port) if ':' in n.host else (n.host ~ ':' ~ n.port) %}
@@ -97,8 +98,7 @@
                 <td data-label="节点"><span class="cell-title">{{ n.name }}</span><span class="cell-subtitle">{{ n.protocol or 'anytls' }}</span></td>
                 <td data-label="地址"><div class="secret-value"><code class="code-value">{{ endpoint }}</code><button class="copy-button" type="button" data-action="copy-value" data-copy-value="{{ endpoint | e }}" aria-label="复制 {{ n.name }} 的连接地址"><i class="bi bi-copy" aria-hidden="true"></i></button></div></td>
                 <td data-label="访问密钥"><div class="secret-value"><code class="code-value" id="pw-{{ n.id }}">{{ n.password[:6] }}•••</code><button class="copy-button" type="button" data-action="copy-value" data-copy-value="{{ n.password | e }}" aria-label="复制 {{ n.name }} 的访问密钥"><i class="bi bi-copy" aria-hidden="true"></i></button><button class="copy-button" type="button" data-action="toggle-password" data-node-id="{{ n.id }}" data-password="{{ n.password | e }}" aria-label="显示 {{ n.name }} 的完整访问密钥" aria-pressed="false"><i class="bi bi-eye" aria-hidden="true"></i></button></div></td>
-                <td data-label="状态" id="status-{{ n.id }}"><span class="badge {{ 'badge-green' if n.is_online == 1 else 'badge-red' if n.is_online == 0 else 'badge-neutral' }}">{{ '在线' if n.is_online == 1 else '离线' if n.is_online == 0 else '未检测' }}</span></td>
-                <td data-label="检测时间" class="hide-mobile"><span class="cell-subtitle">{{ n.last_checked_at or '—' }}</span></td>
+                {{ node_health_cell(n) }}
                 <td data-label="操作"><div class="cell-actions"><button class="btn btn-sm btn-ghost" type="button" data-action="check-node" data-node-id="{{ n.id }}">检测</button><button class="btn btn-sm btn-icon btn-ghost" type="button" data-action="share-node" data-uri="{{ n.raw_uri | e }}" aria-label="复制 {{ n.name }} 的原始节点链接"><i class="bi bi-link-45deg" aria-hidden="true"></i></button><form method="POST" action="{{ url_for('node_delete', node_id=n.id) }}" data-confirm="确认删除节点 {{ n.name | e }}？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-danger" type="submit">删除</button></form></div></td>
             </tr>
             {% endfor %}
@@ -179,31 +179,6 @@ function togglePw(id, full, button) {
     button.querySelector('i').className = 'bi ' + (visiblePasswords[id] ? 'bi-eye-slash' : 'bi-eye');
 }
 
-async function checkNode(id) {
-    const element = document.getElementById('status-' + id);
-    element.innerHTML = '<span class="badge badge-blue">检测中…</span>';
-    try {
-        const response = await fetch('/api/nodes/' + id + '/check', {method: 'POST', headers: csrfHeaders()});
-        const data = await response.json();
-        element.innerHTML = data.status === 'online' ? '<span class="badge badge-green">在线</span>' : '<span class="badge badge-red">离线</span>';
-    } catch (error) { element.innerHTML = '<span class="badge badge-red">检测失败</span>'; }
-}
-
-async function checkAll() {
-    const elements = document.querySelectorAll('[id^="status-"]');
-    elements.forEach(element => { element.innerHTML = '<span class="badge badge-blue">检测中…</span>'; });
-    try {
-        const response = await fetch('/api/accounts/{{ account.id }}/check-all', {method: 'POST', headers: csrfHeaders()});
-        const data = await response.json();
-        (data.results || []).forEach(result => {
-            const element = document.getElementById('status-' + result.node_id);
-            if (element) element.innerHTML = result.online ? '<span class="badge badge-green">在线</span>' : '<span class="badge badge-red">离线</span>';
-        });
-        showToast('节点检测已完成', true);
-    } catch (error) {
-        elements.forEach(element => { element.innerHTML = '<span class="badge badge-red">检测失败</span>'; });
-        showToast('批量检测失败', false);
-    }
-}
 </script>
+<script src="{{ url_for('static', filename='node-monitor.js') }}" defer></script>
 {% endblock %}

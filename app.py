@@ -61,7 +61,7 @@ from protocol_codecs import (
 from security_utils import hash_password, verify_password
 from sqlite_rate_limit import enforce_rate_limit, rate_limit
 from traffic_token import make_account_traffic_token
-from node_probe import check_node_connect
+from node_probe import check_node_connect, node_health
 from panel_updates import CURRENT_VERSION, ReleaseChecker
 
 
@@ -1260,16 +1260,10 @@ def dashboard():
     total_nodes = sum(a['node_count'] or 0 for a in accounts)
     total_traffic_used = sum(a['traffic_used_bytes'] or 0 for a in accounts)
     total_traffic_limit = sum((a['traffic_limit_gb'] or 0) * 1024**3 for a in accounts)
-    node_health = db.execute('''
-        SELECT
-            SUM(CASE WHEN is_online = 1 THEN 1 ELSE 0 END) AS online_nodes,
-            SUM(CASE WHEN is_online = 0 THEN 1 ELSE 0 END) AS offline_nodes,
-            SUM(CASE WHEN is_online NOT IN (0, 1) OR is_online IS NULL THEN 1 ELSE 0 END) AS unknown_nodes
-        FROM nodes
-    ''').fetchone()
-    online_nodes = int(node_health['online_nodes'] or 0)
-    offline_nodes = int(node_health['offline_nodes'] or 0)
-    unknown_nodes = int(node_health['unknown_nodes'] or 0)
+    health_nodes = _nodes_with_health(db.execute('SELECT * FROM nodes').fetchall())
+    online_nodes = sum(n['health']['status'] == 'verified' for n in health_nodes)
+    offline_nodes = sum(n['health']['status'] in ('failed', 'tls_error') for n in health_nodes)
+    unknown_nodes = len(health_nodes) - online_nodes - offline_nodes
     last_synced_at = max(
         (a['last_synced_at'] for a in accounts if a['last_synced_at']),
         default=None,
@@ -1305,14 +1299,7 @@ def dashboard():
         if a['status'] == 'active' and remaining is not None and remaining <= 30:
             expiring_accounts.append({**dict(a), 'remaining': remaining})
     expiring_accounts.sort(key=lambda account: (account['remaining'], account['id']))
-    attention_nodes = db.execute('''
-        SELECT id, account_id, name, host, port, is_online, last_checked_at
-        FROM nodes
-        WHERE is_online != 1 OR is_online IS NULL
-        ORDER BY CASE WHEN is_online = 0 THEN 0 ELSE 1 END,
-                 last_checked_at DESC,
-                 id DESC
-    ''').fetchall()
+    attention_nodes = [n for n in health_nodes if n['health']['status'] != 'verified']
 
     return render_template('dashboard.html',
         accounts=accounts,
@@ -1327,6 +1314,8 @@ def dashboard():
         attention_total=(len(renewal_services) + len(expiring_accounts)
                          + len(warning_accounts) + len(attention_nodes)),
         online_nodes=online_nodes,
+        node_summaries=[{'status': n['health']['status'], 'expires_at': n['health']['expires_at']}
+                        for n in health_nodes],
         offline_nodes=offline_nodes,
         unknown_nodes=unknown_nodes,
         last_synced_at=last_synced_at,
@@ -1510,7 +1499,7 @@ def account_detail(account_id):
     ).fetchall()
 
     return render_template(
-        'account_detail.html', account=account, nodes=nodes, services=services
+        'account_detail.html', account=account, nodes=_nodes_with_health(nodes), services=services
     )
 
 @app.route('/accounts/<int:account_id>/rename', methods=['POST'])
@@ -1605,38 +1594,29 @@ def account_delete(account_id):
     return redirect(url_for('accounts_list'))
 
 
+def _node_config_key(node):
+    # Names/fragments do not affect connectivity; credentials and all options do.
+    return (node.get('protocol') or 'anytls', node['host'], node['port'],
+            node['password'], (node.get('raw_uri') or '').split('#', 1)[0])
+
+
 def _replace_account_nodes(db, account_id, nodes):
-    health_by_endpoint = {
-        (row['protocol'], row['host'], row['port']): (
-            row['is_online'], row['latency_ms'], row['last_checked_at']
-        )
-        for row in db.execute(
-            '''SELECT protocol, host, port, is_online, latency_ms, last_checked_at
-               FROM nodes WHERE account_id=?''',
-            (account_id,),
-        )
+    health_by_config = {
+        _node_config_key(dict(row)): tuple(row[field] for field in (
+            'is_online', 'latency_ms', 'last_checked_at', 'probe_result',
+            'probe_error', 'probe_attempt_at'))
+        for row in db.execute('SELECT * FROM nodes WHERE account_id=?', (account_id,))
     }
     db.execute('DELETE FROM nodes WHERE account_id=?', (account_id,))
     for node in nodes:
-        protocol = node.get('protocol', 'anytls')
-        health = health_by_endpoint.get(
-            (protocol, node['host'], node['port']), (-1, -1, None)
-        )
+        health = health_by_config.get(_node_config_key(node), (-1, -1, None, '', '', None))
         db.execute(
             '''INSERT INTO nodes (
-                   account_id, name, host, port, password, raw_uri, protocol,
-                   is_online, latency_ms, last_checked_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (
-                account_id,
-                node['name'],
-                node['host'],
-                node['port'],
-                node['password'],
-                node.get('raw_uri', ''),
-                protocol,
-                *health,
-            ),
+                account_id, name, host, port, password, raw_uri, protocol,
+                is_online, latency_ms, last_checked_at, probe_result, probe_error, probe_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (account_id, node['name'], node['host'], node['port'], node['password'],
+             node.get('raw_uri', ''), node.get('protocol', 'anytls'), *health),
         )
 
 
@@ -2018,32 +1998,15 @@ def service_delete(service_id):
 @app.route('/nodes/monitor')
 @login_required
 def nodes_monitor():
-    """节点检测页面 - 去重显示所有唯一节点"""
     db = get_db()
-    # 按 host:port 去重，取每个唯一节点的最新状态
-    nodes = db.execute('''
-        WITH ranked AS (
-            SELECT n.*,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY n.host, n.port
-                       ORDER BY (n.last_checked_at IS NOT NULL) DESC,
-                                n.last_checked_at DESC, n.id DESC
-                   ) AS row_number
-            FROM nodes n
-        ), account_counts AS (
-            SELECT host, port, COUNT(DISTINCT account_id) AS account_count
-            FROM nodes
-            GROUP BY host, port
-        )
-        SELECT r.host, r.port, r.name, r.is_online, r.last_checked_at,
-               r.protocol, r.raw_uri, r.password, r.latency_ms,
-               c.account_count
-        FROM ranked r
-        JOIN account_counts c ON c.host = r.host AND c.port = r.port
-        WHERE r.row_number = 1
-        ORDER BY r.host, r.port
-    ''').fetchall()
-    return render_template('monitor.html', nodes=nodes)
+    nodes = db.execute('SELECT * FROM nodes ORDER BY host, port, account_id, id').fetchall()
+    return render_template('monitor.html', nodes=_nodes_with_health(nodes))
+
+
+def _nodes_with_health(nodes):
+    running = {row[0] for row in get_db().execute(
+        'SELECT node_id FROM node_probe_leases WHERE expires>?', (time.time(),))}
+    return [dict(n, health=node_health(dict(n, probe_running=n['id'] in running))) for n in nodes]
 
 @app.route('/nodes/<int:node_id>/delete', methods=['POST'])
 @login_required
@@ -2318,7 +2281,7 @@ def api_accounts():
 def api_account_nodes(account_id):
     db = get_db()
     nodes = db.execute('SELECT * FROM nodes WHERE account_id=? ORDER BY id', (account_id,)).fetchall()
-    return jsonify([dict(n) for n in nodes])
+    return jsonify(_nodes_with_health(nodes))
 
 @app.route('/api/check-by-host', methods=['POST'])
 @login_required
@@ -2339,96 +2302,151 @@ def api_check_by_host():
     if not 1 <= port <= 65535:
         return jsonify({"error": "port必须在1-65535之间"}), 400
 
-    result = _check_node_connect(host, port)
+    # Compatibility endpoint: choose a stored configuration, never fan its
+    # TLS/authentication result out to other configurations at the same endpoint.
     db = get_db()
-    db.execute(
-        'UPDATE nodes SET is_online=?, last_checked_at=CURRENT_TIMESTAMP, latency_ms=? WHERE host=? AND port=?',
-        (1 if result['online'] else 0, result.get('latency', -1), host, port)
-    )
+    nodes = db.execute('SELECT id FROM nodes WHERE host=? AND port=?', (host, port)).fetchall()
+    if not nodes:
+        return jsonify({'error': '节点不存在，请先导入配置'}), 404
+    if len(nodes) != 1:
+        return jsonify({'error': '入口对应多个配置，请按节点 ID 检测'}), 409
+    return api_check_node(nodes[0]['id'])
+
+
+def _acquire_probe(node_id):
+    db = get_db()
+    token = secrets.token_hex(16)
+    db.execute('BEGIN IMMEDIATE')
+    db.execute('DELETE FROM node_probe_leases WHERE expires<=?', (time.time(),))
+    busy = db.execute('SELECT 1 FROM node_probe_leases WHERE node_id=?', (node_id,)).fetchone()
+    count = db.execute('SELECT COUNT(*) FROM node_probe_leases WHERE node_id>0').fetchone()[0]
+    if busy or (node_id > 0 and count >= 8):
+        db.commit()
+        return None
+    db.execute('INSERT INTO node_probe_leases VALUES (?, ?, ?)', (node_id, token, time.time() + (30 if node_id < 0 else 20)))
+    if node_id > 0:
+        db.execute("UPDATE nodes SET probe_error='检测任务尚未完成，请稍后刷新或重试', "
+                   "probe_attempt_at=CURRENT_TIMESTAMP WHERE id=?", (node_id,))
     db.commit()
-    audit_event(
-        'node.check_by_host',
-        'success',
-        status='online' if result['online'] else 'offline',
-    )
-    result['checked_at'] = db.execute(
-        'SELECT CURRENT_TIMESTAMP'
-    ).fetchone()[0] + ' UTC'
-    return jsonify(result)
+    return token
+
+
+def _save_probe(node, token, result=None):
+    db = get_db()
+    if result and result.get('status') == 'error':
+        result = None
+    # A replaced subscription/configuration or an expired lease must not receive
+    # a late result. Errors preserve the last completed evidence.
+    db.execute('BEGIN IMMEDIATE')
+    lease = db.execute('SELECT 1 FROM node_probe_leases WHERE node_id=? AND token=? AND expires>?',
+                       (node['id'], token, time.time())).fetchone()
+    current = db.execute('SELECT * FROM nodes WHERE id=?', (node['id'],)).fetchone()
+    if lease and current and _node_config_key(dict(current)) == _node_config_key(node):
+        if result is not None:
+            db.execute('''UPDATE nodes SET probe_result=?, probe_error='',
+                probe_attempt_at=CURRENT_TIMESTAMP, last_checked_at=?, is_online=?, latency_ms=? WHERE id=?''',
+                (json.dumps(result, ensure_ascii=False), result['checked_at'],
+                 1 if result['online'] else 0 if result['status'] in ('failed', 'tls_error') else -1,
+                 result.get('latency', -1), node['id']))
+        else:
+            db.execute("UPDATE nodes SET probe_error='检测任务未完成，请重试；上次结果仅供参考', "
+                       "probe_attempt_at=CURRENT_TIMESTAMP WHERE id=?", (node['id'],))
+    db.execute('DELETE FROM node_probe_leases WHERE node_id=? AND token=?', (node['id'], token))
+    db.commit()
+    current = db.execute('SELECT * FROM nodes WHERE id=?', (node['id'],)).fetchone()
+    return _nodes_with_health([current])[0]['health'] if current else None
+
+
+def _run_probe(node, timeout=8):
+    return _check_node_connect(node['host'], node['port'], timeout=timeout, node=node)
+
+
+def _probe_response(node_id, health):
+    return {'node_id': node_id, 'health': health,
+            'status': health['status'], 'msg': health['msg'],
+            # Legacy field describes entry evidence only, not proxy usability.
+            'online': health['status'] in ('entry', 'verified'),
+            'latency': health['latency'], 'checked_at': health['checked_at']}
+
+
+@app.route('/api/nodes/<int:node_id>/health')
+@login_required
+def api_node_health(node_id):
+    node = get_db().execute('SELECT * FROM nodes WHERE id=?', (node_id,)).fetchone()
+    if not node:
+        return jsonify({'error': '节点不存在'}), 404
+    return jsonify(_probe_response(node_id, _nodes_with_health([node])[0]['health']))
+
 
 @app.route('/api/nodes/<int:node_id>/check', methods=['POST'])
 @login_required
 def api_check_node(node_id):
-    db = get_db()
-    node = db.execute('SELECT * FROM nodes WHERE id=?', (node_id,)).fetchone()
+    node = get_db().execute('SELECT * FROM nodes WHERE id=?', (node_id,)).fetchone()
     if not node:
-        return jsonify({"error": "not found"}), 404
-
+        return jsonify({'error': '节点不存在'}), 404
+    node = dict(node)
+    token = _acquire_probe(node_id)
+    if token is None:
+        return jsonify({'error': '检测正在执行或并发已满，请稍后重试'}), 409
     try:
-        result = _check_node_connect(node['host'], node['port'])
-        db.execute(
-            'UPDATE nodes SET is_online=?, last_checked_at=CURRENT_TIMESTAMP, latency_ms=? WHERE id=?',
-            (1 if result['online'] else 0, result.get('latency', -1), node_id)
-        )
-        db.commit()
-        audit_event(
-            'node.check',
-            'success',
-            node_id=node_id,
-            account_id=node['account_id'],
-            status='online' if result['online'] else 'offline',
-        )
-        return jsonify(result)
+        result = _run_probe(node)
     except Exception:
-        audit_event('node.check', 'failure', node_id=node_id, reason='probe_error')
-        return jsonify({"status": "error", "msg": "节点检测失败"})
+        result = None
+    health = _save_probe(node, token, result)
+    if health is None:
+        return jsonify({'error': '节点配置已更新，请刷新列表'}), 409
+    audit_event('node.check', 'success' if result else 'failure', node_id=node_id,
+                status=health['status'])
+    return jsonify(_probe_response(node_id, health)), 503 if health['status'] == 'error' else 200
+
 
 @app.route('/api/accounts/<int:account_id>/check-all', methods=['POST'])
 @login_required
 @single_bulk_operation
 def api_check_all_nodes(account_id):
+    # Negative IDs reserve an account batch across Gunicorn workers.
+    token = _acquire_probe(-account_id)
+    if token is None:
+        return jsonify({'error': '该账号已有批量检测，请稍后重试'}), 409
+    try:
+        return _check_account_nodes(account_id)
+    finally:
+        db = get_db()
+        db.execute('DELETE FROM node_probe_leases WHERE node_id=? AND token=?', (-account_id, token))
+        db.commit()
+
+
+def _check_account_nodes(account_id):
     db = get_db()
-    nodes = [dict(node) for node in db.execute(
+    nodes = [dict(n) for n in db.execute(
         'SELECT * FROM nodes WHERE account_id=? ORDER BY id LIMIT ?',
-        (account_id, MAX_CHECK_NODES + 1),
-    ).fetchall()]
+        (account_id, MAX_CHECK_NODES + 1))]
     if len(nodes) > MAX_CHECK_NODES:
-        return jsonify({
-            "error": f"节点批量检测上限为 {MAX_CHECK_NODES}，请拆分账号后重试"
-        }), 413
-
-    def check(node):
-        try:
-            return node, _check_node_connect(node['host'], node['port']), None
-        except Exception:
-            return node, None, "节点检测失败"
-
+        return jsonify({'error': f'节点批量检测上限为 {MAX_CHECK_NODES}，请拆分账号后重试'}), 413
+    deadline = time.monotonic() + 20
     results = []
-    checks = _bounded_parallel_map(check, nodes, max_workers=32)
-    for node, r, error in checks:
-        if error is None:
-            latency = r.get('latency', -1)
-            db.execute(
-                'UPDATE nodes SET is_online=?, last_checked_at=CURRENT_TIMESTAMP, latency_ms=? WHERE id=?',
-                (1 if r['online'] else 0, latency, node['id'])
-            )
-            results.append({
-                "node_id": node['id'],
-                "name": node['name'],
-                "online": r['online'],
-                "msg": r['msg'],
-                "latency": latency,
-            })
-        else:
-            results.append({"node_id": node['id'], "name": node['name'], "online": False, "msg": error, "latency": -1})
-    db.commit()
-    audit_event(
-        'node.check_all',
-        'success',
-        account_id=account_id,
-        node_count=len(nodes),
-    )
-    return jsonify({"results": results})
+    # ponytail: synchronous bounded waves; no persistent background task system.
+    for start in range(0, len(nodes), 8):
+        if deadline - time.monotonic() < 1:
+            break
+        wave = []
+        for node in nodes[start:start + 8]:
+            token = _acquire_probe(node['id'])
+            if token:
+                wave.append((node, token))
+        def check(item):
+            node, token = item
+            try:
+                remaining = deadline - time.monotonic()
+                return node, token, _run_probe(node, timeout=min(8, remaining)) if remaining > 0 else None
+            except Exception:
+                return node, token, None
+        for node, token, result in _bounded_parallel_map(check, wave, max_workers=8):
+            health = _save_probe(node, token, result)
+            if health:
+                results.append(_probe_response(node['id'], health))
+    return jsonify({'results': results, 'total': len(nodes),
+                    'incomplete': len(nodes) - sum(r['status'] not in ('error', 'checking') for r in results)})
 
 
 def _bounded_parallel_map(function, items, max_workers=8):
@@ -2438,14 +2456,15 @@ def _bounded_parallel_map(function, items, max_workers=8):
     with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as executor:
         return list(executor.map(function, items))
 
-def _check_node_connect(host, port, timeout=8):
-    """通过受限、固定 IP 的 TLS CONNECT 检测节点可用性。"""
+def _check_node_connect(host, port, timeout=8, *, node=None):
+    """只检测配置支持的入口阶段，不代表代理可以上网。"""
     return check_node_connect(
         host,
         port,
         timeout,
         _resolve_subscription_addresses,
         allow_private=_env_flag('ANYTLS_ALLOW_PRIVATE_NODE_PROBES'),
+        node=node,
     )
 
 @app.route('/api/sync-all', methods=['POST'])

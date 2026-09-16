@@ -688,3 +688,15 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
+
+/* Probe evidence must remain readable in the existing mobile table cards. */
+.node-health { min-width: 230px; max-width: 470px; white-space: normal; overflow-wrap: anywhere; }
+.node-health .badge { white-space: normal; text-align: left; }
+.node-health summary { cursor: pointer; margin-top: 8px; color: var(--accent); }
+.probe-stage { margin: 10px 0; }
+@media (max-width: 768px) {
+    .rwd-table td.node-health { display: block; min-width: 0; max-width: none; text-align: left; }
+    .rwd-table td.node-health::before { display: block; margin-bottom: 8px; }
+    .rwd-table td.node-health > * { max-width: 100%; }
+    .node-health .cell-subtitle { margin-top: 6px; }
+}

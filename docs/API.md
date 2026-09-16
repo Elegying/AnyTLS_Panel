@@ -156,7 +156,7 @@ curl --fail-with-body \
 | --- | --- | --- |
 | `GET` | `/api/accounts` | 获取账号列表 |
 | `GET` | `/api/accounts/<id>/nodes` | 获取账号节点 |
-| `POST` | `/api/check-by-host` | 检测给定主机和端口 |
+| `POST` | `/api/check-by-host` | 检测已导入且唯一的主机端口配置；多配置返回 409 |
 | `POST` | `/api/nodes/<id>/check` | 检测一个已保存节点 |
 | `POST` | `/api/accounts/<id>/check-all` | 批量检测账号节点 |
 | `POST` | `/api/sync-all` | 同步全部活跃账号 |
@@ -186,3 +186,24 @@ curl --fail-with-body \
 - 不放在公开 Issue、日志、截图或分析平台中；
 - 怀疑泄露时在账号详情中重新生成；
 - 上游同步失败时，接口继续读取最后一次成功保存的节点，不会在公开请求中即时访问上游。
+
+
+### 节点检测结果（schema 6）
+
+优先使用 `POST /api/nodes/<id>/check`；`GET /api/nodes/<id>/health` 只读取脱敏状态，不触发出站探测。结果中的 `health` 是监控页、账号详情和仪表盘共用的状态：
+
+- `status`：`unknown` 未检测、`checking` 检测中、`entry` 入口可达但代理未验证、`tls_error` TLS 异常、`failed` 已执行阶段失败、`expired` 结果过期、`error` 任务未完成、`unsupported` 仅完成部分检测。
+- `verified` 预留给同时具备代理认证与代理访问成功证据的结果；当前探测实现不会生成此状态。
+- `stages`：DNS、TCP、TLS、代理认证、代理访问的状态与受控说明；阶段取值为 `success`、`failed`、`not_run`、`not_applicable`、`unsupported`。
+- `checked_at` 显示 UTC，`age_seconds` 为结果年龄，`expires_at` 为过期 Unix 秒，统一有效期 `ttl_seconds=900`。
+- `source` 为面板服务器，不代表其他运营商/客户端网络。`latency` 仅为 TCP 建连耗时，不能当成代理访问延迟。
+- `tls_mode`：`strict` 校验证书、`insecure_configured` 节点明确跳过证书验证、`not_run` 未执行、`not_recorded` 旧记录。
+- `previous`、`attempt_at` 保留上次结论和最近尝试时间；任务异常不会抹去上次完成的证据。
+
+兼容字段 `online=true` 只描述当前入口可达，**不代表代理可用**。不能据此判断认证成功；`online=false` 也可能表示未完成或不支持，请读取 `health.status`。
+
+单项任务异常返回 503 并附带已持久化的 `health`；已存在同节点探测或服务器并发已满返回 409；不存在返回 404。鉴权和 CSRF 保持不变。
+
+`POST /api/accounts/<id>/check-all` 保留批量接口，最多 8 路并发、20 秒网络预算，每项最多 8 秒。响应的 `total` 和 `incomplete` 表示总量与未取得完成结果的数量；未完成项不等于节点离线。
+
+页面批量操作使用最多 4 路单项请求，显示实际完成进度，最多等待 120 秒；浏览器取消等待不代表服务器瞬间停止，刷新后读取服务器最终结果。跨进程节点租约限制服务器最多 8 项探测，同节点禁止同时重复执行。

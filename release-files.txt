@@ -34,10 +34,12 @@ start.sh
 static/favicon.svg
 static/app.css
 static/panel.js
+static/node-monitor.js
 static/vendor/LICENSE.bootstrap-icons
 static/vendor/bootstrap-icons.min.css
 static/vendor/fonts/bootstrap-icons.woff
 static/vendor/fonts/bootstrap-icons.woff2
+templates/_node_health.html
 templates/account_detail.html
 templates/accounts.html
 templates/base.html

@@ -56,7 +56,7 @@ useradd --system --user-group --home-dir "$PANEL_DIR" \
 SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 750 "$DATA_DIR"
 
-"$PANEL_DIR/venv/bin/python" - "$DATA_DIR/anytls.db" <<'PY'
+"$PANEL_DIR/venv/bin/python" - "$DATA_DIR/anytls.db" "$PANEL_DIR" <<'PY'
 import sqlite3
 import sys
 
@@ -88,13 +88,20 @@ chmod 600 "$DATA_DIR/anytls.db"
         "$PANEL_DIR/venv/bin/python" -c 'import app; app.init_db()'
 )
 
-"$PANEL_DIR/venv/bin/python" - "$DATA_DIR/anytls.db" <<'PY'
+"$PANEL_DIR/venv/bin/python" - "$DATA_DIR/anytls.db" "$PANEL_DIR" <<'PY'
 import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as db:
     assert db.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
-    assert db.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 5
+    sys.path.insert(0, sys.argv[2])
+    from db_migrations import SCHEMA_VERSION
+    assert db.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == SCHEMA_VERSION
+    node_columns = {row[1] for row in db.execute('PRAGMA table_info(nodes)')}
+    assert {'probe_result', 'probe_error', 'probe_attempt_at'} <= node_columns
+    assert db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_probe_leases'"
+    ).fetchone()
     columns = {row[1] for row in db.execute('PRAGMA table_info(accounts)')}
     assert {
         'sub_token', 'traffic_upload_bytes', 'traffic_download_bytes',

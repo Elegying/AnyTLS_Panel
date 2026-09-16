@@ -22,6 +22,9 @@ from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 
+from probe_fixtures import entry_result
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_PATH = REPO_ROOT / "app.py"
 RELEASE_VERSION = (REPO_ROOT / "VERSION").read_text().strip()
@@ -99,10 +102,10 @@ class AnyTlsPanelTests(unittest.TestCase):
             "node.example", 443, 1, mock.Mock(side_effect=OSError("dns failed"))
         )
         self.assertFalse(resolver_error["online"])
-        self.assertEqual(resolver_error["msg"], "节点地址解析失败")
+        self.assertIn("节点地址解析失败", resolver_error["msg"])
 
         cases = (
-            (node_probe.ssl.SSLError("tls"), True, "TLS 异常"),
+            (node_probe.ssl.SSLError("tls"), False, "TLS 异常"),
             (node_probe.socket.timeout(), False, "连接超时"),
             (ConnectionRefusedError(), False, "连接被拒绝"),
             (OSError("network down"), False, "连接失败"),
@@ -134,6 +137,7 @@ class AnyTlsPanelTests(unittest.TestCase):
                         443,
                         1,
                         lambda _host, _port, _deadline: ["8.8.8.8"],
+                        node={"protocol": "trojan", "host": "node.example"},
                     )
                 self.assertEqual(result["online"], expected_online)
                 self.assertIn(expected_message, result["msg"])
@@ -145,7 +149,8 @@ class AnyTlsPanelTests(unittest.TestCase):
                 1,
                 lambda _host, _port, _deadline: ["8.8.8.8"],
             )
-        self.assertEqual(expired["msg"], "连接超时")
+        self.assertEqual(expired["status"], "error")
+        self.assertEqual(expired["stages"]["tcp"]["state"], "not_run")
 
     def test_traffic_token_cli_and_validation_fail_closed(self):
         import traffic_token
@@ -2320,7 +2325,7 @@ proxies:
                 with mock.patch.object(
                     app,
                     "_check_node_connect",
-                    return_value={"online": True, "latency": 8, "msg": "在线"},
+                    return_value=entry_result(8),
                 ):
                     by_host = client.post(
                         "/api/check-by-host",
@@ -3349,7 +3354,7 @@ proxies:
         self.assertEqual(response.status_code, 302)
         self.assertEqual(rows, [("existing",)])
 
-    def test_account_sync_preserves_health_for_unchanged_endpoint(self):
+    def test_account_sync_invalidates_health_when_credentials_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
             app = load_app(database)
@@ -3402,7 +3407,7 @@ proxies:
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(
-            saved, ("renamed", "new-password", 1, 42, "2026-09-04 01:02:03")
+            saved, ("renamed", "new-password", -1, -1, None)
         )
 
     def test_sync_all_skips_account_deleted_during_fetch(self):
@@ -3739,7 +3744,7 @@ proxies:
                 ).lastrowid
                 db.commit()
 
-            check_result = {"online": True, "status": "online", "msg": "ok", "latency": 123}
+            check_result = entry_result(123)
             with mock.patch.object(app, "_check_node_connect", return_value=check_result):
                 with app.app.test_client() as client:
                     authenticate_session(app, client)
@@ -3778,7 +3783,7 @@ proxies:
             max_active = 0
             lock = threading.Lock()
 
-            def slow_check(_host, _port):
+            def slow_check(_host, _port, **_kwargs):
                 nonlocal active, max_active
                 with lock:
                     active += 1
@@ -3786,7 +3791,7 @@ proxies:
                 time.sleep(0.03)
                 with lock:
                     active -= 1
-                return {"online": True, "status": "online", "msg": "ok", "latency": 1}
+                return entry_result(1)
 
             with mock.patch.object(app, "_check_node_connect", side_effect=slow_check):
                 with app.app.test_client() as client:
@@ -3907,7 +3912,7 @@ proxies:
         self.assertEqual(response.status_code, 413)
         parse.assert_not_called()
 
-    def test_nodes_monitor_uses_latest_status_for_duplicate_endpoint(self):
+    def test_nodes_monitor_separates_configurations_at_duplicate_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "anytls.db"
             app = load_app(database)
@@ -3939,8 +3944,8 @@ proxies:
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertIn("latest-status", html)
-        self.assertNotIn("older-status", html)
-        self.assertIn("2 个账号", html)
+        self.assertIn("older-status", html)
+        self.assertIn("按账号及配置独立记录", html)
 
     def test_check_by_host_rejects_invalid_port(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3972,7 +3977,7 @@ proxies:
                     app.socket, "create_connection", return_value=raw_socket
                 ) as connect:
                     with mock.patch("ssl.create_default_context", return_value=tls_context):
-                        result = app._check_node_connect("2001:db8::1", 443)
+                        result = app._check_node_connect("2001:db8::1", 443, node={"protocol": "trojan", "host": "2001:db8::1"})
 
         connect.assert_called_once()
         self.assertEqual(connect.call_args.args[0], ("2001:db8::1", 443))
@@ -4065,7 +4070,7 @@ proxies:
                 self.assertEqual(response.status_code, 200)
                 html = response.get_data(as_text=True)
                 card = html.split('class="panel attention-panel"', 1)[1].split("</article>", 1)[0]
-                self.assertIn('aria-label="共 18 项待办"', card)
+                self.assertIn('aria-label="共 19 项待办"', card)
                 self.assertEqual(card.count('<details '), 4)
                 self.assertEqual(card.count('name="dashboard-attention" open'), 1)
                 self.assertNotIn("当前没有待办", card)
@@ -4081,7 +4086,7 @@ proxies:
                     self.assertNotIn(name, card)
                 for index in range(4):
                     self.assertIn(f"node-{index}", card)
-                self.assertNotIn("node-4", card)
+                self.assertIn("node-4", card)
                 self.assertIn("[2001:db8::1]:443", card)
                 self.assertIn("今日到期", card)
                 self.assertIn("剩余30天", card)
@@ -4115,7 +4120,7 @@ proxies:
             html = response.get_data(as_text=True)
             self.assertIn('aria-label="共 0 项待办"', html)
             self.assertIn("当前没有待办", html)
-            self.assertIn("暂无用户续费、账号到期、流量或节点异常提醒。", html)
+            self.assertIn("暂无用户续费、账号到期、流量或节点待确认提醒。", html)
             self.assertNotIn('<details class="attention-group"', html)
             self.assertNotIn("当前没有流量告警", html)
 
@@ -4154,10 +4159,10 @@ proxies:
     def test_monitor_template_does_not_embed_host_in_javascript(self):
         content = (REPO_ROOT / "templates" / "monitor.html").read_text(encoding="utf-8")
 
-        self.assertIn('data-host="{{ n.host }}"', content)
-        self.assertIn('data-action="check-host"', content)
+        self.assertIn('data-node-id="{{ n.id }}"', content)
+        self.assertIn('data-action="check-node"', content)
         self.assertNotIn("checkOne('{{ n.host }}'", content)
-        self.assertIn("action.dataset.host, Number(action.dataset.port)", content)
+        self.assertIn("node-monitor.js", content)
         self.assertNotIn("hostPort.textContent.split(':')", content)
 
     def test_logged_in_fetch_calls_send_csrf_header(self):
@@ -4171,7 +4176,8 @@ proxies:
         self.assertIn("fetch('/api/sync-all', {method: 'POST', headers: csrfHeaders(),", dashboard)
         self.assertIn("generate-token", detail)
         self.assertIn("headers: csrfHeaders({'Content-Type': 'application/json'})", detail)
-        self.assertIn("headers: csrfHeaders({'Content-Type': 'application/json'})", monitor)
+        self.assertIn("node-monitor.js", monitor)
+        self.assertIn("headers: csrfHeaders()", (REPO_ROOT / "static/node-monitor.js").read_text())
 
     def test_deploy_script_supports_interactive_credentials_and_automatic_https(self):
         content = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")

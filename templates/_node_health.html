@@ -1,0 +1,15 @@
+{% macro node_health_cell(n) %}
+<td data-label="检测结论" class="node-health" id="status-{{ n.id }}" data-health="{{ n.health | tojson | forceescape }}" aria-live="polite">
+    <span class="badge badge-{{ n.health.tone }}">{{ n.health.label }}</span>
+    <span class="cell-subtitle">{{ n.health.msg }}</span>
+    <span class="cell-subtitle probe-time">{% if n.health.checked_at %}{{ n.health.checked_at }} · {{ n.health.age_seconds // 60 }} 分钟前{% else %}尚无检测时间{% endif %}</span>
+    <details><summary>检测详情</summary>
+        <p class="cell-subtitle">来源：面板服务器 · 有效期 15 分钟</p>
+        <p class="cell-subtitle">证书验证模式：{{ '严格验证' if n.health.tls_mode == 'strict' else '节点配置跳过验证（不证明证书有效）' if n.health.tls_mode == 'insecure_configured' else '未执行或未记录' }}</p>
+        {% if n.health.status in ['expired', 'error', 'checking'] %}<p>上次：{{ n.health.previous }}</p>{% endif %}
+        {% for stage in n.health.stages %}<p class="probe-stage"><strong>{{ stage.label }}：{{ stage.outcome }}</strong><span class="cell-subtitle">{{ stage.detail }}</span></p>{% endfor %}
+        <p class="cell-subtitle">TCP 建连耗时：{{ (n.health.latency ~ ' ms') if n.health.latency is not none and n.health.latency >= 0 else '未记录' }}；不代表代理访问延迟。</p>
+        {% if n.health.attempt_at %}<p class="cell-subtitle">最近尝试：{{ n.health.attempt_at }} UTC</p>{% endif %}
+    </details>
+</td>
+{% endmacro %}
