@@ -1314,7 +1314,7 @@ def dashboard():
         attention_total=(len(renewal_services) + len(expiring_accounts)
                          + len(warning_accounts) + len(attention_nodes)),
         online_nodes=online_nodes,
-        node_summaries=[{'status': n['health']['status'], 'expires_at': n['health']['expires_at']}
+        node_summaries=[{key: n['health'][key] for key in ('status', 'age_seconds', 'ttl_seconds')}
                         for n in health_nodes],
         offline_nodes=offline_nodes,
         unknown_nodes=unknown_nodes,

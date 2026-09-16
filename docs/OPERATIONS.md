@@ -30,7 +30,7 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.9/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.10/deploy.sh -o "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
 ```
@@ -38,7 +38,7 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.4.9 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.10 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -46,7 +46,7 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.4.9" bash /opt/anytls-panel/deploy.sh
+ANYTLS_REPO_REF="v1.4.10" bash /opt/anytls-panel/deploy.sh
 ```
 
 上述本机更新命令适用于已安装 `v1.4.5` 或更新版本的部署脚本；更早版本请使用前面的完整下载命令。指定 `ANYTLS_REPO_REF`、`ANYTLS_REPO_URL` 或 `ANYTLS_REPO_SUBDIR` 时会从仓库拉取；均未指定且脚本旁有完整项目源码时使用本地文件。形如 `vX.Y.Z` 的版本必须是真实标签，且源码 `VERSION` 必须匹配，检查在停服前完成。
@@ -247,7 +247,7 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.9/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.10/deploy.sh -o "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
 ```
@@ -363,8 +363,10 @@ actionlint
 - 严格 TLS 模式使用配置 SNI（未设置时使用入口域名）。明确配置跳过验证时，只能证明握手完成，不能证明证书有效。
 - TCP 超时说明本次面板服务器到入口的连接失败，不足以证明所有客户端网络都失败。请在实际客户端网络做 DNS、TCP、TLS 及协议认证的分层对照。
 
-结果有效期为 15 分钟，统一显示 UTC 与距今时长。超过有效期和旧版在线结果均不能作为当前可用证明。同步后凭据或连接参数改变会清除旧证据；仅名称改变保留。
+结果有效期为 15 分钟，统一显示 UTC 与距今时长；前端以服务器计算的年龄和单调计时判断时效，不依赖设备日期。超过有效期和旧版在线结果均不能作为当前可用证明。同步后凭据或连接参数改变会清除旧证据；仅名称改变保留。
 
 schema 6 迁移由应用初始化自动、幂等执行，保留旧字段和历史记录；升级前按现有备份流程备份数据库。旧版本界面仍可能使用旧 `is_online` 语义，回退旧版并不能继续提供本版本的准确分层状态。
 
 本次本地验证采用虚构节点与独立临时数据库，不代表生产服务器路径或客户端网络已验证。
+
+检测不会自动运行。旧版记录显示“旧版结果待复测”，点击单项“检测”或“检测全部”获取新证据。批量优先处理待确认和最早尝试的节点，最多四路并发、每次启动间隔 400 毫秒、每轮最多两分钟；点击“继续检测”处理未完成项目。遇到请求限流会保留结果及队列，按照提示等待后继续。刷新页面会重新按持久化状态排序，未检测的旧结果优先处理。
