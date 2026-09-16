@@ -1,6 +1,6 @@
 """Small, ordered SQLite schema migrations for existing installations."""
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _add_account_metadata_columns(db):
@@ -107,12 +107,25 @@ def _add_customer_services(db):
     )
 
 
+def _add_node_probe_results(db):
+    columns = {row[1] for row in db.execute("PRAGMA table_info(nodes)")}
+    for name, declaration in (("probe_result", "TEXT NOT NULL DEFAULT ''"),
+                              ("probe_error", "TEXT NOT NULL DEFAULT ''"),
+                              ("probe_attempt_at", "TEXT")):
+        if name not in columns:
+            db.execute(f"ALTER TABLE nodes ADD COLUMN {name} {declaration}")
+    db.execute("""CREATE TABLE IF NOT EXISTS node_probe_leases (
+        node_id INTEGER PRIMARY KEY, token TEXT NOT NULL, expires REAL NOT NULL
+    )""")
+
+
 _MIGRATIONS = (
     (1, _add_account_metadata_columns),
     (2, _add_rate_limits),
     (3, _add_admin_session_version),
     (4, _add_database_maintenance),
     (5, _add_customer_services),
+    (6, _add_node_probe_results),
 )
 
 

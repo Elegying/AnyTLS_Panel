@@ -30,7 +30,7 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.8/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.9/deploy.sh -o "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
 ```
@@ -38,7 +38,7 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.4.8 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.9 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -46,7 +46,7 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.4.8" bash /opt/anytls-panel/deploy.sh
+ANYTLS_REPO_REF="v1.4.9" bash /opt/anytls-panel/deploy.sh
 ```
 
 上述本机更新命令适用于已安装 `v1.4.5` 或更新版本的部署脚本；更早版本请使用前面的完整下载命令。指定 `ANYTLS_REPO_REF`、`ANYTLS_REPO_URL` 或 `ANYTLS_REPO_SUBDIR` 时会从仓库拉取；均未指定且脚本旁有完整项目源码时使用本地文件。形如 `vX.Y.Z` 的版本必须是真实标签，且源码 `VERSION` 必须匹配，检查在停服前完成。
@@ -247,7 +247,7 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.8/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.9/deploy.sh -o "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
 ```
@@ -351,3 +351,20 @@ actionlint
 - HTTP 订阅被拒绝：改用 HTTPS；只有无法升级的可信源才启用 `ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS=1`。
 - 内网节点检测被拒绝：这是节点探测边界；仅在可信隔离网络启用 `ANYTLS_ALLOW_PRIVATE_NODE_PROBES=1`。
 - HTTPS 下反复跳回登录：确认当前 Caddy 站点仍反向代理到面板端口，且 systemd 服务中的 `ANYTLS_TRUST_PROXY=1`、`ANYTLS_SESSION_COOKIE_SECURE=1` 未被手工覆盖。
+
+
+## 节点监控的证据边界
+
+监控从面板服务器出发检测。当前只验证入口 DNS、TCP 及适用的 TLS，不会使用账号执行代理认证或通过代理请求网站，因此“当前代理验证通过”为 0 是如实提示未验证，不是所有节点不可用。
+
+- 常规 AnyTLS/Trojan 支持 TCP 与 TLS；VMess/VLESS 按节点配置决定是否执行 TLS；Shadowsocks 无插件配置只检测 TCP。
+- WebSocket、gRPC、HTTP/2 配置只探测外层 TCP/TLS，并按配置设置 ALPN；不验证传输升级、路径或代理协议。
+- REALITY、指定客户端 TLS 指纹、特殊传输及 Shadowsocks 插件仅记录能够执行的 TCP 层，TLS 标明不支持。Hysteria/Hysteria2/TUIC 的 UDP/QUIC 不使用 TCP 结果代替，当前仅记录 DNS。
+- 严格 TLS 模式使用配置 SNI（未设置时使用入口域名）。明确配置跳过验证时，只能证明握手完成，不能证明证书有效。
+- TCP 超时说明本次面板服务器到入口的连接失败，不足以证明所有客户端网络都失败。请在实际客户端网络做 DNS、TCP、TLS 及协议认证的分层对照。
+
+结果有效期为 15 分钟，统一显示 UTC 与距今时长。超过有效期和旧版在线结果均不能作为当前可用证明。同步后凭据或连接参数改变会清除旧证据；仅名称改变保留。
+
+schema 6 迁移由应用初始化自动、幂等执行，保留旧字段和历史记录；升级前按现有备份流程备份数据库。旧版本界面仍可能使用旧 `is_online` 语义，回退旧版并不能继续提供本版本的准确分层状态。
+
+本次本地验证采用虚构节点与独立临时数据库，不代表生产服务器路径或客户端网络已验证。

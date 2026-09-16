@@ -91,28 +91,64 @@ test('sync restores controls after session expiry and transport failure', async 
     assert.equal(get('syncFeedback').classList.contains('is-error'), true);
 });
 
-test('monitor keeps last result on failure, counts unknown, and recovers', async () => {
-    const {context, get, document} = setup('monitor.html');
-    const row = element(), button = element();
-    row.dataset.state = 'online';
-    row.querySelector = () => button;
-    const status = get('status-example.invalid-443');
-    status.textContent = '在线';
-    status.closest = () => row;
-    document.querySelectorAll = () => [row];
-    get('latency-example.invalid-443').textContent = '12 ms';
-    get('checked-example.invalid-443').textContent = 'last check';
-    context.response = response({error: '检测服务暂时不可用'}, 500);
-    assert.equal(await context.checkOne('example.invalid', 443), false);
-    assert.equal(get('stat-offline').textContent, 0);
-    assert.equal(get('stat-unknown').textContent, 1);
-    assert.equal(get('latency-example.invalid-443').textContent, '12 ms');
-    assert.equal(get('checked-example.invalid-443').textContent, 'last check');
-    assert.match(status.children[1].textContent, /上次：在线/);
-    context.response = response({online: false, latency: -1, checked_at: 'new check'});
-    assert.equal(await context.checkOne('example.invalid', 443), true);
-    assert.equal(get('stat-offline').textContent, 1);
-    assert.equal(get('stat-unknown').textContent, 0);
-    assert.equal(get('checked-example.invalid-443').textContent, 'new check');
+
+function monitorSetup() {
+    const nodes = new Map();
+    const get = id => { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); };
+    const makeHealth = status => ({status, label: status === 'entry' ? '入口可达，代理未验证' : '检测失败',
+        tone: status === 'entry' ? 'orange' : 'red', msg: '测试', previous: '入口可达',
+        checked_at: '2026-01-01 00:00:00 UTC', expires_at: Date.now()/1000+900, ttl_seconds: 900,
+        latency: 12, stages: []});
+    const cell = get('status-1'), button = element();
+    cell.dataset.health = JSON.stringify(makeHealth('entry'));
+    cell.id = 'status-1';
+    cell.querySelector = () => element();
+    cell.closest = () => ({querySelector: () => button});
+    let callback;
+    const requests = [];
+    const context = vm.createContext({Date, Map, Set, Promise, AbortController,
+        document: {getElementById: id => id.startsWith('dashboard-') ? null : get(id), querySelectorAll: () => [cell],
+            createElement: tag => ({...element(), tag})},
+        window: {setTimeout: () => 1, clearTimeout() {}, setInterval(fn) {callback = fn;}},
+        csrfHeaders: () => ({'X-CSRFToken': 'fake'}),
+        readPanelResponse: async response => {if (!response.ok) throw new Error('request failed'); return response.json();},
+        fetch: async (url, options) => {requests.push({url, options}); return context.response;},
+    });
+    vm.runInContext(fs.readFileSync(path.join(root, 'static/node-monitor.js'), 'utf8'), context);
+    return {context, cell, button, get, requests, makeHealth, tick: () => callback()};
+}
+
+test('node request errors preserve saved evidence and statistics; valid failure persists', async () => {
+    const {context, cell, button, get, requests, makeHealth} = monitorSetup();
+    context.response = response({error:'unavailable'}, 500);
+    await context.window.checkNode(1);
+    assert.equal(JSON.parse(cell.dataset.health).status, 'entry');
+    assert.equal(get('stat-entry').textContent, 1);
+    assert.equal(get('stat-verified').textContent, 0);
     assert.equal(button.disabled, false);
+    context.response = response({health: makeHealth('failed')});
+    await context.window.checkNode(1);
+    assert.equal(JSON.parse(cell.dataset.health).status, 'failed');
+    assert.equal(get('stat-entry').textContent, 0);
+    assert.equal(get('stat-other').textContent, 1);
+    assert.equal(requests[0].options.headers['X-CSRFToken'], 'fake');
+});
+
+test('node repeats share one request; persisted task error stays unknown after response', async () => {
+    const {context, cell, requests, makeHealth} = monitorSetup();
+    context.response = response({health: {...makeHealth('error'),label:'检测未完成'}}, 503);
+    const first = context.window.checkNode(1), second = context.window.checkNode(1);
+    assert.equal(first, second);
+    await first;
+    assert.equal(requests.length, 1);
+    assert.equal(JSON.parse(cell.dataset.health).status, 'error');
+});
+
+test('expired evidence leaves current entry counts without claiming proxy success', () => {
+    const {cell, get, makeHealth, tick} = monitorSetup();
+    cell.dataset.health = JSON.stringify({...makeHealth('entry'), expires_at: Date.now()/1000-1});
+    tick();
+    assert.equal(JSON.parse(cell.dataset.health).status, 'expired');
+    assert.equal(get('stat-entry').textContent, 0);
+    assert.equal(get('stat-verified').textContent, 0);
 });

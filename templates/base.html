@@ -227,7 +227,6 @@
             else if (action === 'share-node') window.shareNode(target);
             else if (action === 'regenerate-token') window.regenerateToken();
             else if (action === 'delete-account' && confirm(target.dataset.confirm)) document.getElementById(target.dataset.formId).submit();
-            else if (action === 'check-host') window.checkOne(target.dataset.host, Number(target.dataset.port));
         });
 
         document.addEventListener('keydown', event => {
