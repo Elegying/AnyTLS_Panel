@@ -4072,7 +4072,7 @@ proxies:
                 html = response.get_data(as_text=True)
                 card = html.split('class="panel attention-panel"', 1)[1].split("</article>", 1)[0]
                 self.assertIn('aria-label="共 19 项待办"', card)
-                self.assertEqual(card.count('<details '), 4)
+                self.assertEqual(card.count('<details '), 3)
                 self.assertEqual(card.count('name="dashboard-attention" open'), 1)
                 self.assertNotIn("当前没有待办", card)
                 self.assertNotIn(">续费提醒</h2>", html)
@@ -4085,10 +4085,10 @@ proxies:
                     self.assertIn(name, card)
                 for name in ("later-account", "paused-account", "disabled-account", "invalid-account"):
                     self.assertNotIn(name, card)
-                for index in range(4):
-                    self.assertIn(f"node-{index}", card)
-                self.assertIn("node-4", card)
-                self.assertIn("[2001:db8::1]:443", card)
+                for index in range(5):
+                    self.assertNotIn(f"node-{index}", card)
+                self.assertNotIn("[2001:db8::1]:443", card)
+                self.assertIn("查看节点监控", card)
                 self.assertIn("今日到期", card)
                 self.assertIn("剩余30天", card)
                 self.assertIn("已过期10天", card)

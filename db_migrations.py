@@ -1,6 +1,6 @@
 """Small, ordered SQLite schema migrations for existing installations."""
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _add_account_metadata_columns(db):
@@ -119,6 +119,15 @@ def _add_node_probe_results(db):
     )""")
 
 
+def _add_node_filter(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS node_filter (
+        id INTEGER PRIMARY KEY CHECK (id=1),
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+        keywords TEXT NOT NULL DEFAULT '[]'
+    )""")
+    db.execute('INSERT OR IGNORE INTO node_filter (id) VALUES (1)')
+
+
 _MIGRATIONS = (
     (1, _add_account_metadata_columns),
     (2, _add_rate_limits),
@@ -126,6 +135,7 @@ _MIGRATIONS = (
     (4, _add_database_maintenance),
     (5, _add_customer_services),
     (6, _add_node_probe_results),
+    (7, _add_node_filter),
 )
 
 

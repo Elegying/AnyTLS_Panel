@@ -24,7 +24,7 @@
     <div class="system-metric">
         <div class="metric-label"><i class="bi bi-hdd-network" aria-hidden="true"></i>代理验证通过</div>
         <div class="metric-value is-green"><span id="dashboard-verified">{{ online_nodes }}</span> <span class="page-meta">/ {{ total_nodes }}</span></div>
-        <div class="metric-note" id="dashboard-probe-note" data-states="{{ node_summaries | tojson | forceescape }}">入口检测不等于代理验证；15 分钟有效</div>
+        <div class="metric-note" id="dashboard-probe-note" data-total="{{ health_node_count }}" data-states="{{ node_summaries | tojson | forceescape }}">入口检测不等于代理验证；15 分钟有效</div>
     </div>
     <div class="system-metric">
         <div class="metric-label"><i class="bi bi-pie-chart" aria-hidden="true"></i>总流量使用</div>
@@ -95,19 +95,12 @@
                 </ul>
             </details>
             {% endif %}
-            {% if attention_nodes %}
-            <details class="attention-group" name="dashboard-attention" {% if not renewal_services and not expiring_accounts and not warning_accounts %}open{% endif %}>
-                <summary><span><i class="bi bi-hdd-network" aria-hidden="true"></i>节点待确认</span><span class="badge badge-orange">{{ attention_nodes | length }}</span></summary>
-                <ul class="alert-list attention-list" aria-label="节点待确认待办">
-                    {% for n in attention_nodes %}
-                    {% set endpoint = ('[' ~ n.host ~ ']:' ~ n.port) if ':' in n.host else (n.host ~ ':' ~ n.port) %}
-                    <li class="attention-item">
-                        <div class="attention-heading"><a class="alert-name text-link" href="{{ url_for('account_detail', account_id=n.account_id) }}">{{ n.name }}</a><span class="badge badge-{{ n.health.tone }}" data-probe-health="{{ {'status': n.health.status, 'age_seconds': n.health.age_seconds, 'ttl_seconds': n.health.ttl_seconds} | tojson | forceescape }}">{{ n.health.label }}</span></div>
-                        <div class="alert-detail">{{ endpoint }} · {{ n.health.checked_at or '尚未检测' }}{% if n.health.age_seconds is not none %} · {{ n.health.age_seconds // 60 }} 分钟前{% endif %}</div>
-                    </li>
-                    {% endfor %}
-                </ul>
-            </details>
+            {% if attention_node_count %}
+            <div class="attention-item">
+                <div class="attention-heading"><span class="alert-name">节点待确认</span><span id="dashboard-attention-nodes" class="badge badge-orange">{{ attention_node_count }}</span></div>
+                <p class="alert-detail">首页仅显示数量，进入监控页后按入口分组查看和检测。</p>
+                <a class="btn btn-sm btn-ghost" href="{{ url_for('nodes_monitor') }}">查看节点监控</a>
+            </div>
             {% endif %}
             <p class="attention-note">到期提醒包含未来 30 天及已过期项目。节点从面板服务器检测，不代表所有运营商和客户端网络均可达。</p>
             {% else %}

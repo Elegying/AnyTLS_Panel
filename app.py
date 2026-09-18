@@ -1260,7 +1260,9 @@ def dashboard():
     total_nodes = sum(a['node_count'] or 0 for a in accounts)
     total_traffic_used = sum(a['traffic_used_bytes'] or 0 for a in accounts)
     total_traffic_limit = sum((a['traffic_limit_gb'] or 0) * 1024**3 for a in accounts)
-    health_nodes = _nodes_with_health(db.execute('SELECT * FROM nodes').fetchall())
+    health_nodes = _nodes_with_health(db.execute(
+        'SELECT id, is_online, last_checked_at, probe_result, probe_error, probe_attempt_at FROM nodes'
+    ).fetchall())
     online_nodes = sum(n['health']['status'] == 'verified' for n in health_nodes)
     offline_nodes = sum(n['health']['status'] in ('failed', 'tls_error') for n in health_nodes)
     unknown_nodes = len(health_nodes) - online_nodes - offline_nodes
@@ -1299,7 +1301,7 @@ def dashboard():
         if a['status'] == 'active' and remaining is not None and remaining <= 30:
             expiring_accounts.append({**dict(a), 'remaining': remaining})
     expiring_accounts.sort(key=lambda account: (account['remaining'], account['id']))
-    attention_nodes = [n for n in health_nodes if n['health']['status'] != 'verified']
+    attention_node_count = len(health_nodes) - online_nodes
 
     return render_template('dashboard.html',
         accounts=accounts,
@@ -1310,12 +1312,13 @@ def dashboard():
         total_traffic_limit=total_traffic_limit,
         warning_accounts=warning_accounts,
         expiring_accounts=expiring_accounts,
-        attention_nodes=attention_nodes,
+        attention_node_count=attention_node_count,
         attention_total=(len(renewal_services) + len(expiring_accounts)
-                         + len(warning_accounts) + len(attention_nodes)),
+                         + len(warning_accounts) + attention_node_count),
         online_nodes=online_nodes,
         node_summaries=[{key: n['health'][key] for key in ('status', 'age_seconds', 'ttl_seconds')}
-                        for n in health_nodes],
+                        for n in health_nodes if n['health']['status'] in ('verified', 'failed', 'tls_error')],
+        health_node_count=len(health_nodes),
         offline_nodes=offline_nodes,
         unknown_nodes=unknown_nodes,
         last_synced_at=last_synced_at,
@@ -2555,10 +2558,11 @@ def api_subscribe():
     db = get_db()
     accounts = db.execute("SELECT * FROM accounts WHERE status='active' ORDER BY id").fetchall()
     links = []
+    keywords = _node_filter_keywords()
     for a in accounts:
         nodes = db.execute('SELECT * FROM nodes WHERE account_id=?', (a['id'],)).fetchall()
         for n in nodes:
-            if n['raw_uri']:
+            if n['raw_uri'] and not _node_is_blocked(n['name'], keywords):
                 links.append(n['raw_uri'])
     return jsonify({"links": links, "count": len(links)})
 
@@ -2614,6 +2618,15 @@ def change_password():
     return redirect(url_for('login'))
 
 # ─── 订阅转换（二次转链）──────────────────────────────────────
+
+def _node_filter_keywords():
+    settings = get_db().execute('SELECT enabled, keywords FROM node_filter WHERE id=1').fetchone()
+    return json.loads(settings['keywords']) if settings['enabled'] else []
+
+
+def _node_is_blocked(name, keywords):
+    return any(keyword.casefold() in name.casefold() for keyword in keywords)
+
 
 def _get_rename_rules():
     """获取所有启用的重命名规则"""
@@ -2698,8 +2711,12 @@ def public_subscribe(token):
             'Cache-Control': 'no-store',
         }
 
+    keywords = _node_filter_keywords()
+    nodes = [node for node in nodes if not _node_is_blocked(node['name'], keywords)]
+
     # 分享订阅只输出节点及品牌信息，不向客户端公开流量、配额或到期日期。
     resp_headers = {
+        'Cache-Control': 'no-store',
         'profile-title': '"store-name=SSRVPN.VIP"',
         'Content-Disposition': 'attachment; filename="SSRVPN.VIP"',
     }
@@ -2751,7 +2768,31 @@ def api_generate_token(account_id):
 def rename_rules_page():
     db = get_db()
     rules = db.execute('SELECT * FROM rename_rules ORDER BY id').fetchall()
-    return render_template('rename_rules.html', rules=rules)
+    settings = db.execute('SELECT enabled, keywords FROM node_filter WHERE id=1').fetchone()
+    return render_template('rename_rules.html', rules=rules,
+                           filter_enabled=settings['enabled'],
+                           filter_keywords='\n'.join(json.loads(settings['keywords'])))
+
+
+@app.route('/settings/node-filter', methods=['POST'])
+@login_required
+def save_node_filter():
+    raw = request.form.get('keywords', '')
+    enabled = request.form.get('enabled') == '1'
+    keywords = list(dict.fromkeys(line.strip() for line in raw.splitlines() if line.strip()))
+    if len(raw) > 8192 or len(keywords) > 100 or any(len(k) > 128 for k in keywords):
+        db = get_db()
+        rules = db.execute('SELECT * FROM rename_rules ORDER BY id').fetchall()
+        flash('最多 100 个关键词，每个不超过 128 字，总输入不超过 8192 字。', 'error')
+        return render_template('rename_rules.html', rules=rules, filter_enabled=enabled,
+                               filter_keywords=raw[:8192]), 422
+    db = get_db()
+    db.execute('UPDATE node_filter SET enabled=?, keywords=? WHERE id=1',
+               (int(enabled), json.dumps(keywords, ensure_ascii=False)))
+    db.commit()
+    audit_event('node_filter.save', 'success', enabled=enabled, keyword_count=len(keywords))
+    flash('节点屏蔽设置已保存，用户下次更新订阅时生效。', 'success')
+    return redirect(url_for('rename_rules_page'))
 
 
 @app.route('/settings/rename-rules/add', methods=['POST'])
