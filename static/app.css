@@ -700,3 +700,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
     .rwd-table td.node-health > * { max-width: 100%; }
     .node-health .cell-subtitle { margin-top: 6px; }
 }
+
+/* Keep the subscription toggle independent of full-width text inputs. */
+.form-group label.node-filter-toggle { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; }
+.node-filter-toggle input[type="checkbox"] { width: 20px; height: 20px; min-height: 0; padding: 0; margin: 0; flex: 0 0 auto; accent-color: var(--accent); }

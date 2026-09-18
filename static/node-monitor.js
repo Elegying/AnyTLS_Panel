@@ -165,7 +165,9 @@
         const failed = states.filter(h => ['failed', 'tls_error'].includes(h.status)).length;
         document.getElementById('dashboard-verified').textContent = verified;
         document.getElementById('dashboard-failed').textContent = failed;
-        document.getElementById('dashboard-pending').textContent = '入口检测失败 ' + failed + ' · 待确认 ' + (states.length - verified - failed);
+        document.getElementById('dashboard-pending').textContent = '入口检测失败 ' + failed + ' · 待确认 ' + (Number(note.dataset.total ?? states.length) - verified - failed);
+        const pending = document.getElementById('dashboard-attention-nodes');
+        if (pending) pending.textContent = Number(note.dataset.total ?? states.length) - verified;
         document.querySelectorAll('[data-probe-health]').forEach(badge => {
             if (effective(JSON.parse(badge.dataset.probeHealth)).status === 'expired') {
                 badge.textContent = '结果已过期，需要复测';
@@ -196,6 +198,8 @@
     const dashboard = document.getElementById('dashboard-probe-note');
     if (dashboard) {
         dashboard.dataset.states = JSON.stringify(JSON.parse(dashboard.dataset.states).map(stamp));
+        const pending = document.getElementById('dashboard-attention-nodes');
+        if (pending) pending.textContent = Number(note.dataset.total ?? states.length) - verified;
         document.querySelectorAll('[data-probe-health]').forEach(badge => {
             badge.dataset.probeHealth = JSON.stringify(stamp(JSON.parse(badge.dataset.probeHealth)));
         });

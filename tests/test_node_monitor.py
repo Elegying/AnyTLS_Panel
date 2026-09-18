@@ -199,7 +199,7 @@ class NodeMonitorIntegrationTests(unittest.TestCase):
         for page in ('/nodes/monitor', '/accounts/1', '/'):
             response = self.client.get(page)
             self.assertEqual(response.status_code, 200)
-            self.assertIn('入口可达', response.text)
+            self.assertIn('查看节点监控' if page == '/' else '入口可达', response.text)
             self.assertNotIn('>在线<', response.text)
         self.assertNotIn('fake-1', self.client.get('/nodes/monitor').text)
         with mock.patch.object(self.module, '_check_node_connect', side_effect=RuntimeError('secret-token')):

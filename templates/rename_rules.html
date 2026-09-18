@@ -1,17 +1,31 @@
 {% extends "base.html" %}
-{% block title %}重命名规则 - AnyTLS Panel{% endblock %}
+{% block title %}订阅设置 - AnyTLS Panel{% endblock %}
 {% block content %}
 <header class="page-header">
     <div class="page-heading">
         <p class="eyebrow">显示设置</p>
-        <h1 class="page-title">重命名规则</h1>
-        <p class="page-description">统一替换订阅显示名称，保持节点协议、连接地址和上游名称不变。</p>
+        <h1 class="page-title">订阅设置</h1>
+        <p class="page-description">设置节点屏蔽与显示名称，统一管理用户订阅内容。</p>
     </div>
 </header>
 
+<section class="panel" style="margin-bottom:24px" aria-labelledby="node-filter-title">
+    <header class="panel-header"><h2 class="panel-title" id="node-filter-title">节点关键词屏蔽</h2><span class="badge {{ 'badge-orange' if filter_enabled else 'badge-neutral' }}">{{ '已开启' if filter_enabled else '已关闭' }}</span></header>
+    <div class="panel-body">
+        <form method="POST" action="{{ url_for('save_node_filter') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-group"><label class="node-filter-toggle"><input type="checkbox" name="enabled" value="1" {% if filter_enabled %}checked{% endif %}> 开启节点屏蔽</label></div>
+            <div class="form-group"><label for="filter-keywords">屏蔽关键词（每行一个）</label><textarea id="filter-keywords" name="keywords" rows="5" maxlength="8192" aria-describedby="filter-help" placeholder="例如：倍率&#10;测试">{{ filter_keywords }}</textarea>
+            <p class="field-help" id="filter-help">匹配上游原始节点名称，忽略英文字母大小写，包含任意一个关键词即屏蔽。最多 100 个，每个最多 128 字；留空不屏蔽。</p></div>
+            <p class="field-help">适用于全部账号及用户分享订阅，用户下次更新订阅时生效。节点仍保留在面板中，关闭开关即可恢复输出。全部匹配时会返回空订阅；部分客户端可能保留旧节点，请检查客户端更新结果。</p>
+            <button class="btn btn-primary" type="submit">保存屏蔽设置</button>
+        </form>
+    </div>
+</section>
+
 <div class="info-banner" role="note">
     <i class="bi bi-info-circle" aria-hidden="true"></i>
-    <div><strong>规则只影响订阅显示名称</strong>分享订阅仍会原样保留已同步的真实节点，不会改写协议或连接信息。</div>
+    <div><strong>规则只影响订阅显示名称</strong>未被屏蔽的节点按下方规则重命名，不会改写协议或连接信息。</div>
 </div>
 
 <div class="rules-layout">
