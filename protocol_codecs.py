@@ -202,6 +202,9 @@ def _clash_context(proxy):
 
 
 def _build_uri(context, scheme, credential, query):
+    alpn = context['proxy'].get('alpn')
+    if isinstance(alpn, list) and all(isinstance(value, str) for value in alpn):
+        query['alpn'] = ','.join(alpn)
     host = context['host']
     authority_host = f'[{host}]' if ':' in str(host) else host
     query_string = urlencode({
@@ -250,6 +253,7 @@ def _from_vmess(context):
         'tls': 'tls' if p.get('tls') else 'none',
         'sni': context['servername'] if p.get('tls') else '',
         'fp': context['fingerprint'], 'allowInsecure': context['insecure'],
+        'alpn': ','.join(p.get('alpn', [])),
     }
     encoded = base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip('=')
     return f'vmess://{encoded}'
@@ -282,6 +286,8 @@ def _from_tuic(context):
     credential = f"{context['proxy'].get('uuid', '')}:{context['password']}"
     return _build_uri(context, 'tuic', credential, {
         'sni': context['servername'], 'allowInsecure': context['insecure'],
+        'congestion_control': context['proxy'].get('congestion-controller'),
+        'udp_relay_mode': context['proxy'].get('udp-relay-mode'),
     })
 
 
@@ -313,6 +319,57 @@ def _from_shadowsocks(context):
 
 def _from_unknown(context):
     return _build_uri(context, context['ptype'], context['password'], {})
+
+
+def _serialize_proxy(proxy):
+    # Reject cyclic/expanding aliases and non-JSON YAML scalars before serialization.
+    seen = set()
+    budget = [10000]
+
+    def check(value, depth=0):
+        budget[0] -= 1
+        if depth > 32 or budget[0] < 0:
+            raise ValueError('Clash proxy is too complex')
+        if isinstance(value, (dict, list)):
+            if id(value) in seen:
+                raise ValueError('Repeated YAML references in a proxy are unsupported')
+            seen.add(id(value))
+            if isinstance(value, dict):
+                if not all(isinstance(key, str) for key in value):
+                    raise ValueError('Clash option keys must be text')
+                values = value.values()
+            else:
+                values = value
+            for item in values:
+                check(item, depth + 1)
+        elif value is not None and not isinstance(value, (str, int, float, bool)):
+            raise ValueError('Unsupported YAML value')
+
+    check(proxy)
+    encoded = json.dumps(proxy, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+    if len(encoded) > MAX_SUBSCRIPTION_TEXT_CHARS:
+        raise ValueError('Clash proxy is too large')
+    return encoded
+
+
+def uri_preserves_clash_config(proxy, uri):
+    """Do not silently convert Clash-only routing/transport settings to plain URIs."""
+    restored = clash_proxy_from_uri(uri)
+    if not restored:
+        return False
+    aliases = {'servername': 'sni', 'fingerprint': 'client-fingerprint'}
+
+    def normalize(data):
+        return {aliases.get(key, key): value for key, value in data.items()}
+
+    restored = normalize(restored)
+    defaults = {'network': 'tcp', 'tls': False, 'skip-cert-verify': False}
+    for key, value in normalize(proxy).items():
+        if key == 'name':
+            continue
+        if restored.get(key, defaults.get(key)) != value:
+            return False
+    return True
 
 
 def parse_clash_yaml(content):
@@ -347,10 +404,12 @@ def parse_clash_yaml(content):
             codec = CODECS.get(context['ptype'], {})
             uri = codec.get('from_clash', _from_unknown)(context)
             canonical = codec.get('canonical', context['ptype'])
+            clash_config = _serialize_proxy(proxy)
             nodes.append({
                 'name': str(context['name']), 'host': str(context['host']),
                 'port': context['port'], 'password': str(context['password']),
                 'raw_uri': uri, 'protocol': canonical,
+                'clash_config': clash_config,
                 'extra': {key: value for key, value in proxy.items()
                           if key not in ('name', 'type', 'server', 'port', 'password')},
             })
@@ -402,6 +461,8 @@ def _to_anytls(proxy, node, params):
 
 def _to_vmess(proxy, node, _params):
     extra = node.get('extra', {})
+    if extra.get('alpn'):
+        proxy['alpn'] = str(extra['alpn']).split(',')
     proxy.update({
         'type': 'vmess', 'uuid': node['password'],
         'alterId': _safe_int(extra.get('aid', 0) or 0),
@@ -520,6 +581,11 @@ def _to_tuic(proxy, node, params):
         proxy['uuid'], proxy['password'] = node['password'].split(':', 1)
     else:
         proxy['password'] = node['password']
+    for query_key, clash_key in (('congestion_control', 'congestion-controller'),
+                                 ('udp_relay_mode', 'udp-relay-mode')):
+        value = _query_value(params, query_key)
+        if value:
+            proxy[clash_key] = value
 
 
 def _to_unknown(proxy, node, _params):
@@ -537,6 +603,9 @@ def clash_proxy_from_uri(uri):
     params = parse_qs(urlparse(uri).query)
     codec = CODECS.get(node['protocol'], {})
     codec.get('to_clash', _to_unknown)(proxy, node, params)
+    alpn = _query_value(params, 'alpn')
+    if alpn:
+        proxy['alpn'] = alpn.split(',')
     return proxy
 
 

@@ -229,3 +229,43 @@ test('fast bulk responses are paced below the global request limit', async () =>
     assert.equal(starts.length, 4);
     for (let i = 1; i < starts.length; i++) assert.ok(starts[i] - starts[i - 1] >= 370);
 });
+
+
+test('dashboard initializes its timer and expires saved health without scope errors', () => {
+    let elapsed = 0, tick;
+    const nodes = new Map();
+    const get = id => {if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id);};
+    get('dashboard-probe-note').dataset = {total: '3', states: JSON.stringify([
+        {status: 'verified', age_seconds: 0, ttl_seconds: 900},
+        {status: 'failed', age_seconds: 0, ttl_seconds: 900},
+    ])};
+    const badge = element();
+    badge.dataset.probeHealth = JSON.stringify({status: 'failed', age_seconds: 0, ttl_seconds: 900});
+    const context = vm.createContext({Map, Set, performance: {now: () => elapsed},
+        document: {getElementById: get, querySelectorAll: selector => selector === '[data-probe-health]' ? [badge] : []},
+        window: {setInterval(fn, delay) {assert.equal(delay, 30000); tick = fn;}},
+    });
+    vm.runInContext(fs.readFileSync(path.join(root, 'static/node-monitor.js'), 'utf8'), context);
+    assert.equal(typeof tick, 'function');
+    assert.equal(get('dashboard-verified').textContent, 1);
+    assert.equal(get('dashboard-attention-nodes').textContent, 2);
+    elapsed = 901000;
+    tick();
+    assert.equal(get('dashboard-verified').textContent, 0);
+    assert.equal(get('dashboard-failed').textContent, 0);
+    assert.equal(get('dashboard-attention-nodes').textContent, 3);
+    assert.match(badge.textContent, /已过期/);
+});
+
+
+test('rotating a demo share link refreshes both generic and Clash copy controls', async () => {
+    const {context, get} = setup('account_detail.html');
+    context.response = response({url: 'https://panel.example/sub/new-token'});
+    context.showToast = () => {};
+    await context.regenerateToken();
+    assert.equal(get('shareUrl').value, 'https://panel.example/sub/new-token');
+    const group = get('shareContent').children[0];
+    const row = group.children[1];
+    assert.equal(row.children[0].value, 'https://panel.example/sub/new-token?format=clash');
+    assert.equal(row.children[1].dataset.inputId, 'clashShareUrl');
+});

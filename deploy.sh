@@ -20,7 +20,7 @@ TRAFFIC_LOG_RETENTION_DAYS="${ANYTLS_TRAFFIC_LOG_RETENTION_DAYS:-90}"
 MAX_REQUEST_BYTES="${ANYTLS_MAX_REQUEST_BYTES:-4194304}"
 PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
-REPO_REF="${ANYTLS_REPO_REF:-v1.4.12}"
+REPO_REF="${ANYTLS_REPO_REF:-v1.4.13}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
@@ -1649,7 +1649,7 @@ certificate_expiring() {
         openssl x509 -checkend 1814400 -noout >/dev/null 2>&1
 }
 
-if ! systemctl is-active --quiet ${SERVICE_NAME} || ! probe_backend; then
+if ! timeout 3 systemctl is-active --quiet ${SERVICE_NAME} || ! probe_backend; then
     panel_failures="\$(record_probe_failure panel)"
     if (( panel_failures < FAILURE_THRESHOLD )); then
         exit 1
@@ -1657,7 +1657,7 @@ if ! systemctl is-active --quiet ${SERVICE_NAME} || ! probe_backend; then
     recovery_is_suppressed panel && exit 1
     logger -p daemon.err -t ${SERVICE_NAME}-healthcheck \\
         'event=health_recovery component=panel action=restart'
-    systemctl restart ${SERVICE_NAME}
+    timeout 15 systemctl restart ${SERVICE_NAME} || exit 1
     sleep 3
     if ! probe_backend; then
         exit 1
@@ -1667,7 +1667,7 @@ else
     reset_probe_failures panel
 fi
 
-if ! systemctl is-active --quiet caddy || ! probe_https; then
+if ! timeout 3 systemctl is-active --quiet caddy || ! probe_https; then
     caddy_failures="\$(record_probe_failure caddy)"
     if (( caddy_failures < FAILURE_THRESHOLD )); then
         exit 1
@@ -1675,7 +1675,7 @@ if ! systemctl is-active --quiet caddy || ! probe_https; then
     recovery_is_suppressed caddy && exit 1
     logger -p daemon.err -t ${SERVICE_NAME}-healthcheck \\
         'event=health_recovery component=caddy action=reload-or-restart'
-    systemctl reload-or-restart caddy
+    timeout 15 systemctl reload-or-restart caddy || exit 1
     sleep 3
     if ! probe_https; then
         exit 1
@@ -1700,7 +1700,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=${HEALTHCHECK_SCRIPT}
-TimeoutStartSec=30s
+# 2 status checks (6s), 4 HTTP probes (32s), 2 recoveries (30s),
+# 2 settling delays (6s), certificate check (8s), plus scheduling margin.
+TimeoutStartSec=90s
 EOF
 
     cat > "$timer_tmp" <<EOF
@@ -1842,9 +1844,70 @@ PY
 render_caddy_site() {
     cat <<EOF
 ${PANEL_DOMAIN} {
-    reverse_proxy $(backend_address)
+    request_body {
+        max_size ${MAX_REQUEST_BYTES}
+    }
+    reverse_proxy $(backend_address) {
+        # Buffer the entire permitted body before occupying a WSGI thread.
+        request_buffers $((MAX_REQUEST_BYTES + 1))
+    }
 }
 EOF
+}
+
+ensure_caddy_request_deadlines() {
+    # Standard installations get a bounded read budget. Existing custom server
+    # options are never overwritten: validate their effective timeouts instead.
+    local adapted
+    adapted="$(mktemp "$CADDY_CONFIG_DIR/.anytls-adapted.XXXXXX")"
+    if ! caddy adapt --config "$CADDYFILE" --adapter caddyfile > "$adapted"; then
+        rm -f "$adapted"
+        return 1
+    fi
+    local result=0
+    python3 - "$CADDYFILE" "$adapted" "$PANEL_DOMAIN" <<'PY' || result=$?
+import json
+import re
+import sys
+from pathlib import Path
+
+path, adapted, domain = sys.argv[1:]
+config = json.loads(Path(adapted).read_text())
+servers = config.get('apps', {}).get('http', {}).get('servers', {})
+
+def contains_domain(value):
+    if isinstance(value, dict):
+        return any(contains_domain(item) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_domain(item) for item in value)
+    return value == domain
+
+selected = [server for server in servers.values() if contains_domain(server.get('routes', []))]
+if selected and all(0 < server.get('read_timeout', 0) <= 30_000_000_000
+                    and 0 < server.get('read_header_timeout', 0) <= 10_000_000_000
+                    for server in selected):
+    sys.exit(0)
+source = Path(path).read_text()
+first = re.search(r'(?m)^[ \t]*[^#\s]', source)
+start = first.start() if first else len(source)
+body = source[start:].lstrip()
+options = '\n    servers {\n        timeouts {\n            read_header 10s\n            read_body 30s\n            idle 2m\n        }\n    }\n'
+if body.startswith('{'):
+    # Reject custom/imported server options instead of masking their settings.
+    # fmt provides predictable indentation; a conservative token check also
+    # covers unformatted configurations and imported global options.
+    closing = re.search(r'(?m)^}', body)
+    if not closing or re.search(r'(?m)^\s*(servers|import)\b', body[:closing.start()]):
+        print('Custom Caddy global options require servers timeouts: read_header <=10s and read_body <=30s', file=sys.stderr)
+        sys.exit(1)
+    opening = source.find('{', start)
+    source = source[:opening + 1] + options + source[opening + 1:]
+else:
+    source = '{' + options + '}\n\n' + source
+Path(path).write_text(source)
+PY
+    rm -f "$adapted"
+    return "$result"
 }
 
 caddyfile_contains_only_panel_site() {
@@ -1894,6 +1957,8 @@ write_caddy_config() {
     fi
 
     if ! caddy fmt --overwrite "$site_file" >/dev/null || \
+       ! caddy fmt --overwrite "$CADDYFILE" >/dev/null || \
+       ! ensure_caddy_request_deadlines || \
        ! caddy validate --config "$CADDYFILE" >/dev/null; then
         if [[ "$main_existed" -eq 1 ]]; then
             cp -a "$backup_dir/Caddyfile" "$CADDYFILE"

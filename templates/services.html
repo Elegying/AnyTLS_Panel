@@ -32,7 +32,7 @@
 {% if services %}
 <div class="service-filters">
     <div class="form-group"><label for="service-search">查找用户</label><input id="service-search" type="search" placeholder="微信号或专线账号"></div>
-    <div class="form-group"><label for="service-filter">服务状态</label><select id="service-filter"><option value="">全部状态</option><option value="due">30 天内到期</option><option value="expired">已过期</option><option value="active">使用中</option><option value="pending">待生效</option><option value="suspended">暂停</option><option value="disabled">停用</option></select></div>
+    <div class="form-group"><label for="service-filter">服务状态</label><select id="service-filter"><option value="">全部状态</option><option value="due">30 天内到期</option><option value="expired">已过期</option><option value="active">使用中</option><option value="pending">待生效</option><option value="account_inactive">专线未启用</option><option value="suspended">暂停</option><option value="disabled">停用</option></select></div>
     <p id="service-filter-count" class="form-hint" role="status"></p>
 </div>
 {% endif %}
@@ -49,12 +49,12 @@
             {% for service in services %}
             {% set state = customer_service_state(service) %}
             {% set remaining = days_until(service.expires_on) %}
-            <tr data-service-state="{{ state }}" data-due="{{ 'true' if state == 'active' and 0 <= remaining <= 30 else 'false' }}" data-search="{{ service.wechat_id }} {{ service.account_name }}">
+            <tr data-service-state="{{ state }}" data-due="{{ 'true' if state in ('active', 'account_inactive') and 0 <= remaining <= 30 else 'false' }}" data-search="{{ service.wechat_id }} {{ service.account_name }}">
                 <td data-label="微信号"><strong>{{ service.wechat_id }}</strong></td>
                 <td data-label="专线账号"><span class="cell-title">{{ service.account_name }}</span>{% if service.account_expires_on and service.expires_on > service.account_expires_on %}<span class="cell-subtitle" style="color:var(--orange)">用户到期日晚于账号到期日</span>{% endif %}</td>
                 <td data-label="关系"><span class="badge badge-neutral">{{ service.relationship }}</span></td>
-                <td data-label="服务期"><span class="cell-title">{{ service.started_on }} 至 {{ service.expires_on }}</span><span class="cell-subtitle">{{ '已过期' ~ (-remaining) ~ '天' if state == 'expired' else '剩余' ~ remaining ~ '天' if state == 'active' else '开始日未到' if state == 'pending' else '当前未启用' }}</span></td>
-                <td data-label="状态"><span class="badge {{ 'badge-green' if state == 'active' else 'badge-red' if state == 'expired' else 'badge-blue' if state == 'pending' else 'badge-orange' }}">{{ '使用中' if state == 'active' else '已过期' if state == 'expired' else '待生效' if state == 'pending' else '暂停' if state == 'suspended' else '停用' }}</span></td>
+                <td data-label="服务期"><span class="cell-title">{{ service.started_on }} 至 {{ service.expires_on }}</span><span class="cell-subtitle">{{ '已过期' ~ (-remaining) ~ '天' if state == 'expired' else '剩余' ~ remaining ~ '天' if state == 'active' else '开始日未到' if state == 'pending' else '所属专线暂停或停用' if state == 'account_inactive' else '当前未启用' }}</span></td>
+                <td data-label="状态"><span class="badge {{ 'badge-green' if state == 'active' else 'badge-red' if state == 'expired' else 'badge-blue' if state == 'pending' else 'badge-orange' }}">{{ '使用中' if state == 'active' else '已过期' if state == 'expired' else '待生效' if state == 'pending' else '专线未启用' if state == 'account_inactive' else '暂停' if state == 'suspended' else '停用' }}</span></td>
                 <td data-label="最近提醒"><span class="cell-subtitle">{{ service.last_reminded_at or '尚未提醒' }}</span></td>
                 <td data-label="操作"><a class="btn btn-sm btn-ghost" href="{{ url_for('service_detail', service_id=service.id) }}">管理</a></td>
             </tr>

@@ -41,7 +41,7 @@
     </div>
     <div class="system-metric">
         <div class="metric-label"><i class="bi bi-clock-history" aria-hidden="true"></i>最后同步</div>
-        <div class="metric-value" style="font-size:17px">{{ account.last_synced_at[:19] if account.last_synced_at else '尚未同步' }}</div>
+        <div class="metric-value" style="font-size:17px">{{ account.last_synced_at | localtime if account.last_synced_at else '尚未同步' }}</div>
         <div class="metric-note">订阅数据更新时间</div>
     </div>
     <div class="system-metric">
@@ -67,8 +67,8 @@
             <tr>
                 <td data-label="微信号"><strong>{{ service.wechat_id }}</strong></td>
                 <td data-label="关系"><span class="badge badge-neutral">{{ service.relationship }}</span></td>
-                <td data-label="服务期"><span class="cell-title">{{ service.started_on }} 至 {{ service.expires_on }}</span><span class="cell-subtitle">{{ '已过期' if state == 'expired' else '剩余' ~ days_until(service.expires_on) ~ '天' if state == 'active' else '开始日未到' if state == 'pending' else '当前未启用' }}</span></td>
-                <td data-label="状态"><span class="badge {{ 'badge-green' if state == 'active' else 'badge-red' if state == 'expired' else 'badge-blue' if state == 'pending' else 'badge-orange' }}">{{ '使用中' if state == 'active' else '已过期' if state == 'expired' else '待生效' if state == 'pending' else '暂停' if state == 'suspended' else '停用' }}</span></td>
+                <td data-label="服务期"><span class="cell-title">{{ service.started_on }} 至 {{ service.expires_on }}</span><span class="cell-subtitle">{{ '已过期' if state == 'expired' else '剩余' ~ days_until(service.expires_on) ~ '天' if state == 'active' else '开始日未到' if state == 'pending' else '所属专线暂停或停用' if state == 'account_inactive' else '当前未启用' }}</span></td>
+                <td data-label="状态"><span class="badge {{ 'badge-green' if state == 'active' else 'badge-red' if state == 'expired' else 'badge-blue' if state == 'pending' else 'badge-orange' }}">{{ '使用中' if state == 'active' else '已过期' if state == 'expired' else '待生效' if state == 'pending' else '专线未启用' if state == 'account_inactive' else '暂停' if state == 'suspended' else '停用' }}</span></td>
                 <td data-label="最近提醒"><span class="cell-subtitle">{{ service.last_reminded_at or '尚未提醒' }}</span></td>
                 <td data-label="操作"><a class="btn btn-sm btn-ghost" href="{{ url_for('service_detail', service_id=service.id) }}">管理</a></td>
             </tr>
@@ -99,7 +99,7 @@
                 <td data-label="地址"><div class="secret-value"><code class="code-value">{{ endpoint }}</code><button class="copy-button" type="button" data-action="copy-value" data-copy-value="{{ endpoint | e }}" aria-label="复制 {{ n.name }} 的连接地址"><i class="bi bi-copy" aria-hidden="true"></i></button></div></td>
                 <td data-label="访问密钥"><div class="secret-value"><code class="code-value" id="pw-{{ n.id }}">{{ n.password[:6] }}•••</code><button class="copy-button" type="button" data-action="copy-value" data-copy-value="{{ n.password | e }}" aria-label="复制 {{ n.name }} 的访问密钥"><i class="bi bi-copy" aria-hidden="true"></i></button><button class="copy-button" type="button" data-action="toggle-password" data-node-id="{{ n.id }}" data-password="{{ n.password | e }}" aria-label="显示 {{ n.name }} 的完整访问密钥" aria-pressed="false"><i class="bi bi-eye" aria-hidden="true"></i></button></div></td>
                 {{ node_health_cell(n) }}
-                <td data-label="操作"><div class="cell-actions"><button class="btn btn-sm btn-ghost" type="button" data-action="check-node" data-node-id="{{ n.id }}">检测</button><button class="btn btn-sm btn-icon btn-ghost" type="button" data-action="share-node" data-uri="{{ n.raw_uri | e }}" aria-label="复制 {{ n.name }} 的原始节点链接"><i class="bi bi-link-45deg" aria-hidden="true"></i></button><form method="POST" action="{{ url_for('node_delete', node_id=n.id) }}" data-confirm="确认删除节点 {{ n.name | e }}？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-danger" type="submit">删除</button></form></div></td>
+                <td data-label="操作"><div class="cell-actions"><button class="btn btn-sm btn-ghost" type="button" data-action="check-node" data-node-id="{{ n.id }}">检测</button>{% if n.uri_export_supported %}<button class="btn btn-sm btn-icon btn-ghost" type="button" data-action="share-node" data-uri="{{ n.raw_uri | e }}" aria-label="复制 {{ n.name }} 的原始节点链接"><i class="bi bi-link-45deg" aria-hidden="true"></i></button>{% else %}<span class="cell-subtitle">请用 Clash 订阅</span>{% endif %}<form method="POST" action="{{ url_for('node_delete', node_id=n.id) }}" data-confirm="确认删除节点 {{ n.name | e }}？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-danger" type="submit">删除</button></form></div></td>
             </tr>
             {% endfor %}
             </tbody>
@@ -135,14 +135,18 @@
 
 <div class="modal-overlay" id="shareModal" aria-hidden="true">
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="shareModalTitle">
-        <div class="modal-header"><div><h2 class="modal-title" id="shareModalTitle"><i class="bi bi-share" aria-hidden="true"></i>分享原始订阅</h2><p class="modal-description">分享链接会原样输出已同步的上游节点，不改写协议或节点名称。</p></div><button type="button" class="icon-button modal-close" data-action="close-modal" data-modal="shareModal" aria-label="关闭分享订阅弹窗"><i class="bi bi-x-lg" aria-hidden="true"></i></button></div>
+        <div class="modal-header"><div><h2 class="modal-title" id="shareModalTitle"><i class="bi bi-share" aria-hidden="true"></i>分享订阅</h2><p class="modal-description">分享使用最近成功同步的节点，并应用屏蔽和重命名规则；同名节点会自动补充编号。</p></div><button type="button" class="icon-button modal-close" data-action="close-modal" data-modal="shareModal" aria-label="关闭分享订阅弹窗"><i class="bi bi-x-lg" aria-hidden="true"></i></button></div>
         <div class="modal-body">
+            <p class="form-hint">已保存 {{ subscription_preview.stored }} 个节点 · 屏蔽 {{ subscription_preview.blocked }} 个 · 依赖不可用 {{ subscription_preview.unavailable }} 个 · 实际输出 {{ subscription_preview.count }} 个。</p>
+            {% if subscription_preview.requires_clash %}<p class="form-hint">部分节点包含链式代理或专用参数，请使用 Clash 格式链接与兼容客户端。</p>{% endif %}
+            <details><summary>查看订阅节点名称</summary><ul>{% for name in subscription_preview.names %}<li>{{ name }}</li>{% endfor %}</ul></details>
             <div id="shareContent">
                 {% if account.sub_token %}
                 <div class="form-group"><label for="shareUrl">分享链接</label><div class="cell-row"><input id="shareUrl" class="code-value" value="{{ url_for('public_subscribe', token=account.sub_token, _external=True) }}" readonly><button class="btn btn-primary" type="button" data-action="copy-input" data-input-id="shareUrl"><i class="bi bi-copy" aria-hidden="true"></i>复制</button></div><p class="field-help">可直接导入 Shadowrocket 或 Clash。</p></div>
+                <div class="form-group"><label for="clashShareUrl">Clash 格式链接</label><div class="cell-row"><input id="clashShareUrl" class="code-value" value="{{ url_for('public_subscribe', token=account.sub_token, format='clash', _external=True) }}" readonly><button class="btn btn-ghost" type="button" data-action="copy-input" data-input-id="clashShareUrl">复制</button></div></div>
                 <button class="btn btn-sm btn-ghost" type="button" data-action="regenerate-token"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>重新生成链接</button>
                 {% else %}
-                <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-link-45deg" aria-hidden="true"></i></span><h3>尚未生成分享链接</h3><p>生成后，持有链接的人可以获取此账号的原始订阅。</p><button class="btn btn-primary" type="button" data-action="regenerate-token"><i class="bi bi-link-45deg" aria-hidden="true"></i>生成分享链接</button></div></div>
+                <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-link-45deg" aria-hidden="true"></i></span><h3>尚未生成分享链接</h3><p>生成后，持有链接的人可以获取此账号筛选后的订阅。</p><button class="btn btn-primary" type="button" data-action="regenerate-token"><i class="bi bi-link-45deg" aria-hidden="true"></i>生成分享链接</button></div></div>
                 {% endif %}
             </div>
         </div>
@@ -165,6 +169,27 @@ async function regenerateToken() {
         document.getElementById('shareContent').innerHTML = '<div class="form-group"><label for="shareUrl">分享链接</label><div class="cell-row"><input id="shareUrl" class="code-value" readonly><button class="btn btn-primary" type="button" data-action="copy-input" data-input-id="shareUrl"><i class="bi bi-copy" aria-hidden="true"></i>复制</button></div><p class="field-help">可直接导入 Shadowrocket 或 Clash。</p></div><button class="btn btn-sm btn-ghost" type="button" data-action="regenerate-token"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>重新生成链接</button>';
         const shareUrl = document.getElementById('shareUrl');
         shareUrl.value = data.url;
+        const clashGroup = document.createElement('div');
+        clashGroup.className = 'form-group';
+        const clashLabel = document.createElement('label');
+        clashLabel.htmlFor = 'clashShareUrl';
+        clashLabel.textContent = 'Clash 格式链接';
+        const clashRow = document.createElement('div');
+        clashRow.className = 'cell-row';
+        const clashUrl = document.createElement('input');
+        clashUrl.id = 'clashShareUrl';
+        clashUrl.className = 'code-value';
+        clashUrl.readOnly = true;
+        clashUrl.value = data.url + '?format=clash';
+        const clashCopy = document.createElement('button');
+        clashCopy.type = 'button';
+        clashCopy.className = 'btn btn-ghost';
+        clashCopy.dataset.action = 'copy-input';
+        clashCopy.dataset.inputId = 'clashShareUrl';
+        clashCopy.textContent = '复制';
+        clashRow.append(clashUrl, clashCopy);
+        clashGroup.append(clashLabel, clashRow);
+        document.getElementById('shareContent').append(clashGroup);
         showToast('分享链接已生成', true);
     } catch (error) { showToast('生成失败：' + error.message, false); }
 }

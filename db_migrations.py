@@ -1,6 +1,6 @@
 """Small, ordered SQLite schema migrations for existing installations."""
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def _add_account_metadata_columns(db):
@@ -128,6 +128,12 @@ def _add_node_filter(db):
     db.execute('INSERT OR IGNORE INTO node_filter (id) VALUES (1)')
 
 
+def _add_canonical_proxy(db):
+    columns = {row[1] for row in db.execute('PRAGMA table_info(nodes)')}
+    if 'clash_config' not in columns:
+        db.execute("ALTER TABLE nodes ADD COLUMN clash_config TEXT NOT NULL DEFAULT ''")
+
+
 _MIGRATIONS = (
     (1, _add_account_metadata_columns),
     (2, _add_rate_limits),
@@ -136,6 +142,7 @@ _MIGRATIONS = (
     (5, _add_customer_services),
     (6, _add_node_probe_results),
     (7, _add_node_filter),
+    (8, _add_canonical_proxy),
 )
 
 

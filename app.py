@@ -19,6 +19,7 @@ import http.client
 import subprocess
 import threading
 import calendar
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
@@ -57,6 +58,7 @@ from protocol_codecs import (
     clash_proxy_from_uri as _clash_proxy_from_uri,
     parse_clash_yaml as _parse_clash_yaml,
     parse_protocol_uri,
+    uri_preserves_clash_config,
 )
 from security_utils import hash_password, verify_password
 from sqlite_rate_limit import enforce_rate_limit, rate_limit
@@ -986,6 +988,19 @@ def _business_now():
     return datetime.now(_BUSINESS_TIMEZONE)
 
 
+@app.template_filter('localtime')
+def format_local_datetime(value):
+    if not value:
+        return ''
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(_BUSINESS_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, OverflowError):
+        return str(value)[:19]
+
+
 def _business_today():
     return _business_now().date()
 
@@ -1088,7 +1103,11 @@ def customer_service_state(service, today=None):
     try:
         if parse_iso_date(service['started_on'], '开始日') > today:
             return 'pending'
-        return 'expired' if parse_iso_date(service['expires_on'], '到期日') < today else 'active'
+        if parse_iso_date(service['expires_on'], '到期日') < today:
+            return 'expired'
+        if _row_get(service, 'account_status', 'active') != 'active':
+            return 'account_inactive'
+        return 'active'
     except (ValueError, IndexError, KeyError, TypeError):
         return 'invalid'
 
@@ -1156,15 +1175,48 @@ def login_required(f):
     return decorated
 
 
+@contextmanager
+def _bulk_operation_lock():
+    """An OS lock shared by all workers; process exit releases it automatically."""
+    if not _BULK_OPERATION_LOCK.acquire(blocking=False):
+        yield False
+        return
+    fd = None
+    acquired = False
+    try:
+        path = str(Path(app.config['DATABASE']).resolve()) + '.bulk.lock'
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        if os.name == 'nt':
+            import msvcrt
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b'0')
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                acquired = True
+            except OSError:
+                pass
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                pass
+        yield acquired
+    finally:
+        if fd is not None:
+            os.close(fd)
+        _BULK_OPERATION_LOCK.release()
+
+
 def single_bulk_operation(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not _BULK_OPERATION_LOCK.acquire(blocking=False):
-            return jsonify({"error": "已有批量任务正在执行，请稍后重试"}), 409
-        try:
+        with _bulk_operation_lock() as acquired:
+            if not acquired:
+                return jsonify({"error": "已有批量任务正在执行，请稍后重试"}), 409
             return f(*args, **kwargs)
-        finally:
-            _BULK_OPERATION_LOCK.release()
     return decorated
 
 @app.context_processor
@@ -1461,20 +1513,7 @@ def account_add():
         db.execute('UPDATE accounts SET notes=? WHERE id=?',
                    (f"到期: {traffic_info['expire_date']}", account_id))
 
-    for n in nodes:
-        db.execute(
-            '''INSERT INTO nodes (account_id, name, host, port, password, raw_uri, protocol)
-               VALUES (?, ?, ?, ?, ?, ?, ?)''',
-            (
-                account_id,
-                n['name'],
-                n['host'],
-                n['port'],
-                n['password'],
-                n.get('raw_uri', ''),
-                n.get('protocol', 'anytls'),
-            )
-        )
+    _replace_account_nodes(db, account_id, nodes)
     db.commit()
 
     audit_event('account.create', 'success', account_id=account_id, node_count=len(nodes))
@@ -1496,13 +1535,15 @@ def account_detail(account_id):
     ).fetchall()
 
     services = db.execute(
-        '''SELECT * FROM customer_services WHERE account_id=?
-           ORDER BY expires_on, id''',
+        '''SELECT cs.*, a.status AS account_status
+           FROM customer_services cs JOIN accounts a ON a.id=cs.account_id
+           WHERE cs.account_id=? ORDER BY cs.expires_on, cs.id''',
         (account_id,),
     ).fetchall()
 
     return render_template(
-        'account_detail.html', account=account, nodes=_nodes_with_health(nodes), services=services
+        'account_detail.html', account=account, nodes=_nodes_with_health(nodes), services=services,
+        subscription_preview=_prepare_subscription(nodes),
     )
 
 @app.route('/accounts/<int:account_id>/rename', methods=['POST'])
@@ -1599,8 +1640,11 @@ def account_delete(account_id):
 
 def _node_config_key(node):
     # Names/fragments do not affect connectivity; credentials and all options do.
+    canonical = json.loads(node.get('clash_config') or '{}')
+    canonical.pop('name', None)
     return (node.get('protocol') or 'anytls', node['host'], node['port'],
-            node['password'], (node.get('raw_uri') or '').split('#', 1)[0])
+            node['password'], (node.get('raw_uri') or '').split('#', 1)[0],
+            json.dumps(canonical, sort_keys=True, separators=(',', ':')))
 
 
 def _replace_account_nodes(db, account_id, nodes):
@@ -1615,11 +1659,12 @@ def _replace_account_nodes(db, account_id, nodes):
         health = health_by_config.get(_node_config_key(node), (-1, -1, None, '', '', None))
         db.execute(
             '''INSERT INTO nodes (
-                account_id, name, host, port, password, raw_uri, protocol,
+                account_id, name, host, port, password, raw_uri, protocol, clash_config,
                 is_online, latency_ms, last_checked_at, probe_result, probe_error, probe_attempt_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (account_id, node['name'], node['host'], node['port'], node['password'],
-             node.get('raw_uri', ''), node.get('protocol', 'anytls'), *health),
+             node.get('raw_uri', ''), node.get('protocol', 'anytls'),
+             node.get('clash_config', ''), *health),
         )
 
 
@@ -1749,7 +1794,7 @@ def services_list():
         customer_service_state(service) == 'expired' for service in services
     )
     due_count = sum(
-        customer_service_state(service) == 'active'
+        customer_service_state(service) in ('active', 'account_inactive')
         and 0 <= days_until(service['expires_on']) <= 30
         for service in services
     )
@@ -1828,14 +1873,14 @@ def service_detail(service_id):
         'SELECT * FROM service_renewals WHERE service_id=? ORDER BY id DESC',
         (service_id,),
     ).fetchall()
+    expires_on = parse_iso_date(service['expires_on'], '到期日期')
     return render_template(
         'service_detail.html',
         service=service,
         accounts=accounts,
         renewals=renewals,
-        renew_min_date=(
-            parse_iso_date(service['expires_on'], '到期日期') + timedelta(days=1)
-        ).isoformat(),
+        renew_min_date=(expires_on + timedelta(days=1)).isoformat()
+        if expires_on < date.max else None,
     )
 
 
@@ -2016,7 +2061,9 @@ def nodes_monitor():
 def _nodes_with_health(nodes):
     running = {row[0] for row in get_db().execute(
         'SELECT node_id FROM node_probe_leases WHERE expires>?', (time.time(),))}
-    return [dict(n, health=node_health(dict(n, probe_running=n['id'] in running))) for n in nodes]
+    return [dict(n, health=node_health(dict(n, probe_running=n['id'] in running)),
+                 uri_export_supported=not _row_get(n, 'clash_config') or uri_preserves_clash_config(
+                     json.loads(n['clash_config']), n['raw_uri'])) for n in nodes]
 
 @app.route('/nodes/<int:node_id>/delete', methods=['POST'])
 @login_required
@@ -2484,11 +2531,11 @@ def api_sync_all():
     """一键同步所有账号的订阅"""
     db = get_db()
     apply_due_traffic_resets(db)
-    accounts = [dict(account) for account in db.execute(
-        "SELECT * FROM accounts WHERE status='active' ORDER BY id LIMIT ?",
+    account_ids = [row[0] for row in db.execute(
+        "SELECT id FROM accounts WHERE status='active' ORDER BY id LIMIT ?",
         (MAX_SYNC_ACCOUNTS + 1,),
     ).fetchall()]
-    if len(accounts) > MAX_SYNC_ACCOUNTS:
+    if len(account_ids) > MAX_SYNC_ACCOUNTS:
         return jsonify({
             "error": f"单次同步账号上限为 {MAX_SYNC_ACCOUNTS}，请分批同步"
         }), 413
@@ -2505,9 +2552,9 @@ def api_sync_all():
             return account, None, None, str(e)
 
     results = []
-    fetched_accounts = _bounded_parallel_map(fetch, accounts)
-    db.execute('BEGIN IMMEDIATE')
-    for account, nodes, traffic_info, error in fetched_accounts:
+
+    def store_result(account, nodes, traffic_info, error):
+        db.execute('BEGIN IMMEDIATE')
         if error is None:
             if not _sync_snapshot_is_current(db, account):
                 results.append({
@@ -2516,7 +2563,8 @@ def api_sync_all():
                     "status": "skipped",
                     "msg": "account was changed, deleted or synced during fetch; retry",
                 })
-                continue
+                db.rollback()
+                return
             if not nodes:
                 results.append({
                     "id": account['id'],
@@ -2524,7 +2572,8 @@ def api_sync_all():
                     "status": "error",
                     "msg": "订阅中未找到可用节点",
                 })
-                continue
+                db.rollback()
+                return
             _replace_account_nodes(db, account['id'], nodes)
             db.execute(
                 '''UPDATE accounts SET
@@ -2543,7 +2592,33 @@ def api_sync_all():
             results.append({"id": account['id'], "name": account['name'], "status": "ok", "nodes": len(nodes)})
         else:
             results.append({"id": account['id'], "name": account['name'], "status": "error", "msg": error})
-    db.commit()
+        db.commit()
+
+    # Hold at most one small wave of source text and parsed nodes in memory.
+    # Each completed account commits before fetching the next wave; no network I/O
+    # occurs inside a SQLite write transaction.
+    batch_deadline = time.monotonic() + 90
+    for offset in range(0, len(account_ids), 4):
+        if time.monotonic() >= batch_deadline:
+            for account_id in account_ids[offset:]:
+                account = db.execute('SELECT name FROM accounts WHERE id=?', (account_id,)).fetchone()
+                if account:
+                    results.append({'id': account_id, 'name': account['name'], 'status': 'skipped',
+                                    'msg': '本轮同步已达时间上限，保留现有节点，请单独重试未完成账号'})
+            break
+        accounts = []
+        for account_id in account_ids[offset:offset + 4]:
+            account = db.execute('SELECT * FROM accounts WHERE id=?', (account_id,)).fetchone()
+            if account and account['status'] == 'active':
+                accounts.append(dict(account))
+        fetched = _bounded_parallel_map(fetch, accounts, max_workers=4)
+        for item in fetched:
+            store_result(*item)
+        fetched.clear()
+        accounts.clear()
+        # Do not keep the last parsed subscription alive across waves.
+        if 'item' in locals():
+            del item
     audit_event(
         'account.sync_all',
         'success',
@@ -2556,15 +2631,12 @@ def api_sync_all():
 def api_subscribe():
     """获取所有活跃账号的节点订阅"""
     db = get_db()
-    accounts = db.execute("SELECT * FROM accounts WHERE status='active' ORDER BY id").fetchall()
-    links = []
-    keywords = _node_filter_keywords()
-    for a in accounts:
-        nodes = db.execute('SELECT * FROM nodes WHERE account_id=?', (a['id'],)).fetchall()
-        for n in nodes:
-            if n['raw_uri'] and not _node_is_blocked(n['name'], keywords):
-                links.append(n['raw_uri'])
-    return jsonify({"links": links, "count": len(links)})
+    nodes = db.execute('''SELECT n.* FROM nodes n JOIN accounts a ON a.id=n.account_id
+                          WHERE a.status='active' ORDER BY a.id, n.id''').fetchall()
+    exported = _prepare_subscription(nodes)
+    if exported['requires_clash']:
+        return jsonify({'error': '部分节点包含通用链接无法保留的参数，请使用账号的 Clash 订阅链接'}), 406
+    return jsonify({"links": exported['links'], "count": exported['count']})
 
 @app.route('/settings/password', methods=['POST'])
 @login_required
@@ -2641,10 +2713,10 @@ def _apply_rename(text, rules):
     return text
 
 
-def _rename_node_uri(node, rules):
+def _rename_node_uri(node, rules, *, name=None):
     raw_uri = node.get('raw_uri', '')
     original_name = str(node.get('name', ''))
-    renamed = _apply_rename(original_name, rules)
+    renamed = _apply_rename(original_name, rules) if name is None else name
     if not raw_uri or renamed == original_name:
         return raw_uri
     if raw_uri.startswith('vmess://'):
@@ -2672,10 +2744,74 @@ def _row_get(row, key, default=None):
 
 def _nodes_from_db_rows(db_nodes):
     return [
-        {'raw_uri': n['raw_uri'], 'name': n['name']}
+        {'raw_uri': n['raw_uri'], 'name': n['name'],
+         'clash_config': _row_get(n, 'clash_config', '')}
         for n in db_nodes
         if n['raw_uri']
     ]
+
+
+def _prepare_subscription(db_nodes):
+    """Apply policy once, keeping final names and routing references consistent."""
+    nodes = _nodes_from_db_rows(db_nodes)
+    keywords, rules = _node_filter_keywords(), _get_rename_rules()
+    selected = [n for n in nodes if not _node_is_blocked(n['name'], keywords)]
+    blocked = len(nodes) - len(selected)
+    original_names = {}
+    for index, node in enumerate(selected):
+        original_names.setdefault(node['name'], []).append(index)
+        node['proxy'] = (json.loads(node['clash_config']) if node['clash_config']
+                         else _clash_proxy_from_uri(node['raw_uri']))
+    # A removed/ambiguous dependency or a cycle must never become a direct connection.
+    valid = set()
+    for index in range(len(selected)):
+        chain, current = set(), index
+        while current not in valid and current not in chain:
+            chain.add(current)
+            proxy = selected[current]['proxy'] or {}
+            dependency = proxy.get('dialer-proxy')
+            if not dependency or dependency == 'DIRECT':
+                valid.update(chain)
+                break
+            targets = original_names.get(dependency, [])
+            if len(targets) != 1:
+                break
+            current = targets[0]
+        else:
+            if current in valid:
+                valid.update(chain)
+    selected = [n for i, n in enumerate(selected) if i in valid]
+    desired = [_apply_rename(n['name'], rules).strip() or '节点' for n in selected]
+    # Reserve all desired names so generated suffixes do not steal another node's name.
+    reserved, used = set(desired), set()
+    mapping = {}
+    for node, name in zip(selected, desired):
+        candidate, suffix = name, 2
+        if candidate in used:
+            candidate = f'{name} [{suffix}]'
+            while candidate in used or candidate in reserved:
+                suffix += 1
+                candidate = f'{name} [{suffix}]'
+        used.add(candidate)
+        mapping[node['name']] = candidate
+        node['export_name'] = candidate
+    links, proxies, requires_clash = [], [], False
+    for node in selected:
+        # Use the existing URI encoder with one exact final-name replacement.
+        uri = _rename_node_uri(node, [], name=node['export_name'])
+        links.append(uri)
+        proxy = node['proxy']
+        if proxy:
+            if node['clash_config'] and not uri_preserves_clash_config(proxy, node['raw_uri']):
+                requires_clash = True
+            proxy['name'] = node['export_name']
+            if proxy.get('dialer-proxy') not in (None, '', 'DIRECT'):
+                proxy['dialer-proxy'] = mapping[proxy['dialer-proxy']]
+            proxies.append(proxy)
+    return {'links': links, 'proxies': proxies, 'requires_clash': requires_clash,
+            'stored': len(nodes), 'blocked': blocked,
+            'unavailable': len(nodes) - blocked - len(selected),
+            'count': len(selected), 'names': [n['export_name'] for n in selected]}
 
 
 @app.route('/sub/<token>')
@@ -2711,8 +2847,7 @@ def public_subscribe(token):
             'Cache-Control': 'no-store',
         }
 
-    keywords = _node_filter_keywords()
-    nodes = [node for node in nodes if not _node_is_blocked(node['name'], keywords)]
+    exported = _prepare_subscription(db_nodes)
 
     # 分享订阅只输出节点及品牌信息，不向客户端公开流量、配额或到期日期。
     resp_headers = {
@@ -2722,27 +2857,23 @@ def public_subscribe(token):
     }
     ua = request.headers.get('User-Agent', '')
 
-    rename_rules = _get_rename_rules()
-    lines = [
-        _rename_node_uri(node, rename_rules)
-        for node in nodes
-        if node.get('raw_uri', '')
-    ]
-
-    # 根据 User-Agent 返回不同格式
-    content = '\n'.join(lines)
-
-    if 'Clash' in ua or 'clash' in ua:
-        # 返回 Clash YAML
-        proxies = [proxy for line in lines if (proxy := _clash_proxy_from_uri(line))]
+    output_format = request.args.get('format', '').lower()
+    if output_format not in ('', 'clash', 'base64'):
+        return 'Unsupported subscription format', 400, resp_headers
+    if output_format == 'clash' or (not output_format and (
+            any(client in ua.lower() for client in ('clash', 'mihomo'))
+            or (exported['requires_clash'] and 'ssrvpn' in ua.lower()))):
 
         import yaml
-        clash_config = {'proxies': proxies}
+        clash_config = {'proxies': exported['proxies']}
         resp_headers['Content-Type'] = 'text/yaml; charset=utf-8'
         return yaml.dump(clash_config, allow_unicode=True, default_flow_style=False), 200, resp_headers
 
     # 默认返回 base64 编码（Shadowrocket / 通用格式）
-    b64 = base64.b64encode(content.encode()).decode()
+    if exported['requires_clash']:
+        return ('This subscription requires Clash YAML to preserve routing and protocol '
+                'options. Use a compatible client with ?format=clash.'), 406, resp_headers
+    b64 = base64.b64encode('\n'.join(exported['links']).encode()).decode()
     resp_headers['Content-Type'] = 'text/plain; charset=utf-8'
     return b64, 200, resp_headers
 
