@@ -168,6 +168,7 @@ fi
 capture_caddy_state
 ensure_caddy
 assert_supported_caddy_version
+"$PANEL_DIR/venv/bin/python" "$REPO_ROOT/tests/edge_request_regression.py"
 temp_caddy="$(mktemp)"
 printf '%s\n' \
     'http://127.0.0.1:18080 {' \

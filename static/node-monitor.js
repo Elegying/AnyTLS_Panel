@@ -198,8 +198,6 @@
     const dashboard = document.getElementById('dashboard-probe-note');
     if (dashboard) {
         dashboard.dataset.states = JSON.stringify(JSON.parse(dashboard.dataset.states).map(stamp));
-        const pending = document.getElementById('dashboard-attention-nodes');
-        if (pending) pending.textContent = Number(note.dataset.total ?? states.length) - verified;
         document.querySelectorAll('[data-probe-health]').forEach(badge => {
             badge.dataset.probeHealth = JSON.stringify(stamp(JSON.parse(badge.dataset.probeHealth)));
         });

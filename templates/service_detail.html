@@ -8,19 +8,20 @@
 <header class="page-header">
     <div class="page-heading">
         <p class="eyebrow">用户服务详情</p>
-        <div class="cell-row"><h1 class="page-title">{{ service.wechat_id }}</h1><span class="badge {{ 'badge-green' if state == 'active' else 'badge-red' if state == 'expired' else 'badge-blue' if state == 'pending' else 'badge-orange' }}">{{ '使用中' if state == 'active' else '已过期' if state == 'expired' else '待生效' if state == 'pending' else '暂停' if state == 'suspended' else '停用' }}</span></div>
+        <div class="cell-row"><h1 class="page-title">{{ service.wechat_id }}</h1><span class="badge {{ 'badge-green' if state == 'active' else 'badge-red' if state == 'expired' else 'badge-blue' if state == 'pending' else 'badge-orange' }}">{{ '使用中' if state == 'active' else '已过期' if state == 'expired' else '待生效' if state == 'pending' else '专线未启用' if state == 'account_inactive' else '暂停' if state == 'suspended' else '停用' }}</span></div>
         <p class="page-description">独立管理这位用户的服务期、续费提醒、专线分配和订阅链接。</p>
     </div>
-    <div class="page-actions"><a class="btn btn-ghost" href="{{ url_for('account_detail', account_id=service.account_id) }}">查看专线账号</a><button class="btn btn-primary" type="button" data-action="open-modal" data-modal="renewModal"><i class="bi bi-calendar-plus" aria-hidden="true"></i>续期</button></div>
+    <div class="page-actions"><a class="btn btn-ghost" href="{{ url_for('account_detail', account_id=service.account_id) }}">查看专线账号</a>{% if renew_min_date %}<button class="btn btn-primary" type="button" data-action="open-modal" data-modal="renewModal"><i class="bi bi-calendar-plus" aria-hidden="true"></i>续期</button>{% else %}<span class="badge badge-neutral">已达日期上限</span>{% endif %}</div>
 </header>
 
+{% if state == 'account_inactive' %}<div class="info-banner">所属专线已暂停或停用，订阅目前不可获取。请恢复专线或迁移到可用专线。</div>{% endif %}
 {% if service.account_expires_on and service.expires_on > service.account_expires_on %}
 <div class="info-banner" style="border-color:rgba(242,186,85,.3);background:var(--orange-soft)"><i class="bi bi-exclamation-triangle" style="color:var(--orange)" aria-hidden="true"></i><div><strong>需要安排上游续费或迁移</strong>用户服务到 {{ service.expires_on }}，但专线账号到 {{ service.account_expires_on }}，当前上游有效期不能完整覆盖用户服务期。</div></div>
 {% endif %}
 
 <section class="detail-summary" aria-label="用户服务概览">
     <div class="system-metric"><div class="metric-label">专线账号</div><div class="metric-value" style="font-size:17px">{{ service.account_name }}</div><div class="metric-note">{{ service.relationship }}</div></div>
-    <div class="system-metric"><div class="metric-label">服务期</div><div class="metric-value" style="font-size:17px">{{ service.expires_on }}</div><div class="metric-note">{{ '已过期' ~ (-remaining) ~ '天' if state == 'expired' else '剩余' ~ remaining ~ '天' if state == 'active' else '开始日未到' if state == 'pending' else '当前未启用' }}</div></div>
+    <div class="system-metric"><div class="metric-label">服务期</div><div class="metric-value" style="font-size:17px">{{ service.expires_on }}</div><div class="metric-note">{{ '已过期' ~ (-remaining) ~ '天' if state == 'expired' else '剩余' ~ remaining ~ '天' if state == 'active' else '开始日未到' if state == 'pending' else '所属专线暂停或停用' if state == 'account_inactive' else '当前未启用' }}</div></div>
     <div class="system-metric"><div class="metric-label">账号流量</div><div class="metric-value" style="font-size:17px">{{ calc_traffic_percent(service.traffic_used_bytes or 0, service.traffic_limit_gb or 0) }}%</div><div class="metric-note">{{ format_bytes(service.traffic_used_bytes or 0) }} / {{ service.traffic_limit_gb }} GB</div></div>
     <div class="system-metric"><div class="metric-label">最近提醒</div><div class="metric-value" style="font-size:17px">{{ service.last_reminded_at or '尚未提醒' }}</div><div class="metric-note">标记后可避免重复联系</div></div>
 </section>
@@ -29,6 +30,7 @@
     <header class="panel-header"><h2 class="panel-title"><i class="bi bi-link-45deg" aria-hidden="true"></i>用户独立订阅</h2><span class="panel-meta">到期或暂停后无法再次获取订阅</span></header>
     <div class="panel-body">
         <div class="form-group"><label for="serviceShareUrl">订阅链接</label><div class="cell-row"><input id="serviceShareUrl" class="code-value" value="{{ url_for('public_subscribe', token=service.sub_token, _external=True) }}" readonly><button class="btn btn-primary" type="button" data-action="copy-input" data-input-id="serviceShareUrl"><i class="bi bi-copy" aria-hidden="true"></i>复制</button></div></div>
+        <div class="form-group"><label for="serviceClashUrl">Clash 格式链接</label><div class="cell-row"><input id="serviceClashUrl" class="code-value" value="{{ url_for('public_subscribe', token=service.sub_token, format='clash', _external=True) }}" readonly><button class="btn btn-ghost" type="button" data-action="copy-input" data-input-id="serviceClashUrl">复制</button></div></div>
         <div class="cell-actions">
             <button class="btn btn-ghost" type="button" data-action="copy-value" data-copy-value="你好，你的专线服务将在 {{ service.expires_on }} 到期，如需继续使用请提前联系续费。"><i class="bi bi-chat-dots" aria-hidden="true"></i>复制续费提醒</button>
             <form method="POST" action="{{ url_for('service_remind', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-ghost" type="submit">标记已提醒</button></form>
@@ -61,10 +63,12 @@
 
 <section class="panel">
     <header class="panel-header"><h2 class="panel-title"><i class="bi bi-clock-history" aria-hidden="true"></i>续期记录</h2><span class="panel-meta">{{ renewals | length }} 次</span></header>
-    {% if renewals %}<div class="table-scroll"><table><thead><tr><th>原到期日</th><th>新到期日</th><th>备注</th><th>操作时间</th></tr></thead><tbody>{% for renewal in renewals %}<tr><td>{{ renewal.old_expires_on }}</td><td>{{ renewal.new_expires_on }}</td><td>{{ renewal.notes or '—' }}</td><td>{{ renewal.created_at }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-calendar-check" aria-hidden="true"></i></span><h3>暂无续期记录</h3><p>第一次续期后会在这里保留日期变更记录。</p></div></div>{% endif %}
+    {% if renewals %}<div class="table-scroll"><table><thead><tr><th>原到期日</th><th>新到期日</th><th>备注</th><th>操作时间</th></tr></thead><tbody>{% for renewal in renewals %}<tr><td>{{ renewal.old_expires_on }}</td><td>{{ renewal.new_expires_on }}</td><td>{{ renewal.notes or '—' }}</td><td>{{ renewal.created_at | localtime }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-calendar-check" aria-hidden="true"></i></span><h3>暂无续期记录</h3><p>第一次续期后会在这里保留日期变更记录。</p></div></div>{% endif %}
 </section>
 
+{% if renew_min_date %}
 <div class="modal-overlay" id="renewModal" aria-hidden="true" {% if request.args.get('renew') == '1' %}data-auto-open{% endif %}>
     <section class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="renewTitle"><div class="modal-header"><div><h2 class="modal-title" id="renewTitle"><i class="bi bi-calendar-plus" aria-hidden="true"></i>用户续期</h2><p class="modal-description">当前到期日：{{ service.expires_on }}</p></div><button type="button" class="icon-button modal-close" data-action="close-modal" data-modal="renewModal" aria-label="关闭续期弹窗"><i class="bi bi-x-lg" aria-hidden="true"></i></button></div><div class="modal-body"><form method="POST" data-preserve-form action="{{ url_for('service_renew', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% if request.args.get('return_to') == 'dashboard' %}<input type="hidden" name="return_to" value="dashboard">{% endif %}<div class="form-group"><label for="new-expire">新到期日期</label><input id="new-expire" name="new_expires_on" type="date" min="{{ renew_min_date }}" required></div><div class="form-group"><label for="renew-notes">续期备注</label><input id="renew-notes" name="notes" placeholder="例如：续费一年、已收款"></div><div class="modal-actions"><button class="btn btn-ghost" type="button" data-action="close-modal" data-modal="renewModal">取消</button><button class="btn btn-primary" type="submit">确认续期</button></div></form></div></section>
 </div>
+{% endif %}
 {% endblock %}

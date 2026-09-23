@@ -30,7 +30,7 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.12/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.13/deploy.sh -o "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
 ```
@@ -38,7 +38,7 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.4.12 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.13 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -46,7 +46,7 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.4.12" bash /opt/anytls-panel/deploy.sh
+ANYTLS_REPO_REF="v1.4.13" bash /opt/anytls-panel/deploy.sh
 ```
 
 上述本机更新命令适用于已安装 `v1.4.5` 或更新版本的部署脚本；更早版本请使用前面的完整下载命令。指定 `ANYTLS_REPO_REF`、`ANYTLS_REPO_URL` 或 `ANYTLS_REPO_SUBDIR` 时会从仓库拉取；均未指定且脚本旁有完整项目源码时使用本地文件。形如 `vX.Y.Z` 的版本必须是真实标签，且源码 `VERSION` 必须匹配，检查在停服前完成。
@@ -247,7 +247,7 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.12/deploy.sh -o "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.13/deploy.sh -o "$installer_dir/deploy.sh"
   bash "$installer_dir/deploy.sh"
 )
 ```
@@ -372,3 +372,14 @@ schema 6 迁移由应用初始化自动、幂等执行，保留旧字段和历�
 检测不会自动运行。旧版记录显示“旧版结果待复测”，点击单项“检测”或“检测全部”获取新证据。批量优先处理待确认和最早尝试的节点，最多四路并发、每次启动间隔 400 毫秒、每轮最多两分钟；点击“继续检测”处理未完成项目。遇到请求限流会保留结果及队列，按照提示等待后继续。刷新页面会重新按持久化状态排序，未检测的旧结果优先处理。
 
 监控页按协议、地址、端口、SNI、TLS 及传输参数合并重复账号节点，仅凭据或显示名不同的配置共用一个代表入口检查。每组显示关联账号数和配置数，单项与批量操作都只检测代表节点；结果仍仅代表入口检查，不证明组内所有账号认证可用。账号详情保留独立记录；删除代表节点后，会选择现存节点及其自身结果，不继承被删除账号的证据。无法解析的配置不合并。
+
+
+## 请求入口与恢复预算（1.4.13）
+
+Caddy 先缓冲不超过 `ANYTLS_MAX_REQUEST_BYTES` 的请求体，再转发给 Gunicorn；读取请求头最长 10 秒，请求体最长 30 秒。不要仅调整 Gunicorn `--timeout` 来防御慢请求。默认请求体上限 4 MiB，部署器保持应用上限与代理缓冲一致。
+
+默认配置的读取期限作用于同一 HTTP 服务器的所有站点。若现有 Caddy 全局块含自定义 `servers` 或导入的选项，请在原有服务器配置中合并 `timeouts { read_header 10s; read_body 30s }`（Caddyfile 中每项独占一行），验证后再部署；部署器不会覆盖自定义选项。不要移除读取期限而单独保留请求缓冲。
+
+健康检查每分钟触发，单次最多 90 秒；状态检查最多 3 秒，恢复命令最多 15 秒，每个 HTTP 探针最多 8 秒。仍保留连续失败阈值与 5 分钟恢复冷却，失败恢复不会清空失败计数。
+
+批量同步最多同时保留 4 个账号的数据，每个账号提交后释放解析结果。数据库旁的 `.bulk.lock` 文件实现跨进程互斥；不要在运行期间删除或替换锁文件。进程退出会自动释放操作系统锁，不需要人工清理“过期”文件。
