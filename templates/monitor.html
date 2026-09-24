@@ -17,7 +17,7 @@
     <div class="page-actions"><span class="page-meta" id="check-status" role="status"></span><button class="btn btn-primary" id="checkAllBtn" type="button" data-action="check-all"><i class="bi bi-radar" aria-hidden="true"></i>检测全部</button></div>
 </header>
 <section class="monitor-summary" aria-label="节点状态汇总">
-    <div class="summary-card"><div class="metric-label">入口组</div><div class="summary-card-value is-blue">{{ nodes | length }}</div></div>
+    <div class="summary-card"><div class="metric-label">{{ '配置组' if proxy_verification else '入口组' }}</div><div class="summary-card-value is-blue">{{ nodes | length }}</div></div>
     <div class="summary-card"><div class="metric-label">当前代理验证通过</div><div class="summary-card-value is-green" id="stat-verified">{{ nodes | selectattr('health.status', 'equalto', 'verified') | list | length }}</div></div>
     <div class="summary-card"><div class="metric-label">入口可达 · 代理未验证</div><div class="summary-card-value is-orange" id="stat-entry">{{ nodes | selectattr('health.status', 'equalto', 'entry') | list | length }}</div></div>
     <div class="summary-card"><div class="metric-label">失败 / 过期 / 待确认</div><div class="summary-card-value" id="stat-other">{{ nodes | rejectattr('health.status', 'in', ['verified', 'entry']) | list | length }}</div></div>
