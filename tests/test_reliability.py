@@ -32,6 +32,50 @@ def run_shell(script, body, *, source_arguments=(), **environment):
 
 
 class DeploymentReliabilityTests(unittest.TestCase):
+    def test_nested_failure_restores_once_in_the_owning_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_shell('deploy.sh', r'''
+CUTOVER_STARTED=1
+STAGE_DIR="$TEST_ROOT/stage"
+mkdir "$STAGE_DIR"
+rollback_deployment() {
+    [[ -d "$STAGE_DIR" ]] || exit 81
+    printf 'restored\n' >> "$TEST_ROOT/restores"
+    ROLLBACK_FINISHED=1
+}
+(exit 42)
+''', TEST_ROOT=directory)
+            self.assertEqual(result.returncode, 42, result.stderr)
+            self.assertEqual((Path(directory) / 'restores').read_text(), 'restored\n')
+            self.assertFalse((Path(directory) / 'stage').exists())
+
+    @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'requires isolated Linux root')
+    def test_signed_installer_keeps_snapshot_private_and_runtime_readable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_shell('install-release.sh', r'''
+for suffix in '' .sha256 .sigstore.json; do
+    printf 'fixture' > "$TEST_ROOT/AnyTLS_Panel-v1.2.3.tar.gz$suffix"
+done
+ensure_cosign() { :; }
+verify_release() { :; }
+extract_release() {
+    [[ "$(stat -c %a "$2")" == 700 ]]
+    mkdir "$2/AnyTLS_Panel-1.2.3"
+    cat > "$2/AnyTLS_Panel-1.2.3/deploy.sh" <<'FIXTURE'
+set -e
+[[ "$(umask)" == 0022 ]]
+mkdir "$TEST_ROOT/runtime"
+touch "$TEST_ROOT/runtime/code.py"
+FIXTURE
+}
+umask 077
+main v1.2.3 "$TEST_ROOT"
+[[ "$(umask)" == 0077 ]]
+[[ "$(stat -c %a "$TEST_ROOT/runtime")" == 755 ]]
+[[ "$(stat -c %a "$TEST_ROOT/runtime/code.py")" == 644 ]]
+''', TEST_ROOT=directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_backend_readiness_waits_for_startup_and_rejects_persistent_failure(self):
         result = run_shell('deploy.sh', r'''
 attempts=0

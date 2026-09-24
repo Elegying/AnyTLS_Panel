@@ -48,6 +48,8 @@ install -m 644 "$CERT_DIR/cert.pem" /usr/local/share/ca-certificates/anytls-pane
 update-ca-certificates >/dev/null
 
 run_deploy() (
+    # Match the restrictive caller used by the signed release bootstrap.
+    umask 077
     scenario="${1:-}"
     set --
     # shellcheck source=../deploy.sh
