@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -24,6 +25,25 @@ class ProxyVerificationTests(unittest.TestCase):
         authenticate_session(self.module, self.client)
 
     account = test_audit_fixes.AuditFixTests.account
+
+    def test_controller_socket_before_proxy_configuration_is_not_ready(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        response = mock.Mock()
+        response.status = 200
+        response.read.return_value = b'{"name":"health-probe"}'
+        initializing = mock.Mock()
+        initializing.status = 404
+        initializing.read.return_value = b'{"message":"Not Found"}'
+        connection = mock.Mock()
+        connection.getresponse.side_effect = [initializing, response]
+        with mock.patch.object(verifier, 'UnixHTTPConnection', return_value=connection):
+            verifier.wait_for_proxy('/fictional/controller', process, time.monotonic() + 1)
+        self.assertEqual(connection.request.call_count, 2)
+        self.assertEqual(connection.close.call_count, 2)
+        process.poll.return_value = 1
+        with self.assertRaises(RuntimeError):
+            verifier.wait_for_proxy('/fictional/controller', process, time.monotonic() + 1)
 
     @unittest.skipUnless(os.name == 'posix', 'production POSIX locks')
     def test_core_slots_bound_threads_and_release_after_exception(self):

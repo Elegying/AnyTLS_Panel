@@ -2758,11 +2758,12 @@ def _prepare_subscription(db_nodes):
     nodes = _nodes_from_db_rows(db_nodes)
     try:
         return prepare_subscription(nodes, _node_filter_keywords(), _get_rename_rules())
-    except (ValueError, TypeError, KeyError) as exc:
+    except (ValueError, TypeError, KeyError):
         # Keep settings/account pages usable so invalid legacy rules can be repaired.
         return {'links': [], 'proxies': [], 'names': [], 'requires_clash': False,
                 'stored': len(nodes), 'blocked': 0, 'unavailable': len(nodes),
-                'count': 0, 'error': '订阅生成失败，请检查节点配置和重命名规则：' + str(exc)}
+                'count': 0, 'error': '订阅生成失败，请检查节点配置和重命名规则；'
+                '最多 100 条规则、每步名称最多 512 字、响应最多 8 MiB。'}
 
 
 @app.route('/sub/<token>')

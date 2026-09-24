@@ -53,6 +53,25 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock.connect(self.path)
 
 
+def wait_for_proxy(controller, process, deadline):
+    # The control socket is opened before Mihomo finishes applying its proxies.
+    # Waiting for the named proxy avoids treating startup as a node failure.
+    while process.poll() is None and time.monotonic() < deadline:
+        conn = UnixHTTPConnection(controller, min(0.5, max(0.01, deadline - time.monotonic())))
+        try:
+            conn.request('GET', '/proxies/health-probe')
+            response = conn.getresponse()
+            body = response.read(4097)
+            if response.status == 200 and len(body) <= 4096 and json.loads(body).get('name') == 'health-probe':
+                return
+        except (OSError, ValueError, http.client.HTTPException):
+            pass
+        finally:
+            conn.close()
+        time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+    raise RuntimeError('core unavailable')
+
+
 def run_core(proxy, directory, deadline):
     with tempfile.TemporaryDirectory(prefix='probe-', dir=directory) as temporary:
         path = Path(temporary)
@@ -69,10 +88,7 @@ def run_core(proxy, directory, deadline):
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    start_new_session=True)
         try:
-            while not (path / 'control.sock').exists():
-                if process.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError('core unavailable')
-                time.sleep(0.02)
+            wait_for_proxy(controller, process, deadline)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError
