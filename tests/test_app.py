@@ -5517,7 +5517,7 @@ proxies:
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
         self.assertIn('REPO_REF="${ANYTLS_REPO_REF:-v' + RELEASE_VERSION + '}"', deploy)
-        self.assertIn(f"AnyTLS_Panel/v{RELEASE_VERSION}/deploy.sh", readme)
+        self.assertIn(f"AnyTLS_Panel/v{RELEASE_VERSION}/install-release.sh", readme)
         self.assertTrue(workflow.is_file())
         workflow_text = workflow.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow_text)

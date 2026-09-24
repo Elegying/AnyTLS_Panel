@@ -9,8 +9,12 @@ database_maintenance.py
 input_limits.py
 import_customer_services.py
 node_probe.py
+node_monitor.py
+proxy_verifier.py
 panel_updates.py
 deploy.sh
+install-release.sh
+install-monitor.sh
 docs/API.md
 docs/ARCHITECTURE.md
 docs/CONFIGURATION.md
@@ -27,6 +31,7 @@ README.md
 requirements.in
 requirements.txt
 protocol_codecs.py
+subscription_export.py
 security_utils.py
 SECURITY.md
 sqlite_rate_limit.py

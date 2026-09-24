@@ -21,7 +21,7 @@ AnyTLS Panel 使用环境变量覆盖默认配置。生产环境由 `deploy.sh` 
 | `ANYTLS_SERVICE_USER` | `anytls-panel` | 低权限运行用户，不能是 `root` |
 | `ANYTLS_BIND_HOST` | `127.0.0.1` | 允许 `127.0.0.1` 或 `::1`；服务、反向代理和健康检查使用同一回环地址 |
 | `ANYTLS_REPO_URL` | 官方 GitHub 仓库 | 部署脚本拉取代码的 Git 仓库 |
-| `ANYTLS_REPO_REF` | `v1.4.13` | 显式设置时优先从仓库拉取；`vX.Y.Z` 必须为真实标签且与源码版本一致；生产环境使用正式标签 |
+| `ANYTLS_REPO_REF` | `v1.4.14` | 显式设置时优先从仓库拉取；官方正式标签应通过 `install-release.sh` 验证后安装；自定义 Git 源用于已受信任的开发部署 |
 | `ANYTLS_REPO_SUBDIR` | 空 | 仓库中的项目子目录，常规部署不需要设置 |
 | `ANYTLS_ADMIN_USER` | 交互输入 | 首次无人值守安装时的管理员用户名 |
 | `ANYTLS_ADMIN_PASS` | 交互输入 | 首次无人值守部署必须提供的 8–128 字符密码，首尾空格属于密码本身 |
@@ -131,3 +131,11 @@ bash /opt/anytls-panel/uninstall.sh --yes --keep-data
 
 数据库迁移 7 新增单行 `node_filter` 设置表，默认关闭，可重复初始化且保留已保存规则。
 首页节点待办仅展示数量与监控入口，不再渲染全部节点明细。
+
+## 实际代理验证与定时复测
+
+`ANYTLS_PROXY_VERIFICATION` 默认 `0`，仅接受 `0/1`。设为 `1` 且固定版本核心已安装时，按节点凭据执行实际代理 HTTPS 检测；不支持的链式代理仍标记未验证。`install-monitor.sh` 同时安装核心、设置服务覆盖项并启用每分钟复测。
+
+核心位于 `/usr/local/lib/anytls-tools/mihomo-v1.19.31`，下载校验固定 SHA-256；不开放代理端口或 TUN，只在私有目录使用 Unix 控制套接字。每个数据库最多 2 个核心并行、单次最多 8 秒。定时任务每轮最多 32 个节点、45 秒、224 MiB 内存，优先最旧尝试，结果 15 分钟过期。大量慢节点时可能出现过期结果，不会伪造新结果。
+
+暂不支持独立验证含 `dialer-proxy` 的链式配置；默认只验证公网入口。固定测试目标为 `https://www.gstatic.com/generate_204`，检测访问失败不等于所有目标网站均不可用。

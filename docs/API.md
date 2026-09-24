@@ -193,10 +193,10 @@ curl --fail-with-body \
 优先使用 `POST /api/nodes/<id>/check`；`GET /api/nodes/<id>/health` 只读取脱敏状态，不触发出站探测。结果中的 `health` 是监控页、账号详情和仪表盘共用的状态：
 
 - `status`：`unknown` 未检测、`checking` 检测中、`entry` 入口可达但代理未验证、`tls_error` TLS 异常、`failed` 已执行阶段失败、`expired` 结果过期、`error` 任务未完成、`unsupported` 仅完成部分检测。
-- `verified` 预留给同时具备代理认证与代理访问成功证据的结果；当前探测实现不会生成此状态。
+- `verified` 仅在启用核心验证、使用该节点凭据完成实际代理 HTTPS 204 请求后生成；默认入口探测不会生成此状态。
 - `stages`：DNS、TCP、TLS、代理认证、代理访问的状态与受控说明；阶段取值为 `success`、`failed`、`not_run`、`not_applicable`、`unsupported`。
 - `checked_at` 显示 UTC，`age_seconds` 为结果年龄，`expires_at` 为过期 Unix 秒，统一有效期 `ttl_seconds=900`。
-- `source` 为面板服务器，不代表其他运营商/客户端网络。`latency` 仅为 TCP 建连耗时，不能当成代理访问延迟。
+- `source` 为面板服务器，不代表其他运营商/客户端网络。`latency` 仅为 TCP 建连耗时；`proxy_latency` 为实际代理访问耗时，仅核心验证成功时提供。
 - `tls_mode`：`strict` 校验证书、`insecure_configured` 节点明确跳过证书验证、`not_run` 未执行、`not_recorded` 旧记录。
 - `previous`、`attempt_at` 保留上次结论和最近尝试时间；任务异常不会抹去上次完成的证据。
 
@@ -216,3 +216,9 @@ curl --fail-with-body \
 所有分享入口按原始节点名称屏蔽，再重命名、去重。同名节点依次增加编号；链式代理同步更新引用，依赖被屏蔽、缺失、歧义或循环时不输出依赖它的节点。管理端 `/api/subscribe` 同样应用名称规则；若含通用格式无法表达的参数，返回 406。
 
 `POST /api/sync-all` 使用跨 Worker 的文件锁，同一时刻仅允许一个批量任务（冲突为 409）。每批最多 4 个账号，已完成账号立即提交；90 秒后不再开始新批次，未完成账号返回 `skipped`，可单独重试。上游失败、空响应或同步期间账号被修改时保留已有节点。
+
+### 订阅与审计边界（1.4.14）
+
+缺失协议必需凭据的配置不会写入缓存。证书 `fingerprint` 与 `client-fingerprint` 不互为别名；通用格式无法完整保存时返回 406 或按兼容客户端自动选择 YAML。
+节点名称不使用 `DIRECT` 等客户端内置策略名；最多 100 条重命名规则，每步和最终名称最多 512 字，公开响应最多 8 MiB。旧规则超限时公开订阅返回 503，管理合并接口返回 422，详情页显示错误。
+`account.sync_all` 审计结果为 `success`、`partial` 或 `failure`，附 `succeeded`、`failed`、`skipped` 计数和 `occurred_at`；不会把全失败写成成功。`/api/check-by-host` 非对象 JSON 返回 400。

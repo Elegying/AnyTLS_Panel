@@ -79,6 +79,9 @@ PY
 verify_runtime() {
     systemctl is-active --quiet "$ANYTLS_SERVICE_NAME" caddy \
         "$ANYTLS_SERVICE_NAME-healthcheck.timer" "$ANYTLS_SERVICE_NAME-backup.timer"
+    if [[ -f "/etc/systemd/system/$ANYTLS_SERVICE_NAME-monitor.timer" ]]; then
+        systemctl is-active --quiet "$ANYTLS_SERVICE_NAME-monitor.timer"
+    fi
     curl --fail --silent --show-error 'http://[::1]:18867/readyz'
     curl --fail --silent --show-error --output /dev/null \
         --resolve panel.example.test:443:127.0.0.1 https://panel.example.test/login
@@ -110,6 +113,18 @@ suite = unittest.TestSuite(
 )
 raise SystemExit(not unittest.TextTestRunner(verbosity=1).run(suite).wasSuccessful())
 PY
+# Install optional scheduler without downloading a core in this lifecycle test.
+# Real credential/transport verification has a separate loopback CI test.
+(
+    source "$REPO_ROOT/install-monitor.sh"
+    install_probe_core() { :; }
+    main
+)
+# Model a rollback target predating the optional scheduler. The unit must skip
+# without attempting to start a missing script, and must not wake a stopped panel.
+rm "$ANYTLS_PANEL_DIR/node_monitor.py"
+systemctl start "$ANYTLS_SERVICE_NAME-monitor.service"
+[[ "$(systemctl show "$ANYTLS_SERVICE_NAME-monitor.service" -p ConditionResult --value)" == no ]]
 runuser -u "$ANYTLS_SERVICE_USER" -- "$ANYTLS_PANEL_DIR/venv/bin/python" - \
     "$ANYTLS_PANEL_DIR/data/anytls.db" <<'PY'
 import sqlite3

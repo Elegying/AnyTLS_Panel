@@ -6,19 +6,24 @@
     <div class="page-heading">
         <p class="eyebrow">节点检测</p><h1 class="page-title">监控</h1>
         <p class="page-description">从面板服务器检测，不代表所有运营商和客户端网络均可达。入口可达不等于代理可用。</p>
+        {% if proxy_verification %}
+        <p class="page-description">结果有效期 15 分钟；使用每个节点自己的凭据验证实际代理 HTTPS 访问。失败时不会借用其他账号的结论。</p>
+        <p class="page-description">支持定时复测，每轮优先检测最旧的 32 条配置；繁忙或超时的任务留待下一轮。共 {{ total_nodes }} 条账号节点、{{ nodes | length }} 个配置组；手动批量每轮最多 2 分钟，未完成时可继续检测。</p>
+        {% else %}
         <p class="page-description">结果有效期 15 分钟；当前仅支持入口检测，代理认证与代理访问均未验证。</p>
-        <p class="page-description">共 {{ total_nodes }} 条账号节点，合并为 {{ nodes | length }} 个入口组；仅账号凭据不同不重复检测。检测由按钮触发，不会自动复测。批量优先检测待确认及旧结果，每轮最多 2 分钟；未完成时点击“继续检测”。</p>
+        <p class="page-description">共 {{ total_nodes }} 条账号节点，合并为 {{ nodes | length }} 个入口组；仅账号凭据不同不重复检测。检测由按钮触发；启用定时复测后会优先检测旧结果。手动批量每轮最多 2 分钟；未完成时点击“继续检测”。</p>
+        {% endif %}
     </div>
     <div class="page-actions"><span class="page-meta" id="check-status" role="status"></span><button class="btn btn-primary" id="checkAllBtn" type="button" data-action="check-all"><i class="bi bi-radar" aria-hidden="true"></i>检测全部</button></div>
 </header>
 <section class="monitor-summary" aria-label="节点状态汇总">
-    <div class="summary-card"><div class="metric-label">入口组</div><div class="summary-card-value is-blue">{{ nodes | length }}</div></div>
+    <div class="summary-card"><div class="metric-label">{{ '配置组' if proxy_verification else '入口组' }}</div><div class="summary-card-value is-blue">{{ nodes | length }}</div></div>
     <div class="summary-card"><div class="metric-label">当前代理验证通过</div><div class="summary-card-value is-green" id="stat-verified">{{ nodes | selectattr('health.status', 'equalto', 'verified') | list | length }}</div></div>
     <div class="summary-card"><div class="metric-label">入口可达 · 代理未验证</div><div class="summary-card-value is-orange" id="stat-entry">{{ nodes | selectattr('health.status', 'equalto', 'entry') | list | length }}</div></div>
     <div class="summary-card"><div class="metric-label">失败 / 过期 / 待确认</div><div class="summary-card-value" id="stat-other">{{ nodes | rejectattr('health.status', 'in', ['verified', 'entry']) | list | length }}</div></div>
 </section>
 <section class="panel">
-    <header class="panel-header"><h2 class="panel-title">入口检测列表</h2><span class="panel-meta">相同入口配置合并；每组只检测一个代表节点</span></header>
+    <header class="panel-header"><h2 class="panel-title">节点检测列表</h2><span class="panel-meta">{{ '仅完整配置和凭据相同的节点合并' if proxy_verification else '相同入口配置合并；每组只检测一个代表节点' }}</span></header>
     {% if nodes %}
     <div class="table-scroll"><table class="rwd-table" id="monitorTable">
         <thead><tr><th>节点 / 关联账号</th><th>协议 / 入口</th><th>检测结论与时间</th><th>操作</th></tr></thead>

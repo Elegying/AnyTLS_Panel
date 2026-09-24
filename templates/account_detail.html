@@ -138,6 +138,7 @@
         <div class="modal-header"><div><h2 class="modal-title" id="shareModalTitle"><i class="bi bi-share" aria-hidden="true"></i>分享订阅</h2><p class="modal-description">分享使用最近成功同步的节点，并应用屏蔽和重命名规则；同名节点会自动补充编号。</p></div><button type="button" class="icon-button modal-close" data-action="close-modal" data-modal="shareModal" aria-label="关闭分享订阅弹窗"><i class="bi bi-x-lg" aria-hidden="true"></i></button></div>
         <div class="modal-body">
             <p class="form-hint">已保存 {{ subscription_preview.stored }} 个节点 · 屏蔽 {{ subscription_preview.blocked }} 个 · 依赖不可用 {{ subscription_preview.unavailable }} 个 · 实际输出 {{ subscription_preview.count }} 个。</p>
+            {% if subscription_preview.error %}<p class="form-hint" role="alert">{{ subscription_preview.error }}</p>{% endif %}
             {% if subscription_preview.requires_clash %}<p class="form-hint">部分节点包含链式代理或专用参数，请使用 Clash 格式链接与兼容客户端。</p>{% endif %}
             <details><summary>查看订阅节点名称</summary><ul>{% for name in subscription_preview.names %}<li>{{ name }}</li>{% endfor %}</ul></details>
             <div id="shareContent">

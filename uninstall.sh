@@ -169,8 +169,12 @@ systemctl disable --now "${SERVICE_NAME}-healthcheck.timer" >/dev/null 2>&1 || t
 systemctl stop "${SERVICE_NAME}-healthcheck.service" >/dev/null 2>&1 || true
 systemctl disable --now "${SERVICE_NAME}-backup.timer" >/dev/null 2>&1 || true
 systemctl stop "${SERVICE_NAME}-backup.service" >/dev/null 2>&1 || true
+systemctl disable --now "${SERVICE_NAME}-monitor.timer" >/dev/null 2>&1 || true
+systemctl stop "${SERVICE_NAME}-monitor.service" >/dev/null 2>&1 || true
 systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
 rm -f "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service"
+rm -f -- "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-monitor.timer" "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}-monitor.service"
+rm -f -- "${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service.d/monitor.conf"
 rm -f -- "$HEALTHCHECK_SCRIPT" "$HEALTHCHECK_SERVICE" "$HEALTHCHECK_TIMER" \
   "$BACKUP_SERVICE" "$BACKUP_TIMER" \
   "$CADDY_RESTART_DROPIN"

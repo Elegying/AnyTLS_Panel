@@ -34,7 +34,7 @@
         detail.open = open;
         detail.append(text('summary', '检测详情'));
         detail.append(text('p', '来源：面板服务器 · 有效期 15 分钟', 'cell-subtitle'));
-        detail.append(text('p', '证书验证模式：' + (h.tls_mode === 'strict' ? '严格验证' : h.tls_mode === 'insecure_configured' ? '节点配置跳过验证（不证明证书有效）' : '未执行或未记录'), 'cell-subtitle'));
+        detail.append(text('p', '证书验证模式：' + (h.tls_mode === 'strict' ? '严格验证' : h.tls_mode === 'pinned' ? '固定证书指纹校验' : h.tls_mode === 'insecure_configured' ? '节点配置跳过验证（不证明证书有效）' : '未执行或未记录'), 'cell-subtitle'));
         if (['expired', 'error', 'checking'].includes(h.status)) detail.append(text('p', '上次：' + h.previous));
         for (const stage of h.stages) {
             const p = text('p', '', 'probe-stage');
@@ -42,6 +42,7 @@
             detail.append(p);
         }
         detail.append(text('p', 'TCP 建连耗时：' + (Number.isFinite(h.latency) && h.latency >= 0 ? h.latency + ' ms' : '未记录') + '；不代表代理访问延迟。', 'cell-subtitle'));
+        if (Number.isFinite(h.proxy_latency)) detail.append(text('p', '实际代理访问耗时：' + h.proxy_latency + ' ms', 'cell-subtitle'));
         if (h.attempt_at) detail.append(text('p', '最近尝试：' + h.attempt_at + ' UTC', 'cell-subtitle'));
         const age = ageSeconds(h) === null ? null : Math.floor(ageSeconds(h) / 60);
         cell.replaceChildren(text('span', h.label, 'badge badge-' + h.tone),

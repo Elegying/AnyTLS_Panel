@@ -243,5 +243,6 @@ def node_health(node, now=None):
             'age_seconds': age, 'ttl_seconds': PROBE_TTL_SECONDS,
             'expires_at': timestamp.timestamp() + PROBE_TTL_SECONDS if timestamp else None,
             'latency': result.get('latency', -1),
+            'proxy_latency': result.get('proxy_latency'),
             'tls_mode': result.get('tls_mode', 'not_recorded'), 'source': '面板服务器',
             'attempt_at': node.get('probe_attempt_at')}

@@ -98,7 +98,7 @@
             {% if attention_node_count %}
             <div class="attention-item">
                 <div class="attention-heading"><span class="alert-name">节点待确认</span><span id="dashboard-attention-nodes" class="badge badge-orange">{{ attention_node_count }}</span></div>
-                <p class="alert-detail">首页仅显示数量，进入监控页后按入口分组查看和检测。</p>
+                <p class="alert-detail">首页显示待关注的节点数量，可在监控页查看分组及检测详情。</p>
                 <a class="btn btn-sm btn-ghost" href="{{ url_for('nodes_monitor') }}">查看节点监控</a>
             </div>
             {% endif %}
