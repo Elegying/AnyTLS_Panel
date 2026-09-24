@@ -2,6 +2,7 @@
 # AnyTLS Panel one-command deployment.
 # Usage: bash deploy.sh [port] | bash deploy.sh --rollback [latest|backup-id]
 set -Eeuo pipefail
+DEPLOY_OWNER_PID="$BASHPID"
 
 PANEL_DIR="${ANYTLS_PANEL_DIR:-/opt/anytls-panel}"
 PORT="${ANYTLS_PANEL_PORT:-8866}"
@@ -21,7 +22,7 @@ TRAFFIC_LOG_RETENTION_DAYS="${ANYTLS_TRAFFIC_LOG_RETENTION_DAYS:-90}"
 MAX_REQUEST_BYTES="${ANYTLS_MAX_REQUEST_BYTES:-4194304}"
 PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
-REPO_REF="${ANYTLS_REPO_REF:-v1.4.14}"
+REPO_REF="${ANYTLS_REPO_REF:-v1.4.15}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
@@ -87,7 +88,7 @@ log() {
 
 fail() {
     printf '[anytls-panel] ERROR: %s\n' "$*" >&2
-    if [[ "${CUTOVER_STARTED:-0}" -eq 1 && "${ROLLBACK_FINISHED:-0}" -eq 0 ]] && \
+    if [[ "$BASHPID" == "$DEPLOY_OWNER_PID" && "${CUTOVER_STARTED:-0}" -eq 1 && "${ROLLBACK_FINISHED:-0}" -eq 0 ]] && \
        declare -F rollback_deployment >/dev/null 2>&1; then
         rollback_deployment || true
     fi
@@ -95,6 +96,7 @@ fail() {
 }
 
 cleanup_deploy_artifacts() {
+    [[ "$BASHPID" == "$DEPLOY_OWNER_PID" ]] || return 0
     if [[ "${DEPLOY_SUCCEEDED:-0}" -eq 0 && "${CUTOVER_STARTED:-0}" -eq 0 && \
           "${ROLLBACK_FINISHED:-0}" -eq 0 && \
           "${CADDY_INSTALL_ATTEMPTED:-0}" -eq 1 ]]; then
@@ -132,6 +134,8 @@ cleanup_deploy_artifacts() {
 handle_deploy_error() {
     local status="$1"
     trap - ERR
+    # A child shell must propagate its failure; only the owner restores shared state.
+    [[ "$BASHPID" == "$DEPLOY_OWNER_PID" ]] || exit "$status"
     trap '' HUP INT TERM
     if [[ "${CUTOVER_STARTED:-0}" -eq 1 && "${ROLLBACK_FINISHED:-0}" -eq 0 ]]; then
         rollback_deployment || true
@@ -2064,6 +2068,9 @@ acquire_operation_lock() {
 }
 
 main() {
+    # Runtime code and venv paths must be readable by the unprivileged service user.
+    # Secret and backup paths use explicit restrictive modes at their creation sites.
+    umask 022
     validate_configuration
     validate_supported_os
     acquire_operation_lock

@@ -84,6 +84,9 @@ main() (
     verify_release "$archive" "$tag"
     extract_release "$archive" "$RELEASE_TEMP" "$tag"
     unset ANYTLS_REPO_REF ANYTLS_REPO_URL ANYTLS_REPO_SUBDIR
+    # The verified snapshot remains private (0700); do not leak its restrictive
+    # creation mask into the runtime virtual environment built by the deployer.
+    umask 022
     bash "$RELEASE_TEMP/AnyTLS_Panel-${tag#v}/deploy.sh"
 )
 
