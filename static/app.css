@@ -375,8 +375,8 @@ code, .code-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", 
 .btn:hover { transform: translateY(-1px); }
 .btn:active { transform: translateY(0); }
 .btn:disabled { opacity: .58; cursor: wait; transform: none; }
-.btn-primary { border-color: #8679f2; background: var(--accent); color: #fff; }
-.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary { border-color: #8679f2; background: #6352cf; color: #fff; }
+.btn-primary:hover { background: #7060d5; }
 .btn-secondary, .btn-ghost { border-color: var(--border); background: var(--surface-2); color: var(--text-2); }
 .btn-secondary:hover, .btn-ghost:hover { border-color: var(--border-strong); background: var(--surface-3); color: var(--text); }
 .btn-success { border-color: rgba(54, 207, 167, .24); background: var(--green-soft); color: var(--green); }

@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -48,14 +48,19 @@ from input_limits import (
     MAX_NAME_CHARS,
     MAX_NOTES_CHARS,
     MAX_RENAME_TEXT_CHARS,
+    MAX_RENAME_RULES,
+    MAX_EXPORT_BYTES,
     MAX_SUBSCRIPTION_TEXT_CHARS,
     MAX_TRAFFIC_BATCH_ITEMS,
     SQLITE_INTEGER_MAX,
     bounded_env_int,
     validate_text,
 )
+from subscription_export import (
+    prepare_subscription, apply_rename, rename_node_uri, validate_rename_rules,
+)
 from protocol_codecs import (
-    clash_proxy_from_uri as _clash_proxy_from_uri,
+    clash_proxy_from_uri,
     parse_clash_yaml as _parse_clash_yaml,
     parse_protocol_uri,
     uri_preserves_clash_config,
@@ -64,6 +69,7 @@ from security_utils import hash_password, verify_password
 from sqlite_rate_limit import enforce_rate_limit, rate_limit
 from traffic_token import make_account_traffic_token
 from node_probe import check_node_connect, entry_probe_key, node_health
+from proxy_verifier import core_available, verify_node_proxy
 from panel_updates import CURRENT_VERSION, ReleaseChecker
 
 
@@ -124,7 +130,7 @@ _BUSINESS_TIMEZONE = ZoneInfo('Asia/Shanghai')
 _REQUEST_ID_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,64}$')
 _AUDIT_DETAIL_FIELDS = {
     'account_id', 'service_id', 'node_count', 'node_id', 'rule_id', 'status',
-    'username', 'reason'
+    'username', 'reason', 'succeeded', 'failed', 'skipped'
 }
 _READINESS_MIN_FREE_BYTES = 64 * 1024 * 1024
 
@@ -134,6 +140,7 @@ def audit_event(action, outcome, **details):
         'event': 'audit',
         'action': action,
         'outcome': outcome,
+        'occurred_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
     }
     if has_request_context():
         payload['request_id'] = getattr(g, 'request_id', '')
@@ -2050,12 +2057,13 @@ def nodes_monitor():
     nodes = db.execute('SELECT * FROM nodes ORDER BY host, port, account_id, id').fetchall()
     groups = {}
     for node in _nodes_with_health(nodes):
-        key = entry_probe_key(node) or ('unparsed', node['id'])
+        key = _node_config_key(node) if _proxy_verification_enabled() else entry_probe_key(node) or ('unparsed', node['id'])
         # Stable representative keeps single/bulk checks and refresh consistent.
         group = groups.setdefault(key, dict(node, account_ids=set(), node_count=0))
         group['account_ids'].add(node['account_id'])
         group['node_count'] += 1
-    return render_template('monitor.html', nodes=list(groups.values()), total_nodes=len(nodes))
+    return render_template('monitor.html', nodes=list(groups.values()), total_nodes=len(nodes),
+                           proxy_verification=_proxy_verification_enabled())
 
 
 def _nodes_with_health(nodes):
@@ -2345,7 +2353,7 @@ def api_account_nodes(account_id):
 def api_check_by_host():
     """按 host:port 检测节点，并更新所有匹配节点的状态"""
     data = request.get_json(silent=True)
-    if not data or not data.get('host') or not data.get('port'):
+    if not isinstance(data, dict) or not data.get('host') or not data.get('port'):
         return jsonify({"error": "missing host/port"}), 400
 
     try:
@@ -2414,7 +2422,15 @@ def _save_probe(node, token, result=None):
     return _nodes_with_health([current])[0]['health'] if current else None
 
 
+def _proxy_verification_enabled():
+    return _env_flag('ANYTLS_PROXY_VERIFICATION') and core_available()
+
+
 def _run_probe(node, timeout=8):
+    if _proxy_verification_enabled():
+        return verify_node_proxy(node, _resolve_subscription_addresses,
+                                 str(Path(app.config['DATABASE']).parent), timeout=timeout,
+                                 allow_private=_env_flag('ANYTLS_ALLOW_PRIVATE_NODE_PROBES'))
     return _check_node_connect(node['host'], node['port'], timeout=timeout, node=node)
 
 
@@ -2619,11 +2635,13 @@ def api_sync_all():
         # Do not keep the last parsed subscription alive across waves.
         if 'item' in locals():
             del item
-    audit_event(
-        'account.sync_all',
-        'success',
-        node_count=sum(item.get('nodes', 0) for item in results),
-    )
+    counts = {status: sum(item['status'] == status for item in results)
+              for status in ('ok', 'error', 'skipped')}
+    outcome = ('success' if not counts['error'] and not counts['skipped']
+               else 'partial' if counts['ok'] else 'failure')
+    audit_event('account.sync_all', outcome,
+                succeeded=counts['ok'], failed=counts['error'], skipped=counts['skipped'],
+                node_count=sum(item.get('nodes', 0) for item in results))
     return jsonify({"results": results})
 
 @app.route('/api/subscribe')
@@ -2634,6 +2652,8 @@ def api_subscribe():
     nodes = db.execute('''SELECT n.* FROM nodes n JOIN accounts a ON a.id=n.account_id
                           WHERE a.status='active' ORDER BY a.id, n.id''').fetchall()
     exported = _prepare_subscription(nodes)
+    if exported.get('error'):
+        return jsonify({'error': exported['error']}), 422
     if exported['requires_clash']:
         return jsonify({'error': '部分节点包含通用链接无法保留的参数，请使用账号的 Clash 订阅链接'}), 406
     return jsonify({"links": exported['links'], "count": exported['count']})
@@ -2707,32 +2727,15 @@ def _get_rename_rules():
 
 
 def _apply_rename(text, rules):
-    """对文本应用重命名规则"""
-    for r in rules:
-        text = text.replace(r['old_text'], r['new_text'])
-    return text
+    return apply_rename(text, rules)
+
+
+def _clash_proxy_from_uri(uri):
+    return clash_proxy_from_uri(uri)
 
 
 def _rename_node_uri(node, rules, *, name=None):
-    raw_uri = node.get('raw_uri', '')
-    original_name = str(node.get('name', ''))
-    renamed = _apply_rename(original_name, rules) if name is None else name
-    if not raw_uri or renamed == original_name:
-        return raw_uri
-    if raw_uri.startswith('vmess://'):
-        try:
-            encoded = raw_uri.split('://', 1)[1]
-            payload = encoded + '=' * (-len(encoded) % 4)
-            data = json.loads(base64.urlsafe_b64decode(payload).decode())
-            data['ps'] = renamed
-            encoded = base64.urlsafe_b64encode(
-                json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode()
-            ).decode().rstrip('=')
-            return f'vmess://{encoded}'
-        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-            return raw_uri
-    base, _separator, _fragment = raw_uri.partition('#')
-    return f"{base}#{quote(renamed, safe='')}"
+    return rename_node_uri(node, rules, name=name)
 
 
 def _row_get(row, key, default=None):
@@ -2752,66 +2755,14 @@ def _nodes_from_db_rows(db_nodes):
 
 
 def _prepare_subscription(db_nodes):
-    """Apply policy once, keeping final names and routing references consistent."""
     nodes = _nodes_from_db_rows(db_nodes)
-    keywords, rules = _node_filter_keywords(), _get_rename_rules()
-    selected = [n for n in nodes if not _node_is_blocked(n['name'], keywords)]
-    blocked = len(nodes) - len(selected)
-    original_names = {}
-    for index, node in enumerate(selected):
-        original_names.setdefault(node['name'], []).append(index)
-        node['proxy'] = (json.loads(node['clash_config']) if node['clash_config']
-                         else _clash_proxy_from_uri(node['raw_uri']))
-    # A removed/ambiguous dependency or a cycle must never become a direct connection.
-    valid = set()
-    for index in range(len(selected)):
-        chain, current = set(), index
-        while current not in valid and current not in chain:
-            chain.add(current)
-            proxy = selected[current]['proxy'] or {}
-            dependency = proxy.get('dialer-proxy')
-            if not dependency or dependency == 'DIRECT':
-                valid.update(chain)
-                break
-            targets = original_names.get(dependency, [])
-            if len(targets) != 1:
-                break
-            current = targets[0]
-        else:
-            if current in valid:
-                valid.update(chain)
-    selected = [n for i, n in enumerate(selected) if i in valid]
-    desired = [_apply_rename(n['name'], rules).strip() or '节点' for n in selected]
-    # Reserve all desired names so generated suffixes do not steal another node's name.
-    reserved, used = set(desired), set()
-    mapping = {}
-    for node, name in zip(selected, desired):
-        candidate, suffix = name, 2
-        if candidate in used:
-            candidate = f'{name} [{suffix}]'
-            while candidate in used or candidate in reserved:
-                suffix += 1
-                candidate = f'{name} [{suffix}]'
-        used.add(candidate)
-        mapping[node['name']] = candidate
-        node['export_name'] = candidate
-    links, proxies, requires_clash = [], [], False
-    for node in selected:
-        # Use the existing URI encoder with one exact final-name replacement.
-        uri = _rename_node_uri(node, [], name=node['export_name'])
-        links.append(uri)
-        proxy = node['proxy']
-        if proxy:
-            if node['clash_config'] and not uri_preserves_clash_config(proxy, node['raw_uri']):
-                requires_clash = True
-            proxy['name'] = node['export_name']
-            if proxy.get('dialer-proxy') not in (None, '', 'DIRECT'):
-                proxy['dialer-proxy'] = mapping[proxy['dialer-proxy']]
-            proxies.append(proxy)
-    return {'links': links, 'proxies': proxies, 'requires_clash': requires_clash,
-            'stored': len(nodes), 'blocked': blocked,
-            'unavailable': len(nodes) - blocked - len(selected),
-            'count': len(selected), 'names': [n['export_name'] for n in selected]}
+    try:
+        return prepare_subscription(nodes, _node_filter_keywords(), _get_rename_rules())
+    except (ValueError, TypeError, KeyError) as exc:
+        # Keep settings/account pages usable so invalid legacy rules can be repaired.
+        return {'links': [], 'proxies': [], 'names': [], 'requires_clash': False,
+                'stored': len(nodes), 'blocked': 0, 'unavailable': len(nodes),
+                'count': 0, 'error': '订阅生成失败，请检查节点配置和重命名规则：' + str(exc)}
 
 
 @app.route('/sub/<token>')
@@ -2855,6 +2806,8 @@ def public_subscribe(token):
         'profile-title': '"store-name=SSRVPN.VIP"',
         'Content-Disposition': 'attachment; filename="SSRVPN.VIP"',
     }
+    if exported.get('error'):
+        return 'Subscription policy is invalid; contact the administrator', 503, resp_headers
     ua = request.headers.get('User-Agent', '')
 
     output_format = request.args.get('format', '').lower()
@@ -2867,7 +2820,10 @@ def public_subscribe(token):
         import yaml
         clash_config = {'proxies': exported['proxies']}
         resp_headers['Content-Type'] = 'text/yaml; charset=utf-8'
-        return yaml.dump(clash_config, allow_unicode=True, default_flow_style=False), 200, resp_headers
+        body = yaml.safe_dump(clash_config, allow_unicode=True, default_flow_style=False)
+        if len(body.encode()) > MAX_EXPORT_BYTES:
+            return 'Subscription output exceeds the size limit', 503, resp_headers
+        return body, 200, resp_headers
 
     # 默认返回 base64 编码（Shadowrocket / 通用格式）
     if exported['requires_clash']:
@@ -2945,6 +2901,16 @@ def rename_rule_add():
         flash(str(e), 'error')
         return redirect(url_for('rename_rules_page'))
     db = get_db()
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        if db.execute('SELECT COUNT(*) FROM rename_rules').fetchone()[0] >= MAX_RENAME_RULES:
+            raise ValueError(f'重命名规则最多 {MAX_RENAME_RULES} 条')
+        rules = list(_get_rename_rules()) + [{'old_text': old_text, 'new_text': new_text}]
+        validate_rename_rules(rules, (r[0] for r in db.execute('SELECT name FROM nodes')))
+    except ValueError as exc:
+        db.rollback()
+        flash(str(exc), 'error')
+        return redirect(url_for('rename_rules_page'))
     rule_id = db.execute(
         'INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)',
         (old_text, new_text),
@@ -2959,7 +2925,14 @@ def rename_rule_add():
 @login_required
 def rename_rule_toggle(rule_id):
     db = get_db()
+    db.execute('BEGIN IMMEDIATE')
     db.execute('UPDATE rename_rules SET enabled = 1 - enabled WHERE id=?', (rule_id,))
+    try:
+        validate_rename_rules(_get_rename_rules(), (r[0] for r in db.execute('SELECT name FROM nodes')))
+    except ValueError as exc:
+        db.rollback()
+        flash(str(exc), 'error')
+        return redirect(url_for('rename_rules_page'))
     db.commit()
     audit_event('rename_rule.toggle', 'success', rule_id=rule_id)
     return redirect(url_for('rename_rules_page'))

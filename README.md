@@ -9,7 +9,7 @@
 
 ![AnyTLS Panel 仪表盘](docs/assets/dashboard.jpg)
 
-> 当前正式版本：`v1.4.13`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
+> 当前正式版本：`v1.4.14`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
 
 ## 你可以用它做什么
 
@@ -20,7 +20,7 @@
 | 用户服务与续费 | 为每位下游用户记录服务期、续费历史和提醒状态，并提供始终稳定的独立订阅链接 |
 | 月度流量周期 | 账号到期日仍是真实到期日；系统按其中的日号推导每月重置日，例如 `2027-04-24` 表示每月 24 日重置 |
 | 一键同步 | 单独同步一个账号，或并发更新全部活跃账号；失败不会覆盖上一次可用节点 |
-| 节点健康检测 | 检测 TCP/TLS 连通性并记录耗时，同时限制探测目标；结果不代表代理鉴权或 UDP/QUIC 可用性 |
+| 节点健康检测 | 默认检测入口；可启用真实代理凭据与 HTTPS 访问验证，以及有资源限制的定时复测 |
 | 流量统计 | 显示上传、下载、累计使用量、配额占比和到期状态，可接入节点侧采集脚本 |
 | 安全分享 | 分享订阅不附带流量、配额或到期信息；停用账号后链接立即失效，Token 可随时轮换 |
 | 生产级运维 | 自动配置 Caddy HTTPS、systemd 沙箱、健康检查、每日数据备份、数据库迁移和失败回滚 |
@@ -50,9 +50,9 @@
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.13/deploy.sh -o "$installer_dir/deploy.sh"
-  less "$installer_dir/deploy.sh"
-  bash "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.14/install-release.sh -o "$installer_dir/install-release.sh"
+  less "$installer_dir/install-release.sh"
+  bash "$installer_dir/install-release.sh" v1.4.14
 )
 ```
 
@@ -61,7 +61,7 @@
 如果你已经审查过脚本，也可以使用一行命令：
 
 ```bash
-(set -e; installer_dir="$(mktemp -d)"; trap 'rm -rf -- "$installer_dir"' EXIT; curl -fL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.13/deploy.sh -o "$installer_dir/deploy.sh"; bash "$installer_dir/deploy.sh")
+(set -e; installer_dir="$(mktemp -d)"; trap 'rm -rf -- "$installer_dir"' EXIT; curl -fL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.14/install-release.sh -o "$installer_dir/install-release.sh"; bash "$installer_dir/install-release.sh" v1.4.14)
 ```
 
 下载失败会停止执行并删除临时文件。更新操作见[运维手册](docs/OPERATIONS.md#更新)。
@@ -166,7 +166,7 @@ python -m unittest discover -s tests -q
 ./start.sh
 ```
 
-默认地址为 `http://127.0.0.1:8866`。首次启动生成的管理员密码保存在数据库旁的 `.initial_admin_password` 文件中。`start.sh` 只用于本地开发；生产环境必须使用 `deploy.sh`、Gunicorn、systemd 和 Caddy。
+默认地址为 `http://127.0.0.1:8866`。首次启动生成的管理员密码保存在数据库旁的 `.initial_admin_password` 文件中。`start.sh` 只用于本地开发；生产环境通过 `install-release.sh` 验证后调用 `deploy.sh`，运行 Gunicorn、systemd 和 Caddy。
 
 常用质量检查可以统一运行：
 

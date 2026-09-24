@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import yaml
 
-from input_limits import MAX_HOST_CHARS, MAX_SUBSCRIPTION_TEXT_CHARS
+from input_limits import MAX_HOST_CHARS, MAX_NODE_NAME_CHARS, MAX_SUBSCRIPTION_TEXT_CHARS
 
 
 _MAX_YAML_NODES = 10_000
@@ -171,6 +171,13 @@ def parse_protocol_uri(uri, protocol='anytls'):
             return None
         if not 1 <= len(node['host']) <= MAX_HOST_CHARS or not 1 <= node['port'] <= 65535:
             return None
+        if len(node['name']) > MAX_NODE_NAME_CHARS or not node['password']:
+            return None
+        if protocol in ('tuic',) and (':' not in node['password'] or
+                not all(node['password'].split(':', 1))):
+            return None
+        if protocol in ('ss', 'shadowsocks') and not node['extra'].get('cipher'):
+            return None
         return node
     except Exception:
         return None
@@ -179,17 +186,30 @@ def parse_protocol_uri(uri, protocol='anytls'):
 def _clash_context(proxy):
     ptype = str(proxy.get('type', '')).lower().replace('-', '').replace('_', '')
     host = proxy.get('server', '')
-    port = int(proxy.get('port', 443))
-    if not host or not 1 <= port <= 65535:
+    raw_port = proxy.get('port')
+    if isinstance(raw_port, bool) or not isinstance(raw_port, (str, int)):
+        raise ValueError('invalid Clash proxy port')
+    port = int(raw_port)
+    if (not isinstance(host, str) or not 1 <= len(host) <= MAX_HOST_CHARS
+            or isinstance(proxy.get('port'), bool) or not 1 <= port <= 65535):
         raise ValueError('invalid Clash proxy endpoint')
+    name = proxy.get('name', f'{host}:{port}')
+    if (not ptype or not isinstance(proxy.get('type'), str)
+            or not isinstance(name, str) or len(name) > MAX_NODE_NAME_CHARS):
+        raise ValueError('invalid Clash proxy type or name')
+    required = {'vmess': ('uuid',), 'vless': ('uuid',), 'tuic': ('uuid', 'password'),
+                'ss': ('cipher', 'password'), 'shadowsocks': ('cipher', 'password')}
+    fields = required.get(ptype, ('password',) if ptype in CODECS else ())
+    if any(not isinstance(proxy.get(key), str) or not proxy[key] for key in fields):
+        raise ValueError('missing or invalid protocol credential')
     ws_opts = proxy.get('ws-opts') if isinstance(proxy.get('ws-opts'), dict) else {}
     return {
         'proxy': proxy,
         'ptype': ptype,
         'host': host,
         'port': port,
-        'password': proxy.get('password', '') or proxy.get('uuid', ''),
-        'name': proxy.get('name', f'{host}:{port}'),
+        'password': proxy.get('uuid', '') if ptype in ('vless', 'vmess') else proxy.get('password', ''),
+        'name': name,
         'network': proxy.get('network', 'tcp') or 'tcp',
         'ws_opts': ws_opts,
         'ws_headers': ws_opts.get('headers') if isinstance(ws_opts.get('headers'), dict) else {},
@@ -197,7 +217,7 @@ def _clash_context(proxy):
         'reality_opts': proxy.get('reality-opts') if isinstance(proxy.get('reality-opts'), dict) else {},
         'servername': proxy.get('servername') or proxy.get('sni') or host,
         'insecure': '1' if proxy.get('skip-cert-verify') else '0',
-        'fingerprint': proxy.get('client-fingerprint') or proxy.get('fingerprint') or '',
+        'fingerprint': proxy.get('client-fingerprint') or '',
     }
 
 
@@ -357,7 +377,8 @@ def uri_preserves_clash_config(proxy, uri):
     restored = clash_proxy_from_uri(uri)
     if not restored:
         return False
-    aliases = {'servername': 'sni', 'fingerprint': 'client-fingerprint'}
+    # Certificate pinning and uTLS fingerprints have different security semantics.
+    aliases = {'servername': 'sni'}
 
     def normalize(data):
         return {aliases.get(key, key): value for key, value in data.items()}

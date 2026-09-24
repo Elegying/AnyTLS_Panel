@@ -30,15 +30,15 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.13/deploy.sh -o "$installer_dir/deploy.sh"
-  bash "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.14/install-release.sh -o "$installer_dir/install-release.sh"
+  bash "$installer_dir/install-release.sh" v1.4.14
 )
 ```
 
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.4.13 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.14 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -46,7 +46,7 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-ANYTLS_REPO_REF="v1.4.13" bash /opt/anytls-panel/deploy.sh
+bash /opt/anytls-panel/install-release.sh v1.4.14
 ```
 
 上述本机更新命令适用于已安装 `v1.4.5` 或更新版本的部署脚本；更早版本请使用前面的完整下载命令。指定 `ANYTLS_REPO_REF`、`ANYTLS_REPO_URL` 或 `ANYTLS_REPO_SUBDIR` 时会从仓库拉取；均未指定且脚本旁有完整项目源码时使用本地文件。形如 `vX.Y.Z` 的版本必须是真实标签，且源码 `VERSION` 必须匹配，检查在停服前完成。
@@ -247,12 +247,12 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.13/deploy.sh -o "$installer_dir/deploy.sh"
-  bash "$installer_dir/deploy.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.14/install-release.sh -o "$installer_dir/install-release.sh"
+  bash "$installer_dir/install-release.sh" v1.4.14
 )
 ```
 
-完整下载后再执行可避免网络中断时运行空文件或半份脚本。下载和 Git 拉取依赖 HTTPS 与官方仓库信任；发布资产另附 SHA-256 和 Sigstore 签名，一键 Git 部署当前不会验证该归档签名。
+完整下载后再执行可避免网络中断时运行空文件或半份脚本。引导脚本需要先由管理员信任；它固定校验 Cosign 二进制哈希，再验证发布归档的 SHA-256、GitHub OIDC 签名身份及精确标签。签名、身份或内容不匹配时在停服前终止。
 
 更新时会再次询问面板域名，已有数据库不会再次询问或覆盖管理员凭据。自动化更新可设置 `ANYTLS_PANEL_DOMAIN`。如果使用自定义目录、服务名或 `/etc/anytls-panel/` 下的密钥文件，更新时需要继续传入相同环境变量。
 
@@ -369,9 +369,9 @@ schema 6 迁移由应用初始化自动、幂等执行，保留旧字段和历�
 
 本次本地验证采用虚构节点与独立临时数据库，不代表生产服务器路径或客户端网络已验证。
 
-检测不会自动运行。旧版记录显示“旧版结果待复测”，点击单项“检测”或“检测全部”获取新证据。批量优先处理待确认和最早尝试的节点，最多四路并发、每次启动间隔 400 毫秒、每轮最多两分钟；点击“继续检测”处理未完成项目。遇到请求限流会保留结果及队列，按照提示等待后继续。刷新页面会重新按持久化状态排序，未检测的旧结果优先处理。
+默认入口检测由手动触发；启用可选定时复测后会自动运行。旧版记录显示“旧版结果待复测”，点击单项“检测”或“检测全部”获取新证据。批量优先处理待确认和最早尝试的节点，最多四路并发、每次启动间隔 400 毫秒、每轮最多两分钟；点击“继续检测”处理未完成项目。遇到请求限流会保留结果及队列，按照提示等待后继续。刷新页面会重新按持久化状态排序，未检测的旧结果优先处理。
 
-监控页按协议、地址、端口、SNI、TLS 及传输参数合并重复账号节点，仅凭据或显示名不同的配置共用一个代表入口检查。每组显示关联账号数和配置数，单项与批量操作都只检测代表节点；结果仍仅代表入口检查，不证明组内所有账号认证可用。账号详情保留独立记录；删除代表节点后，会选择现存节点及其自身结果，不继承被删除账号的证据。无法解析的配置不合并。
+监控页按协议、地址、端口、SNI、TLS 及传输参数合并重复账号节点，仅凭据或显示名不同的配置共用一个代表入口检查。每组显示关联账号数和配置数，单项与批量操作都只检测代表节点；未启用核心验证时，结果仍仅代表入口检查；启用后仅完整配置与凭据相同的节点合并，实际验证不跨账号借用不同凭据的证据。账号详情保留独立记录；删除代表节点后，会选择现存节点及其自身结果，不继承被删除账号的证据。无法解析的配置不合并。
 
 
 ## 请求入口与恢复预算（1.4.13）
@@ -383,3 +383,21 @@ Caddy 先缓冲不超过 `ANYTLS_MAX_REQUEST_BYTES` 的请求体，再转发给 
 健康检查每分钟触发，单次最多 90 秒；状态检查最多 3 秒，恢复命令最多 15 秒，每个 HTTP 探针最多 8 秒。仍保留连续失败阈值与 5 分钟恢复冷却，失败恢复不会清空失败计数。
 
 批量同步最多同时保留 4 个账号的数据，每个账号提交后释放解析结果。数据库旁的 `.bulk.lock` 文件实现跨进程互斥；不要在运行期间删除或替换锁文件。进程退出会自动释放操作系统锁，不需要人工清理“过期”文件。
+
+## 启用实际代理验证与自动复测
+
+先完成正式版本部署，再执行：
+
+```bash
+sudo bash /opt/anytls-panel/install-monitor.sh
+systemctl status anytls-panel-monitor.timer
+journalctl -u anytls-panel-monitor.service -n 20 --no-pager
+```
+
+自定义安装目录、服务名称、服务用户及密钥路径时，沿用部署时相同的 `ANYTLS_*` 参数。安装器下载并验证固定哈希的核心，在服务覆盖配置中启用真实代理验证并重启面板。定时任务只读取已保存的节点并更新健康证据，不访问或同步上游订阅。
+
+任务随主服务停止，超过 55 秒强制结束全部子进程；核心自身也有独立超时，避免 Worker 异常退出留下常驻进程。每轮优先最旧尝试，最多 32 个节点和 45 秒，未完成的留待下一轮。代理认证/访问未成功时不会显示验证通过。链式配置暂只做入口检查。
+
+暂停自动复测可运行 `systemctl disable --now anytls-panel-monitor.timer`；手动检测仍可用。禁用真实核心验证时将 `anytls-panel.service.d/monitor.conf` 的 `ANYTLS_PROXY_VERIFICATION` 改为 `0`，再 daemon-reload 并重启面板。回滚至没有 `node_monitor.py` 的旧版本时，监控任务由 `ConditionPathExists` 自动跳过；卸载同时移除监控单元。
+
+自动发布服务器上的受限部署入口需要先升级为调用受信任的 `install-release.sh`，并读取 `anytls-deploy` 家目录下 `releases/vX.Y.Z` 中已由 CI 上传的三份资产。必须使用 root 私有副本校验后再执行，不能在可被上传账号改写的目录中直接运行代码。CI 草稿资产尚未公开，上传方式不依赖提前公开 Release。

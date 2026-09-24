@@ -76,6 +76,9 @@ jobs:
         run: |
           archive="AnyTLS_Panel-${RELEASE_TAG}.tar.gz"
           cosign sign-blob --yes --bundle "${archive}.sigstore.json" "$archive"
+          cosign verify-blob "$archive" --bundle "${archive}.sigstore.json" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/$RELEASE_TAG" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
       - name: Publish immutable versioned assets
         env:
@@ -117,6 +120,15 @@ jobs:
           printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > ~/.ssh/production_key
           printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/production_key ~/.ssh/known_hosts
+          archive="AnyTLS_Panel-${RELEASE_TAG}.tar.gz"
+          ssh -i ~/.ssh/production_key \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "${PROD_USER:-anytls-deploy}@${PROD_HOST}" \
+            "install -d -m 700 'releases/$RELEASE_TAG'"
+          scp -i ~/.ssh/production_key \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$archive" "${archive}.sha256" "${archive}.sigstore.json" \
+            "${PROD_USER:-anytls-deploy}@${PROD_HOST}:releases/$RELEASE_TAG/"
           ssh -i ~/.ssh/production_key \
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             "${PROD_USER:-anytls-deploy}@${PROD_HOST}" \

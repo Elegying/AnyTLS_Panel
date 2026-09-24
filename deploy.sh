@@ -16,11 +16,12 @@ TRUST_PROXY="${ANYTLS_TRUST_PROXY:-1}"
 ALLOW_PRIVATE_SUBSCRIPTIONS="${ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS:-0}"
 ALLOW_HTTP_SUBSCRIPTIONS="${ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS:-0}"
 ALLOW_PRIVATE_NODE_PROBES="${ANYTLS_ALLOW_PRIVATE_NODE_PROBES:-0}"
+PROXY_VERIFICATION="${ANYTLS_PROXY_VERIFICATION:-0}"
 TRAFFIC_LOG_RETENTION_DAYS="${ANYTLS_TRAFFIC_LOG_RETENTION_DAYS:-90}"
 MAX_REQUEST_BYTES="${ANYTLS_MAX_REQUEST_BYTES:-4194304}"
 PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
-REPO_REF="${ANYTLS_REPO_REF:-v1.4.13}"
+REPO_REF="${ANYTLS_REPO_REF:-v1.4.14}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
@@ -369,7 +370,7 @@ validate_configuration() {
     fi
     for flag_value in "$SESSION_COOKIE_SECURE" "$TRUST_PROXY" \
         "$ALLOW_PRIVATE_SUBSCRIPTIONS" "$ALLOW_HTTP_SUBSCRIPTIONS" \
-        "$ALLOW_PRIVATE_NODE_PROBES"; do
+        "$ALLOW_PRIVATE_NODE_PROBES" "$PROXY_VERIFICATION"; do
         if ! [[ "$flag_value" =~ ^[01]$ ]]; then
             fail "security flags must be 0 or 1"
         fi
@@ -1248,6 +1249,10 @@ prepare_release_source() {
         log "staging local project files before touching the active release"
         copy_release_files "$SCRIPT_DIR" "$RELEASE_SOURCE"
     else
+        if [[ "$REPO_URL" == 'https://github.com/Elegying/AnyTLS_Panel.git' &&
+              "$REPO_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            fail "official releases require signature verification; run install-release.sh $REPO_REF"
+        fi
         log "fetching project from $REPO_URL ($REPO_REF) before stopping the service"
         local clone_dir="$STAGE_DIR/clone"
         git clone --quiet --depth 1 --branch "$REPO_REF" -- "$REPO_URL" "$clone_dir"
@@ -1566,6 +1571,7 @@ Environment=ANYTLS_TRUST_PROXY=${TRUST_PROXY}
 Environment=ANYTLS_ALLOW_PRIVATE_SUBSCRIPTIONS=${ALLOW_PRIVATE_SUBSCRIPTIONS}
 Environment=ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS=${ALLOW_HTTP_SUBSCRIPTIONS}
 Environment=ANYTLS_ALLOW_PRIVATE_NODE_PROBES=${ALLOW_PRIVATE_NODE_PROBES}
+Environment=ANYTLS_PROXY_VERIFICATION=${PROXY_VERIFICATION}
 Environment=ANYTLS_TRAFFIC_LOG_RETENTION_DAYS=${TRAFFIC_LOG_RETENTION_DAYS}
 Environment=ANYTLS_MAX_REQUEST_BYTES=${MAX_REQUEST_BYTES}
 

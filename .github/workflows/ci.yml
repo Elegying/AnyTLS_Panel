@@ -46,31 +46,42 @@ jobs:
         run: |
           python -m coverage run --branch -m unittest discover -s tests -q
           python -m coverage report \
-            --include='app.py,database_maintenance.py,db_migrations.py,input_limits.py,node_probe.py,panel_updates.py,protocol_codecs.py,security_utils.py,sqlite_rate_limit.py,traffic_token.py' \
+            --include='app.py,database_maintenance.py,db_migrations.py,input_limits.py,node_probe.py,panel_updates.py,protocol_codecs.py,subscription_export.py,proxy_verifier.py,node_monitor.py,security_utils.py,sqlite_rate_limit.py,traffic_token.py' \
             --fail-under=80
 
       - name: Compile app
         run: >-
           python -m py_compile app.py database_maintenance.py db_migrations.py
-          input_limits.py node_probe.py panel_updates.py protocol_codecs.py security_utils.py
+          input_limits.py node_probe.py panel_updates.py protocol_codecs.py subscription_export.py proxy_verifier.py node_monitor.py security_utils.py
           sqlite_rate_limit.py traffic_token.py
+
+      - name: Verify real proxy authentication on loopback
+        if: matrix.python-version == '3.12'
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 120 \
+            https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-linux-amd64-compatible-v1.19.31.gz \
+            -o "$RUNNER_TEMP/probe-core.gz"
+          echo "04cf9f09671704f839ddbee2e93069dc831a4123a75281e725d1d96ab9ac1afc  $RUNNER_TEMP/probe-core.gz" | sha256sum -c -
+          gzip -dc "$RUNNER_TEMP/probe-core.gz" > "$RUNNER_TEMP/probe-core"
+          chmod 700 "$RUNNER_TEMP/probe-core"
+          python tests/real_proxy_probe.py "$RUNNER_TEMP/probe-core"
 
       - name: Scan Python security issues
         run: >-
           python -m bandit -q -ll -r app.py database_maintenance.py
-          db_migrations.py input_limits.py node_probe.py panel_updates.py protocol_codecs.py
+          db_migrations.py input_limits.py node_probe.py panel_updates.py protocol_codecs.py subscription_export.py proxy_verifier.py node_monitor.py
           security_utils.py sqlite_rate_limit.py traffic_token.py
 
       - name: Check shell syntax
         run: |
-          for script in backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh \
+          for script in backup.sh deploy.sh install-release.sh install-monitor.sh start.sh traffic_collector.sh uninstall.sh \
             tests/ubuntu24_integration.sh tests/ubuntu24_e2e.sh; do
             bash -n "$script"
           done
 
       - name: Lint shell scripts
         run: >-
-          shellcheck backup.sh deploy.sh start.sh traffic_collector.sh uninstall.sh
+          shellcheck backup.sh deploy.sh install-release.sh install-monitor.sh start.sh traffic_collector.sh uninstall.sh
           tests/ubuntu24_integration.sh tests/ubuntu24_e2e.sh
 
       - name: Audit dependencies
