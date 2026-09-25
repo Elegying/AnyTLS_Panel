@@ -220,10 +220,15 @@ def node_health(node, now=None):
     # No legacy online flag or a bare status string can establish proxy usability.
     if status == 'verified' and not all(stages.get(k, {}).get('state') == 'success' for k in ('auth', 'access')):
         status = 'entry' if stages.get('tcp', {}).get('state') == 'success' else 'unknown'
+    legacy_verified = status == 'verified' and result.get('version') != 2
     previous = STATUS_LABELS[status]
+    if legacy_verified:
+        previous = '历史代理检测结果（需复测）'
+        stages = {**stages, **{key: {'state': 'not_run', 'detail': '旧版代理证据需重新验证'}
+                              for key in ('auth', 'access')}}
     if legacy and checked:
         previous = '历史入口检测可达（代理未验证）' if node.get('is_online') == 1 else '历史检测结果（需复测）'
-    if timestamp and (legacy or age >= PROBE_TTL_SECONDS or timestamp.timestamp() > now.timestamp() + 60):
+    if timestamp and (legacy or legacy_verified or age >= PROBE_TTL_SECONDS or timestamp.timestamp() > now.timestamp() + 60):
         status = 'expired'
     elif not timestamp:
         status = 'unknown'
@@ -233,9 +238,12 @@ def node_health(node, now=None):
         status = 'checking'
     tone = 'green' if status == 'verified' else 'red' if status in ('failed', 'tls_error') else 'orange' if status in ('entry', 'expired', 'error', 'unsupported') else 'neutral'
     label = '旧版结果待复测' if legacy and checked and status == 'expired' else STATUS_LABELS[status]
+    if legacy_verified and status == 'expired':
+        label = '旧版代理结果待复测'
     return {'status': status, 'label': label, 'tone': tone,
-            'previous': previous, 'msg': node.get('probe_error') or result.get(
-                'msg', '旧版未记录检测阶段，请点击检测取得新结果' if legacy and checked else '尚未取得分层检测结果'),
+            'previous': previous, 'msg': node.get('probe_error') or (
+                '旧版未严格核实代理目标响应，请点击检测取得新结果' if legacy_verified else result.get(
+                    'msg', '旧版未记录检测阶段，请点击检测取得新结果' if legacy and checked else '尚未取得分层检测结果')),
             'stages': [{'key': key, 'label': label, 'state': stages.get(key, {}).get('state', 'not_run'),
                         'outcome': OUTCOME_LABELS.get(stages.get(key, {}).get('state'), '未执行'),
                         'detail': stages.get(key, {}).get('detail', '未验证')} for key, label in STAGE_LABELS.items()],

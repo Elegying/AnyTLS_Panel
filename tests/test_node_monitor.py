@@ -111,6 +111,14 @@ class LayeredProbeTests(unittest.TestCase):
         result = entry_result()
         result['status'] = 'verified'
         self.assertEqual(probe.node_health({'probe_result': json.dumps(result)}, now)['status'], 'entry')
+        for stage in ('auth', 'access'):
+            result['stages'][stage] = {'state': 'success', 'detail': 'old core result'}
+        old_core = probe.node_health({'probe_result': json.dumps(result)}, now)
+        self.assertEqual(old_core['status'], 'expired')
+        self.assertEqual(old_core['label'], '旧版代理结果待复测')
+        self.assertEqual(old_core['stages'][-1]['state'], 'not_run')
+        result['version'] = 2
+        self.assertEqual(probe.node_health({'probe_result': json.dumps(result)}, now)['status'], 'verified')
         result['checked_at'] = (now - timedelta(minutes=16)).isoformat()
         self.assertEqual(probe.node_health({'probe_result': json.dumps(result)}, now)['status'], 'expired')
         self.assertEqual(probe.node_health({'probe_result': 'broken'})['status'], 'unknown')

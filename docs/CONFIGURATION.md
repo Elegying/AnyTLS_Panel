@@ -21,7 +21,7 @@ AnyTLS Panel 使用环境变量覆盖默认配置。生产环境由 `deploy.sh` 
 | `ANYTLS_SERVICE_USER` | `anytls-panel` | 低权限运行用户，不能是 `root` |
 | `ANYTLS_BIND_HOST` | `127.0.0.1` | 允许 `127.0.0.1` 或 `::1`；服务、反向代理和健康检查使用同一回环地址 |
 | `ANYTLS_REPO_URL` | 官方 GitHub 仓库 | 部署脚本拉取代码的 Git 仓库 |
-| `ANYTLS_REPO_REF` | `v1.4.15` | 显式设置时优先从仓库拉取；官方正式标签应通过 `install-release.sh` 验证后安装；自定义 Git 源用于已受信任的开发部署 |
+| `ANYTLS_REPO_REF` | `v1.4.16` | 显式设置时优先从仓库拉取；官方正式标签应通过 `install-release.sh` 验证后安装；自定义 Git 源用于已受信任的开发部署 |
 | `ANYTLS_REPO_SUBDIR` | 空 | 仓库中的项目子目录，常规部署不需要设置 |
 | `ANYTLS_ADMIN_USER` | 交互输入 | 首次无人值守安装时的管理员用户名 |
 | `ANYTLS_ADMIN_PASS` | 交互输入 | 首次无人值守部署必须提供的 8–128 字符密码，首尾空格属于密码本身 |
@@ -139,3 +139,5 @@ bash /opt/anytls-panel/uninstall.sh --yes --keep-data
 核心位于 `/usr/local/lib/anytls-tools/mihomo-v1.19.31`，下载校验固定 SHA-256；不开放代理端口或 TUN，只在私有目录使用 Unix 控制套接字。每个数据库最多 2 个核心并行、单次最多 8 秒。定时任务每轮最多 32 个节点、45 秒、224 MiB 内存，优先最旧尝试，结果 15 分钟过期。大量慢节点时可能出现过期结果，不会伪造新结果。
 
 暂不支持独立验证含 `dialer-proxy` 的链式配置；默认只验证公网入口。固定测试目标为 `https://www.gstatic.com/generate_204`，检测访问失败不等于所有目标网站均不可用。
+
+只有固定目标的 HTTPS 204 响应得到确认时才计入代理验证通过。核心自身或控制接口异常保留上次证据并标记检测未完成。升级至 1.4.16 后，旧版核心成功记录需复测；不改变数据库结构、入口检测或订阅同步计划。

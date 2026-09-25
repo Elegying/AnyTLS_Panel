@@ -9,7 +9,7 @@
 
 ![AnyTLS Panel 仪表盘](docs/assets/dashboard.jpg)
 
-> 当前正式版本：`v1.4.15`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
+> 当前正式版本：`v1.4.16`。生产环境请优先部署正式 Release，不要直接运行来源不明或未经审查的分支脚本。
 
 ## 你可以用它做什么
 
@@ -50,9 +50,9 @@
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.15/install-release.sh -o "$installer_dir/install-release.sh"
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.16/install-release.sh -o "$installer_dir/install-release.sh"
   less "$installer_dir/install-release.sh"
-  bash "$installer_dir/install-release.sh" v1.4.15
+  bash "$installer_dir/install-release.sh" v1.4.16
 )
 ```
 
@@ -61,7 +61,7 @@
 如果你已经审查过脚本，也可以使用一行命令：
 
 ```bash
-(set -e; installer_dir="$(mktemp -d)"; trap 'rm -rf -- "$installer_dir"' EXIT; curl -fL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.15/install-release.sh -o "$installer_dir/install-release.sh"; bash "$installer_dir/install-release.sh" v1.4.15)
+(set -e; installer_dir="$(mktemp -d)"; trap 'rm -rf -- "$installer_dir"' EXIT; curl -fL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.16/install-release.sh -o "$installer_dir/install-release.sh"; bash "$installer_dir/install-release.sh" v1.4.16)
 ```
 
 下载失败会停止执行并删除临时文件。更新操作见[运维手册](docs/OPERATIONS.md#更新)。

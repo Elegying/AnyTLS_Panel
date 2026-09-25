@@ -30,15 +30,15 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.15/install-release.sh -o "$installer_dir/install-release.sh"
-  bash "$installer_dir/install-release.sh" v1.4.15
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.16/install-release.sh -o "$installer_dir/install-release.sh"
+  bash "$installer_dir/install-release.sh" v1.4.16
 )
 ```
 
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.4.15 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.16 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -46,7 +46,7 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-bash /opt/anytls-panel/install-release.sh v1.4.15
+bash /opt/anytls-panel/install-release.sh v1.4.16
 ```
 
 上述本机更新命令适用于已安装 `v1.4.5` 或更新版本的部署脚本；更早版本请使用前面的完整下载命令。指定 `ANYTLS_REPO_REF`、`ANYTLS_REPO_URL` 或 `ANYTLS_REPO_SUBDIR` 时会从仓库拉取；均未指定且脚本旁有完整项目源码时使用本地文件。形如 `vX.Y.Z` 的版本必须是真实标签，且源码 `VERSION` 必须匹配，检查在停服前完成。
@@ -247,8 +247,8 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.15/install-release.sh -o "$installer_dir/install-release.sh"
-  bash "$installer_dir/install-release.sh" v1.4.15
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.16/install-release.sh -o "$installer_dir/install-release.sh"
+  bash "$installer_dir/install-release.sh" v1.4.16
 )
 ```
 
@@ -355,7 +355,7 @@ actionlint
 
 ## 节点监控的证据边界
 
-监控从面板服务器出发检测。当前只验证入口 DNS、TCP 及适用的 TLS，不会使用账号执行代理认证或通过代理请求网站，因此“当前代理验证通过”为 0 是如实提示未验证，不是所有节点不可用。
+监控从面板服务器出发检测。默认只验证入口 DNS、TCP 及适用的 TLS，不会执行代理认证或通过代理请求网站，因此默认模式下“当前代理验证通过”为 0 是如实提示未验证，不是所有节点不可用。下面的入口检测边界适用于未启用实际代理验证的模式；启用方式见本页后文。
 
 - 常规 AnyTLS/Trojan 支持 TCP 与 TLS；VMess/VLESS 按节点配置决定是否执行 TLS；Shadowsocks 无插件配置只检测 TCP。
 - WebSocket、gRPC、HTTP/2 配置只探测外层 TCP/TLS，并按配置设置 ALPN；不验证传输升级、路径或代理协议。
@@ -397,6 +397,10 @@ journalctl -u anytls-panel-monitor.service -n 20 --no-pager
 自定义安装目录、服务名称、服务用户及密钥路径时，沿用部署时相同的 `ANYTLS_*` 参数。安装器下载并验证固定哈希的核心，在服务覆盖配置中启用真实代理验证并重启面板。定时任务只读取已保存的节点并更新健康证据，不访问或同步上游订阅。
 
 任务随主服务停止，超过 55 秒强制结束全部子进程；核心自身也有独立超时，避免 Worker 异常退出留下常驻进程。每轮优先最旧尝试，最多 32 个节点和 45 秒，未完成的留待下一轮。代理认证/访问未成功时不会显示验证通过。链式配置暂只做入口检查。
+
+验证通过必须取得固定 HTTPS 目标的预期 204 校验结果，不能仅凭核心延迟接口成功判断。目标返回非预期响应或实际连接失败时显示检测失败；核心启动失败、控制接口异常或缺少完整证据时显示检测未完成，并保留上次结果。固定入口 IP 时会保留原始 WebSocket Host 和独立 SNI，不放宽证书验证。
+
+1.4.16 之前的核心成功记录未严格核实目标响应，升级后统一显示“旧版代理结果待复测”，不计入当前验证通过。手动或定时复测取得新证据后恢复正常显示，不删除原始历史数据，也不改变 15 分钟有效期。
 
 暂停自动复测可运行 `systemctl disable --now anytls-panel-monitor.timer`；手动检测仍可用。禁用真实核心验证时将 `anytls-panel.service.d/monitor.conf` 的 `ANYTLS_PROXY_VERIFICATION` 改为 `0`，再 daemon-reload 并重启面板。回滚至没有 `node_monitor.py` 的旧版本时，监控任务由 `ConditionPathExists` 自动跳过；卸载同时移除监控单元。
 

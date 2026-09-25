@@ -9,6 +9,7 @@ from unittest import mock
 
 from test_app import load_app, authenticate_session
 from test_reliability import run_shell
+from probe_fixtures import entry_result
 import test_audit_fixes
 import proxy_verifier as verifier
 import node_monitor
@@ -69,11 +70,98 @@ class ProxyVerificationTests(unittest.TestCase):
             self.assertEqual(core.call_args.args[0]['server'], '8.8.8.8')
             self.assertEqual(core.call_args.args[0]['sni'], 'example.com')
             self.assertNotIn('secret-fixture', json.dumps(result))
-            core.side_effect = OSError('secret-fixture from untrusted core error')
+            core.side_effect = verifier.ProxyAccessFailed('secret-fixture from untrusted core error')
             result = verifier.verify_node_proxy(node, lambda *_: ['8.8.8.8'], self.temp.name)
             self.assertEqual(result['status'], 'failed')
             self.assertNotEqual(result['stages']['auth']['state'], 'success')
             self.assertNotIn('secret-fixture', json.dumps(result))
+
+    def test_url_specific_completed_evidence_controls_result_not_controller_status(self):
+        process = mock.Mock()
+        process.poll.return_value = 0
+        for status, alive, delay in ((200, True, 47), (200, False, 0),
+                                      (503, False, 0), (504, False, 0), (503, True, 0)):
+            with self.subTest(status=status, alive=alive, delay=delay):
+                snapshot = {'name': 'health-probe', 'alive': True,
+                            'extra': {verifier.PROBE_URL: {'alive': alive, 'history': [{'delay': delay}]}}}
+                with mock.patch.object(verifier.subprocess, 'Popen', return_value=process), \
+                        mock.patch.object(verifier, 'wait_for_proxy'), \
+                        mock.patch.object(verifier, 'core_response', side_effect=[
+                            (status, {'delay': 47}), (200, snapshot)]) as responses:
+                    if alive:
+                        self.assertEqual(verifier.run_core({}, self.temp.name, time.monotonic()+2), delay)
+                    else:
+                        with self.assertRaises(verifier.ProxyAccessFailed):
+                            verifier.run_core({}, self.temp.name, time.monotonic()+2)
+                    self.assertIn('expected=204', responses.call_args_list[0].args[1])
+                self.assertFalse(list(Path(self.temp.name).glob('probe-*')))
+
+    def test_incomplete_or_malformed_core_evidence_is_not_a_node_failure(self):
+        process = mock.Mock()
+        process.poll.return_value = 0
+        for extra in (None, [], {}, {verifier.PROBE_URL: []},
+                      {verifier.PROBE_URL: {'alive': True, 'history': []}},
+                      {verifier.PROBE_URL: {'alive': True, 'history': [{'delay': True}]}}):
+            with self.subTest(extra=extra), \
+                    mock.patch.object(verifier.subprocess, 'Popen', return_value=process), \
+                    mock.patch.object(verifier, 'wait_for_proxy'), \
+                    mock.patch.object(verifier, 'core_response', side_effect=[
+                        (200, {'delay': 47}), (200, {'name': 'health-probe', 'alive': True, 'extra': extra})]):
+                with self.assertRaises(ValueError):
+                    verifier.run_core({}, self.temp.name, time.monotonic()+2)
+
+    def test_core_task_errors_preserve_last_completed_evidence_after_api_refresh(self):
+        self.account()
+        completed = entry_result()
+        completed['version'] = 2
+        completed['status'] = 'verified'
+        for stage in ('auth', 'access'):
+            completed['stages'][stage] = {'state': 'success', 'detail': 'synthetic completed evidence'}
+        with mock.patch.object(self.module, '_run_probe', return_value=completed):
+            self.assertEqual(self.client.post('/api/nodes/1/check').json['status'], 'verified')
+        with self.module.app.app_context():
+            previous = self.module.get_db().execute('SELECT probe_result FROM nodes WHERE id=1').fetchone()[0]
+        for error in (RuntimeError, OSError, ValueError, verifier.http.client.HTTPException):
+            with self.subTest(error=error.__name__), \
+                    mock.patch.object(self.module, '_proxy_verification_enabled', return_value=True), \
+                    mock.patch.object(self.module, '_resolve_subscription_addresses', return_value=['8.8.8.8']), \
+                    mock.patch('node_probe.socket.create_connection', side_effect=OSError), \
+                    mock.patch.object(verifier, 'run_core', side_effect=error('private-fixture-error')):
+                response = self.client.post('/api/nodes/1/check')
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json['status'], 'error')
+                self.assertNotIn('private-fixture-error', response.text)
+                refreshed = self.client.get('/api/nodes/1/health')
+                self.assertEqual(refreshed.json['status'], 'error')
+                self.assertEqual(refreshed.json['health']['previous'], '代理验证通过')
+                with self.module.app.app_context():
+                    row = self.module.get_db().execute('SELECT * FROM nodes WHERE id=1').fetchone()
+                    self.assertEqual(row['probe_result'], previous)
+                    self.assertEqual(row['is_online'], 1)
+                    self.assertTrue(row['probe_error'])
+
+    def test_address_pinning_preserves_implicit_and_explicit_websocket_host(self):
+        for protocol in ('vmess', 'vless', 'trojan'):
+            for host_key, host_value in ((None, None), ('Host', 'front.example'),
+                                          ('host', 'front.example'), ('HOST', '')):
+                with self.subTest(protocol=protocol, header=host_key, value=host_value):
+                    headers = {'X-Fixture': 'preserved'}
+                    if host_key:
+                        headers[host_key] = host_value
+                    proxy = dict(type=protocol, server='entry.example', port=443, network='ws', tls=True,
+                                 servername='tls.example', sni='tls.example', **{'ws-opts': {'headers': headers}})
+                    node = dict(host='entry.example', port=443, protocol=protocol, raw_uri='',
+                                clash_config=json.dumps(proxy))
+                    with mock.patch.object(verifier, 'run_core', return_value=47) as core, \
+                            mock.patch('node_probe.socket.create_connection', side_effect=OSError):
+                        result = verifier.verify_node_proxy(node, lambda *_: ['8.8.8.8'], self.temp.name)
+                    self.assertEqual(result['status'], 'verified')
+                    pinned = core.call_args.args[0]
+                    self.assertEqual(pinned['server'], '8.8.8.8')
+                    self.assertEqual(pinned['sni' if protocol == 'trojan' else 'servername'], 'tls.example')
+                    self.assertEqual({k.lower(): v for k, v in pinned['ws-opts']['headers'].items()},
+                                     {'x-fixture': 'preserved', 'host': host_value or 'entry.example'})
+                    self.assertEqual(json.loads(node['clash_config']), proxy)
 
     def test_different_credentials_are_separate_when_proxy_verification_enabled(self):
         for password in ('one', 'two'):
