@@ -206,6 +206,7 @@ write_keepalive_config
         fixtures = '''
 install() { mkdir -p "$STATE_DIR"; }
 logger() { :; }
+flock() { return 0; }  # Lock behavior is covered by isolated Linux tests.
 systemctl() { return 0; }
 curl() { return 1; }
 timeout() { [[ "$1" != 15 ]] || return 124; shift; "$@"; }

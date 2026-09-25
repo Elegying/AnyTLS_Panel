@@ -19,6 +19,10 @@ CORE_PATH = '/usr/local/lib/anytls-tools/mihomo-v1.19.31'
 PROBE_URL = 'https://www.gstatic.com/generate_204'
 
 
+class ProxyAccessFailed(Exception):
+    """The core completed a probe without satisfying the HTTPS access check."""
+
+
 def core_available():
     return os.name == 'posix' and os.path.isfile(CORE_PATH) and os.access(CORE_PATH, os.X_OK)
 
@@ -53,21 +57,36 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock.connect(self.path)
 
 
+def core_response(controller, target, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('probe deadline exceeded')
+    conn = UnixHTTPConnection(controller, remaining)
+    try:
+        conn.request('GET', target)
+        response = conn.getresponse()
+        body = response.read(4097)
+        if len(body) > 4096:
+            raise ValueError('oversized core response')
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            raise ValueError('invalid core response')
+        return response.status, data
+    finally:
+        conn.close()
+
+
 def wait_for_proxy(controller, process, deadline):
     # The control socket is opened before Mihomo finishes applying its proxies.
     # Waiting for the named proxy avoids treating startup as a node failure.
     while process.poll() is None and time.monotonic() < deadline:
-        conn = UnixHTTPConnection(controller, min(0.5, max(0.01, deadline - time.monotonic())))
         try:
-            conn.request('GET', '/proxies/health-probe')
-            response = conn.getresponse()
-            body = response.read(4097)
-            if response.status == 200 and len(body) <= 4096 and json.loads(body).get('name') == 'health-probe':
+            status, data = core_response(controller, '/proxies/health-probe',
+                                         min(deadline, time.monotonic() + 0.5))
+            if status == 200 and data.get('name') == 'health-probe':
                 return
         except (OSError, ValueError, http.client.HTTPException):
             pass
-        finally:
-            conn.close()
         time.sleep(min(0.02, max(0, deadline - time.monotonic())))
     raise RuntimeError('core unavailable')
 
@@ -89,23 +108,35 @@ def run_core(proxy, directory, deadline):
                                    start_new_session=True)
         try:
             wait_for_proxy(controller, process, deadline)
-            remaining = deadline - time.monotonic()
+            # Reserve time to read the completed URL-specific result. /delay can
+            # return 200 even when the target did not return the expected 204.
+            remaining = deadline - time.monotonic() - 0.2
             if remaining <= 0:
                 raise TimeoutError
-            conn = UnixHTTPConnection(controller, remaining)
-            try:
-                query = urlencode({'url': PROBE_URL, 'timeout': max(1, int(remaining * 1000)), 'expected': '204'})
-                conn.request('GET', '/proxies/health-probe/delay?' + query)
-                response = conn.getresponse()
-                body = response.read(4097)
-                if response.status != 200 or len(body) > 4096:
-                    raise OSError('proxy access failed')
-                delay = json.loads(body).get('delay')
-                if isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay < 0:
-                    raise ValueError('invalid probe response')
-                return delay
-            finally:
-                conn.close()
+            query = urlencode({'url': PROBE_URL, 'timeout': max(1, int(remaining * 1000)), 'expected': '204'})
+            status, _ = core_response(controller, '/proxies/health-probe/delay?' + query, deadline)
+            if status not in (200, 503, 504):
+                raise RuntimeError('unexpected core response')
+            status, data = core_response(controller, '/proxies/health-probe', deadline)
+            extra = data.get('extra')
+            if not isinstance(extra, dict) or not isinstance(extra.get(PROBE_URL), dict):
+                raise ValueError('missing URL-specific probe evidence')
+            state = extra[PROBE_URL]
+            history = state.get('history', [])
+            # Each probe owns a fresh core, with no providers or background URL
+            # tests. Only this URL's single completed record is authoritative;
+            # the top-level alive flag does not include expected-status checks.
+            if (status != 200 or data.get('name') != 'health-probe'
+                    or type(state.get('alive')) is not bool
+                    or not isinstance(history, list) or len(history) != 1
+                    or not isinstance(history[0], dict)):
+                raise ValueError('missing completed probe evidence')
+            delay = history[0].get('delay')
+            if type(delay) is not int or not 0 <= delay <= 65535:
+                raise ValueError('invalid probe delay')
+            if not state['alive']:
+                raise ProxyAccessFailed
+            return delay
         finally:
             if process.poll() is None:
                 try:
@@ -143,17 +174,27 @@ def verify_node_proxy(node, resolver, directory, timeout=8, allow_private=False)
         proxy['sni'] = proxy.get('sni') or proxy.get('servername') or original_host
     elif proxy.get('tls') or proxy.get('reality-opts'):
         proxy['servername'] = proxy.get('servername') or proxy.get('sni') or original_host
+    if proxy.get('network') == 'ws':
+        options = proxy.setdefault('ws-opts', {})
+        headers = options.setdefault('headers', {})
+        if not any(key.lower() == 'host' and value for key, value in headers.items()):
+            options['headers'] = {key: value for key, value in headers.items() if key.lower() != 'host'}
+            options['headers']['Host'] = original_host
     with core_slot(directory) as acquired:
         if not acquired or deadline - time.monotonic() < 0.2:
             result.update(status='error', msg='代理检测繁忙或时间预算已用尽，请稍后重试', online=False)
             return result
         try:
             delay = run_core(proxy, directory, deadline)
-        except (OSError, ValueError, RuntimeError, http.client.HTTPException):
+        except ProxyAccessFailed:
             # Neither the core's raw error nor the configuration may enter logs/UI.
             result['stages']['auth'] = {'state': 'not_run', 'detail': '代理访问未成功，无法单独确定认证结果'}
-            result['stages']['access'] = {'state': 'failed', 'detail': '实际代理 HTTPS 访问失败或超时'}
+            result['stages']['access'] = {'state': 'failed', 'detail': '实际代理 HTTPS 访问未满足预期 204 响应，或连接失败 / 超时'}
             result.update(status='failed', online=False, msg='代理访问未通过；入口结果见检测详情')
+        except (OSError, ValueError, RuntimeError, http.client.HTTPException):
+            result['stages']['auth'] = {'state': 'not_run', 'detail': '检测未完成，无法确定认证结果'}
+            result['stages']['access'] = {'state': 'not_run', 'detail': '核心或控制接口异常，未取得完整代理访问证据'}
+            result.update(status='error', online=False, msg='代理检测任务未完成，请重试；不能据此判断节点不可用')
         else:
             if proxy['type'] not in ('tuic', 'hysteria2'):
                 result['stages']['tcp'] = {'state': 'success', 'detail': '核心已通过此入口完成代理请求'}
@@ -163,7 +204,7 @@ def verify_node_proxy(node, resolver, directory, timeout=8, allow_private=False)
                                       'insecure_configured' if proxy.get('skip-cert-verify') else 'strict')
             result['stages']['auth'] = {'state': 'success', 'detail': '使用此节点凭据完成实际代理请求'}
             result['stages']['access'] = {'state': 'success', 'detail': '通过此代理访问固定 HTTPS 检测地址，返回 204'}
-            result.update(status='verified', online=True, msg='此节点凭据与实际代理 HTTPS 访问均验证通过',
+            result.update(version=2, status='verified', online=True, msg='此节点凭据与实际代理 HTTPS 访问均验证通过',
                           proxy_latency=delay)
         result['checked_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
         return result
