@@ -64,8 +64,8 @@ def probe_options(node):
     transport = value('type', 'network', default='tcp') if protocol != 'vmess' else value('net', default='tcp')
     plugin = parse_qs(urlparse(uri).query).get('plugin') if uri else None
     if (security == 'reality' or transport not in ('tcp', 'raw', 'ws', 'grpc', 'h2', 'http')
-            or plugin or value('fp', 'fingerprint', 'client-fingerprint')):
-        return {'tcp': True, 'tls': 'unsupported', 'note': '仅检测 TCP；特殊传输 / REALITY / 插件 / 客户端指纹未验证'}
+            or plugin or value('fp', 'fingerprint', 'client-fingerprint', 'pcs', 'vcn')):
+        return {'tcp': True, 'tls': 'unsupported', 'note': '仅检测 TCP；特殊传输 / REALITY / 插件 / 指纹或独立证书名称未验证'}
     if security not in ('tls', 'none', ''):
         return {'tcp': True, 'tls': 'unsupported', 'note': '仅检测 TCP；TLS 配置暂不支持'}
     sni = value('sni', 'peer', 'servername', 'serverName', default=node.get('host', ''))
@@ -128,25 +128,27 @@ def check_node_connect(host, port, timeout, resolver, *, allow_private=False, no
         stages['tls'] = {'state': 'unsupported', 'detail': options['note']}
         return finish('unsupported', options['note'])
 
-    def remaining():
-        value = deadline - time.monotonic()
+    def remaining(until=deadline):
+        value = until - time.monotonic()
         if value <= 0:
             raise TimeoutError
         return value
 
     last_error = 'TCP 连接失败'
-    started = time.monotonic()
     attempted = False
-    for address in addresses:
+    for index, address in enumerate(addresses):
         sock = None
         try:
-            connect_timeout = remaining()
+            remaining_budget = remaining()
+            connect_timeout = remaining_budget / (len(addresses) - index)
+            attempt_deadline = deadline - remaining_budget + connect_timeout
         except TimeoutError:
             if not attempted:
                 return finish('error', '检测时间预算已用尽，未执行 TCP')
             break
         try:
             attempted = True
+            started = time.monotonic()
             sock = socket.create_connection((address, port), timeout=connect_timeout)
             result['latency'] = int((time.monotonic() - started) * 1000)
             stages['tcp'] = {'state': 'success', 'detail': '入口 TCP 可达；不是代理延迟'}
@@ -155,10 +157,11 @@ def check_node_connect(host, port, timeout, resolver, *, allow_private=False, no
                 return finish('entry', options['note'])
             result['tls_mode'] = 'insecure_configured' if options['insecure'] else 'strict'
             try:
-                tls_timeout = remaining()
+                tls_timeout = remaining(attempt_deadline)
             except TimeoutError:
-                stages['tls'] = {'state': 'not_run', 'detail': '总时间预算已用尽，未执行 TLS'}
-                return finish('error', '检测时间预算已用尽，不能判断 TLS 或代理状态')
+                if stages['tls']['state'] != 'failed':
+                    stages['tls'] = {'state': 'not_run', 'detail': '地址时间预算已用尽，未执行 TLS'}
+                continue
             try:
                 context = ssl.create_default_context()
                 context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -176,7 +179,7 @@ def check_node_connect(host, port, timeout, resolver, *, allow_private=False, no
                 return finish('entry', options['note'])
             except (ssl.SSLError, OSError, TimeoutError, ValueError):
                 stages['tls'] = {'state': 'failed', 'detail': 'TLS 握手、证书校验失败或超时'}
-                return finish('tls_error', 'TCP 已成功；TLS 异常，代理未验证')
+                continue
         except (socket.timeout, TimeoutError):
             last_error = 'TCP 连接超时'
         except ConnectionRefusedError:
@@ -189,6 +192,10 @@ def check_node_connect(host, port, timeout, resolver, *, allow_private=False, no
                     sock.close()
                 except OSError:
                     pass
+    if stages['tls']['state'] == 'failed':
+        return finish('tls_error', 'TCP 已成功；TLS 异常，代理未验证')
+    if stages['tcp']['state'] == 'success':
+        return finish('error', '检测时间预算已用尽，不能判断 TLS 或代理状态')
     stages['tcp'] = {'state': 'failed', 'detail': last_error}
     return finish('failed', last_error)
 

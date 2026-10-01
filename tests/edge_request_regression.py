@@ -72,7 +72,9 @@ caddy validate --config "$CADDYFILE"
         with (directory / 'server.log').open('w+') as log:
             try:
                 processes.append(subprocess.Popen([sys.executable, '-m', 'gunicorn', '--workers', '1', '--threads', '4',
-                    '--timeout', '3', '--no-control-socket', '--bind', f'127.0.0.1:{backend}', 'app:create_app()'],
+                    '--timeout', '3', '--no-control-socket', '--access-logfile', '-',
+                    '--access-logformat', '%(m)s %(U)s %(s)s',
+                    '--bind', f'127.0.0.1:{backend}', 'app:create_app()'],
                     cwd=ROOT, env=env, stdout=log, stderr=log))
                 processes.append(subprocess.Popen([caddy, 'run', '--config', str(configuration)], env=env, stdout=log, stderr=log))
                 for _ in range(100):
@@ -102,11 +104,14 @@ caddy validate --config "$CADDYFILE"
                     assert error.code == 400  # Application CSRF response proves a complete body reached WSGI.
                 for sock in sockets:
                     response = sock.recv(4096)
-                    # Caddy 2.11 can close a timed-out read with an empty 200.
+                    # Caddy can cancel a timed-out read with 499 or an empty 200.
                     # It must not forward the incomplete form to the application.
-                    assert not response or any(code in response for code in (b' 400 ', b' 502 ', b' 408 ')) or (
+                    assert not response or any(code in response for code in (b' 400 ', b' 502 ', b' 408 ', b' 499 ')) or (
                         b' 200 ' in response and b'Content-Length: 0' in response), response[:100]
                 assert time.monotonic() - started < 8
+                log.seek(0)
+                backend_posts = [line.strip() for line in log if line.startswith('POST /login ')]
+                assert backend_posts == ['POST /login 400'], backend_posts
                 oversize_statuses = []
                 for chunked in (False, True):
                     with socket.create_connection(('127.0.0.1', edge), timeout=3) as sock:

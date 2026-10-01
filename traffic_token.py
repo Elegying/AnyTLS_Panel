@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 def make_account_traffic_token(master_token, account_id):
-    if isinstance(account_id, bool):
+    if isinstance(account_id, bool) or not isinstance(account_id, (int, str)):
         raise ValueError('account_id must be a positive integer')
     try:
         account_id = int(account_id)

@@ -20,7 +20,7 @@
 {% if accounts %}
 <section class="accounts-grid" aria-label="账号列表">
     {% for a in accounts %}
-    {% set pct = calc_traffic_percent(a.traffic_used_bytes or 0, a.traffic_limit_gb or 250) %}
+    {% set pct = calc_traffic_percent(a.traffic_used_bytes or 0, a.traffic_limit_gb) %}
     <a class="account-card" href="{{ url_for('account_detail', account_id=a.id) }}">
         <div class="account-card-header">
             <div>

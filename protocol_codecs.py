@@ -101,14 +101,29 @@ def _sip002_unescape(value):
     return ''.join(result)
 
 
+def _validate_vmess_options(cipher, alter_id):
+    if cipher is not None and not isinstance(cipher, str):
+        raise ValueError('invalid VMess cipher')
+    if alter_id not in (None, ''):
+        if isinstance(alter_id, bool) or not isinstance(alter_id, (str, int)) or _safe_int(alter_id) < 0:
+            raise ValueError('invalid VMess alterId')
+
+
 def _parse_vmess_uri(uri, _protocol):
     payload = uri.split('://', 1)[1]
     payload += '=' * (-len(payload) % 4)
     data = json.loads(base64.urlsafe_b64decode(payload).decode())
+    for field in ('net', 'type', 'host', 'path', 'serviceName', 'sni', 'fp', 'vcn', 'pcs', 'alpn'):
+        if data.get(field) is not None and not isinstance(data[field], str):
+            raise ValueError('invalid VMess text option')
+    _validate_vmess_options(data.get('scy'), data.get('aid', 0))
+    raw_port = data.get('port', 443)
+    if isinstance(raw_port, bool) or not isinstance(raw_port, (str, int)):
+        raise ValueError('invalid VMess port')
     return {
         'name': data.get('ps', data.get('add', 'unknown')),
         'host': data.get('add', ''),
-        'port': int(data.get('port', 443)),
+        'port': int(raw_port),
         'password': data.get('id', ''),
         'raw_uri': uri,
         'protocol': 'vmess',
@@ -125,8 +140,9 @@ def _parse_ss_uri(uri, _protocol):
         padded = userinfo + '=' * (-len(userinfo) % 4)
         userinfo = base64.urlsafe_b64decode(padded).decode()
     except Exception:
-        pass
-    method, password = map(unquote, userinfo.split(':', 1))
+        method, password = map(unquote, userinfo.split(':', 1))
+    else:
+        method, password = userinfo.split(':', 1)
     host, port = parsed.hostname, parsed.port
     if not host or not port:
         return None
@@ -144,9 +160,13 @@ def _parse_ss_uri(uri, _protocol):
 def _parse_standard_uri(uri, protocol):
     parsed = urlparse(uri)
     encoded_password, separator, _hostport = parsed.netloc.rpartition('@')
-    if not separator or not parsed.hostname or parsed.port is None:
+    if not separator or not parsed.hostname:
         return None
     host, port = parsed.hostname, parsed.port
+    if port is None:
+        if protocol not in ('hysteria2', 'hy2'):
+            return None
+        port = 443
     return {
         'name': unquote(parsed.fragment) if parsed.fragment else f'{host}:{port}',
         'host': host,
@@ -262,17 +282,36 @@ def _from_trojan(context):
 
 def _from_vmess(context):
     p = context['proxy']
+    _validate_vmess_options(p.get('cipher'), p.get('alterId', 0))
+    network = context['network']
+    host = context['ws_headers'].get('Host', '')
+    path = context['ws_opts'].get('path', '')
+    if network == 'grpc':
+        path = context['grpc_opts'].get('grpc-service-name', '')
+    elif network == 'h2':
+        options = p.get('h2-opts') or {}
+        if not isinstance(options, dict):
+            raise ValueError('invalid h2 options')
+        host, path = ','.join(options.get('host', [])), options.get('path', '/')
+    elif network == 'http':
+        options = p.get('http-opts') or {}
+        if not isinstance(options, dict) or not isinstance(options.get('headers', {}), dict):
+            raise ValueError('invalid http options')
+        host = ','.join(options.get('headers', {}).get('Host', []))
+        path = ','.join(options.get('path', ['/']))
     obj = {
         'v': '2', 'ps': context['name'], 'add': context['host'],
         'port': str(context['port']), 'id': context['password'],
         'aid': str(p.get('alterId', 0)), 'scy': p.get('cipher', 'auto'),
-        'net': context['network'], 'type': 'none',
-        'host': context['ws_headers'].get('Host', ''),
-        'path': context['ws_opts'].get('path', ''),
+        'net': 'tcp' if network == 'http' else network,
+        'type': 'http' if network == 'http' else 'none',
+        'host': host, 'path': path,
         'serviceName': context['grpc_opts'].get('grpc-service-name', ''),
         'tls': 'tls' if p.get('tls') else 'none',
         'sni': context['servername'] if p.get('tls') else '',
         'fp': context['fingerprint'], 'allowInsecure': context['insecure'],
+        'insecure': context['insecure'],
+        'vcn': p.get('name-cert-verify', ''), 'pcs': p.get('fingerprint', ''),
         'alpn': ','.join(p.get('alpn', [])),
     }
     encoded = base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip('=')
@@ -297,8 +336,9 @@ def _from_vless(context):
 def _from_hysteria2(context):
     p = context['proxy']
     return _build_uri(context, 'hysteria2', context['password'], {
-        'sni': context['servername'], 'allowInsecure': context['insecure'],
+        'sni': context['servername'], 'insecure': context['insecure'],
         'obfs': p.get('obfs', ''), 'obfs-password': p.get('obfs-password', ''),
+        'pinSHA256': p.get('fingerprint', ''),
     })
 
 
@@ -490,22 +530,37 @@ def _to_vmess(proxy, node, _params):
         'cipher': extra.get('scy', 'auto') or 'auto',
     })
     network = extra.get('net', 'tcp') or 'tcp'
+    if network == 'tcp' and extra.get('type') == 'http':
+        network = 'http'
     if network != 'tcp':
         proxy['network'] = network
     if str(extra.get('tls', '')).lower() in ('tls', '1', 'true'):
         proxy['tls'] = True
-    for source, target in (('sni', 'servername'), ('fp', 'client-fingerprint')):
+    for source, target in (('sni', 'servername'), ('fp', 'client-fingerprint'),
+                           ('vcn', 'name-cert-verify'), ('pcs', 'fingerprint')):
         if extra.get(source):
             proxy[target] = extra[source]
-    if _is_true(extra.get('allowInsecure', '0')):
+    if _is_true(extra.get('allowInsecure', extra.get('insecure', '0'))):
         proxy['skip-cert-verify'] = True
     if network == 'ws':
         options = {'path': extra.get('path', '') or '/'}
         if extra.get('host'):
             options['headers'] = {'Host': extra['host']}
         proxy['ws-opts'] = options
-    elif network == 'grpc' and extra.get('serviceName'):
-        proxy['grpc-opts'] = {'grpc-service-name': extra['serviceName']}
+    elif network == 'grpc':
+        service_name = extra.get('serviceName') or extra.get('path')
+        if service_name:
+            proxy['grpc-opts'] = {'grpc-service-name': service_name}
+    elif network in ('h2', 'http'):
+        hosts = [host.strip() for host in (extra.get('host') or '').split(',') if host.strip()]
+        path = extra.get('path') or '/'
+        if network == 'h2':
+            proxy['h2-opts'] = {'host': hosts, 'path': path}
+        else:
+            options = {'method': 'GET', 'path': [item.strip() for item in path.split(',') if item.strip()]}
+            if hosts:
+                options['headers'] = {'Host': hosts}
+            proxy['http-opts'] = options
 
 
 def _to_shadowsocks(proxy, node, params):
@@ -591,6 +646,9 @@ def _to_hysteria2(proxy, node, params):
         value = _query_value(params, key)
         if value:
             proxy[key] = value
+    fingerprint = _query_value(params, 'pinSHA256')
+    if fingerprint:
+        proxy['fingerprint'] = fingerprint
 
 
 def _to_tuic(proxy, node, params):

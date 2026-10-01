@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -46,6 +46,7 @@ from input_limits import (
     DEFAULT_MAX_REQUEST_BYTES,
     MAX_HOST_CHARS,
     MAX_NAME_CHARS,
+    MAX_NODE_NAME_CHARS,
     MAX_NOTES_CHARS,
     MAX_RENAME_TEXT_CHARS,
     MAX_RENAME_RULES,
@@ -595,7 +596,9 @@ def _resolve_public_subscription_url(raw_url, deadline=None):
             raise ValueError
         if parsed.username is not None or parsed.password is not None:
             raise ValueError
-        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80)
+        if not 1 <= port <= 65535:
+            raise ValueError
     except (TypeError, ValueError):
         raise ValueError("订阅地址必须是有效的 HTTP(S) URL") from None
     if parsed.scheme == 'http' and not _env_flag('ANYTLS_ALLOW_HTTP_SUBSCRIPTIONS'):
@@ -634,11 +637,11 @@ def _subscription_request_target(parsed):
         target += f';{parsed.params}'
     if parsed.query:
         target += f'?{parsed.query}'
-    return target
+    return quote(target, safe="/?%&=;:+,@!$'()*[]~")
 
 
 def _subscription_host_header(parsed):
-    host = parsed.hostname
+    host = parsed.hostname.encode('idna').decode('ascii')
     if ':' in host:
         host = f'[{host}]'
     default_port = 443 if parsed.scheme == 'https' else 80
@@ -661,6 +664,9 @@ def _read_subscription_body(response, sock, deadline):
             _MAX_SUBSCRIPTION_BYTES + 1 - size,
         ))
         if not chunk:
+            remaining = getattr(response, 'length', None)
+            if isinstance(remaining, int) and remaining > 0:
+                raise http.client.IncompleteRead(b''.join(chunks), remaining)
             return b''.join(chunks)
         chunks.append(chunk)
         size += len(chunk)
@@ -675,9 +681,9 @@ def _read_pinned_subscription_response(
         deadline = time.monotonic() + _SUBSCRIPTION_TIMEOUT_SECONDS
     parsed, addresses = _resolve_public_subscription_url(url, deadline)
 
-    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    port = parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80)
     last_error = None
-    for address in addresses:
+    for index, address in enumerate(addresses):
         connection = None
         sock = None
         try:
@@ -685,13 +691,15 @@ def _read_pinned_subscription_response(
                 remaining = _subscription_remaining_time(deadline)
             except TimeoutError:
                 break
-            sock = socket.create_connection((address, port), timeout=remaining)
+            attempt_budget = remaining / (len(addresses) - index)
+            attempt_deadline = deadline - remaining + attempt_budget
+            sock = socket.create_connection((address, port), timeout=attempt_budget)
             if parsed.scheme == 'https':
-                _set_subscription_socket_deadline(sock, deadline)
+                _set_subscription_socket_deadline(sock, attempt_deadline)
                 context = ssl.create_default_context()
                 context.minimum_version = ssl.TLSVersion.TLSv1_2
                 sock = context.wrap_socket(sock, server_hostname=parsed.hostname)
-            remaining = _set_subscription_socket_deadline(sock, deadline)
+            remaining = _set_subscription_socket_deadline(sock, attempt_deadline)
 
             connection = http.client.HTTPConnection(
                 parsed.hostname,
@@ -710,9 +718,9 @@ def _read_pinned_subscription_response(
             connection.putheader('User-Agent', user_agent)
             connection.putheader('Accept', '*/*')
             connection.putheader('Connection', 'close')
-            _set_subscription_socket_deadline(sock, deadline)
+            _set_subscription_socket_deadline(sock, attempt_deadline)
             connection.endheaders()
-            _set_subscription_socket_deadline(sock, deadline)
+            _set_subscription_socket_deadline(sock, attempt_deadline)
             response = connection.getresponse()
 
             if response.status in (301, 302, 303, 307, 308):
@@ -729,7 +737,7 @@ def _read_pinned_subscription_response(
                 )
 
             subscription_userinfo = response.getheader('Subscription-Userinfo') or ''
-            raw = _read_subscription_body(response, sock, deadline)
+            raw = _read_subscription_body(response, sock, attempt_deadline)
             result = (raw, None, subscription_userinfo)
             return result if include_headers else result[:2]
         except (ValueError, _SubscriptionResponseError):
@@ -797,7 +805,15 @@ def parse_subscribe_url(url):
                         subscription_userinfo
                     )
                     body_info = _extract_subscription_traffic_info(text)
-                    candidates.append((score, text, {**header_info, **body_info}))
+                    info = {**header_info, **body_info}
+                    if 'upload_bytes' in info and 'download_bytes' in info:
+                        used = info['upload_bytes'] + info['download_bytes']
+                        if used <= SQLITE_INTEGER_MAX:
+                            info['used_bytes'] = used
+                        else:
+                            for field in ('upload_bytes', 'download_bytes', 'used_bytes'):
+                                info.pop(field, None)
+                    candidates.append((score, text, info))
                     if score[0] > 0:
                         break
             except ValueError:
@@ -807,6 +823,9 @@ def parse_subscribe_url(url):
         if not candidates:
             raise ValueError('订阅拉取失败，请检查地址和上游服务后重试')
         _score, content, traffic_info = max(candidates, key=lambda item: item[0])
+    else:
+        content = _decode_subscription_response(content.encode())
+        traffic_info = _extract_subscription_traffic_info(content)
 
     nodes = _parse_subscription_content(content)
     if not nodes:
@@ -829,6 +848,7 @@ def _decode_subscription_response(raw):
 
 def _extract_subscription_traffic_info(content):
     for line in content.splitlines():
+        line = line.strip()
         if line.startswith('STATUS='):
             return _parse_status_line(line)
     return {}
@@ -934,43 +954,40 @@ def _parse_status_line(line):
     """解析 STATUS= 行，提取流量信息
     格式: STATUS=🚀↑:0.4GB,↓:2.63GB,TOT:256GB💡Expires:2027-04-29
     """
-    import re
     info = {}
-    try:
-        text = line.strip()
-        # 提取上传
-        m = re.search(r'↑[:\s]*([\d.]+)\s*(GB|MB|TB|KB)', text, re.IGNORECASE)
-        if m:
+    text = line.strip()
+    multipliers = {'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
+    for marker, field, display in (
+        ('↑', 'upload_bytes', 'upload_display'),
+        ('↓', 'download_bytes', 'download_display'),
+        ('TOT', 'total_gb', 'total_display'),
+    ):
+        m = re.search(marker + r'[:\s]*([\d.]+)\s*(GB|MB|TB|KB)', text, re.IGNORECASE)
+        if not m:
+            continue
+        try:
             val, unit = float(m.group(1)), m.group(2).upper()
-            multipliers = {'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
-            info['upload_bytes'] = int(val * multipliers.get(unit, 1024**3))
-            info['upload_display'] = f"{val}{unit}"
-        # 提取下载
-        m = re.search(r'↓[:\s]*([\d.]+)\s*(GB|MB|TB|KB)', text, re.IGNORECASE)
-        if m:
-            val, unit = float(m.group(1)), m.group(2).upper()
-            multipliers = {'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
-            info['download_bytes'] = int(val * multipliers.get(unit, 1024**3))
-            info['download_display'] = f"{val}{unit}"
-        # 提取总流量
-        m = re.search(r'TOT[:\s]*([\d.]+)\s*(GB|MB|TB|KB)', text, re.IGNORECASE)
-        if m:
-            val, unit = float(m.group(1)), m.group(2).upper()
-            info['total_gb'] = val if unit == 'GB' else val / 1024 if unit == 'MB' else val * 1024 if unit == 'TB' else val / 1024**2
-            info['total_display'] = f"{val}{unit}"
-        # 提取到期时间
-        m = re.search(r'Expires[:\s]*(\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
-        if m:
-            info['expire_date'] = m.group(1)
-        # 计算已用总量
-        if 'upload_bytes' in info and 'download_bytes' in info:
-            info['used_bytes'] = info['upload_bytes'] + info['download_bytes']
-            info['used_display'] = format_bytes(info['used_bytes'])
-    except Exception:
-        pass
-    for field in ('upload_bytes', 'download_bytes', 'used_bytes'):
-        if field in info and not 0 <= info[field] <= SQLITE_INTEGER_MAX:
-            del info[field]
+            byte_value = val * multipliers[unit]
+            if not math.isfinite(byte_value) or not 0 <= byte_value <= SQLITE_INTEGER_MAX:
+                continue
+            info[field] = byte_value / 1024**3 if field == 'total_gb' else int(byte_value)
+            info[display] = f'{val}{unit}'
+        except (ValueError, OverflowError):
+            continue
+    m = re.search(r'Expires[:\s]*(\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
+    if m:
+        try:
+            info['expire_date'] = parse_iso_date(m.group(1), '账号到期日').isoformat()
+        except ValueError:
+            pass
+    if 'upload_bytes' in info and 'download_bytes' in info:
+        used = info['upload_bytes'] + info['download_bytes']
+        if used <= SQLITE_INTEGER_MAX:
+            info['used_bytes'] = used
+            info['used_display'] = format_bytes(used)
+        else:
+            for field in ('upload_bytes', 'download_bytes', 'upload_display', 'download_display'):
+                info.pop(field, None)
     return info
 
 
@@ -1277,11 +1294,17 @@ def login():
             ok, needs_upgrade = verify_password(user['password_hash'], password)
         if ok:
             if needs_upgrade:
-                db.execute(
-                    'UPDATE admin_users SET password_hash=? WHERE id=?',
-                    (hash_password(password), user['id'])
+                cursor = db.execute(
+                    'UPDATE admin_users SET password_hash=? '
+                    'WHERE id=? AND password_hash=? AND session_version=?',
+                    (hash_password(password), user['id'], user['password_hash'], user['session_version'])
                 )
                 db.commit()
+                if cursor.rowcount != 1:
+                    session.clear()
+                    audit_event('auth.login', 'failure', reason='credentials_changed')
+                    flash('账号凭据已更新，请使用当前密码重新登录', 'error')
+                    return render_template('login.html')
             session.clear()
             session.permanent = True
             session['logged_in'] = True
@@ -1353,7 +1376,7 @@ def dashboard():
     warning_accounts = []
     expiring_accounts = []
     for a in accounts:
-        pct = calc_traffic_percent(a['traffic_used_bytes'] or 0, a['traffic_limit_gb'] or 250)
+        pct = calc_traffic_percent(a['traffic_used_bytes'] or 0, a['traffic_limit_gb'])
         if pct >= 80:
             warning_accounts.append({**dict(a), 'usage_pct': pct})
         remaining = days_until(a['expire_date'])
@@ -1400,6 +1423,7 @@ def _form_error(message, endpoint, **values):
         '订阅响应过大（最大 2 MiB）', '订阅中未找到可用节点',
         '订阅拉取失败，请检查地址和上游服务后重试',
         f'订阅节点超过安全上限 {MAX_NODES_PER_SUBSCRIPTION}',
+        f'重命名后的节点名称不能超过 {MAX_NODE_NAME_CHARS} 个字符',
     ]
     for label, limit in [('微信号', MAX_NAME_CHARS), ('账号名称', MAX_NAME_CHARS),
                          ('备注', MAX_NOTES_CHARS), ('续期备注', MAX_NOTES_CHARS),
@@ -1485,7 +1509,7 @@ def account_add():
         name = nodes[0]['name']
 
     # 用订阅返回的流量信息覆盖默认值
-    if traffic_info.get('total_gb'):
+    if traffic_info.get('total_gb') is not None:
         traffic_limit = traffic_info['total_gb']
 
     try:
@@ -1520,7 +1544,11 @@ def account_add():
         db.execute('UPDATE accounts SET notes=? WHERE id=?',
                    (f"到期: {traffic_info['expire_date']}", account_id))
 
-    _replace_account_nodes(db, account_id, nodes)
+    try:
+        _replace_account_nodes(db, account_id, nodes)
+    except ValueError as error:
+        db.rollback()
+        return _form_error(str(error), 'accounts_list')
     db.commit()
 
     audit_event('account.create', 'success', account_id=account_id, node_count=len(nodes))
@@ -1649,12 +1677,20 @@ def _node_config_key(node):
     # Names/fragments do not affect connectivity; credentials and all options do.
     canonical = json.loads(node.get('clash_config') or '{}')
     canonical.pop('name', None)
+    raw_config = (node.get('raw_uri') or '').split('#', 1)[0]
+    if node.get('protocol') == 'vmess':
+        parsed = parse_protocol_uri(raw_config, 'vmess')
+        if parsed:
+            options = dict(parsed['extra'])
+            options.pop('ps', None)
+            raw_config = json.dumps(options, sort_keys=True, separators=(',', ':'))
     return (node.get('protocol') or 'anytls', node['host'], node['port'],
-            node['password'], (node.get('raw_uri') or '').split('#', 1)[0],
+            node['password'], raw_config,
             json.dumps(canonical, sort_keys=True, separators=(',', ':')))
 
 
 def _replace_account_nodes(db, account_id, nodes):
+    validate_rename_rules(_get_rename_rules(db), (node['name'] for node in nodes))
     health_by_config = {
         _node_config_key(dict(row)): tuple(row[field] for field in (
             'is_online', 'latency_ms', 'last_checked_at', 'probe_result',
@@ -1680,6 +1716,28 @@ def _sync_snapshot_is_current(db, account):
     return current is not None and all(
         current[field] == account[field]
         for field in ('subscribe_url', 'status', 'traffic_limit_gb', 'expire_date', 'last_synced_at')
+    )
+
+
+def _store_synced_account(db, account, nodes, traffic_info):
+    """Store an upstream sample and its cycle marker in the same transaction."""
+    _replace_account_nodes(db, account['id'], nodes)
+    reset_on = None
+    if traffic_info.get('used_bytes') is not None:
+        cycle = traffic_reset_info(traffic_info.get('expire_date', account['expire_date']))
+        if cycle:
+            reset_on = cycle['previous']
+    db.execute(
+        '''UPDATE accounts SET node_count=?,
+           traffic_used_bytes=COALESCE(?, traffic_used_bytes, 0),
+           traffic_upload_bytes=COALESCE(?, traffic_upload_bytes),
+           traffic_download_bytes=COALESCE(?, traffic_download_bytes),
+           traffic_limit_gb=COALESCE(?, traffic_limit_gb),
+           expire_date=COALESCE(?, expire_date),
+           last_traffic_reset_on=COALESCE(?, last_traffic_reset_on),
+           last_synced_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=?''',
+        (len(nodes), *_traffic_update_values(traffic_info), reset_on,
+         datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f'), account['id']),
     )
 
 
@@ -1714,21 +1772,13 @@ def account_sync(account_id):
         flash('账号已被修改、删除或同步，已取消本次同步，请重试', 'error')
         return redirect(url_for('accounts_list'))
 
-    _replace_account_nodes(db, account_id, nodes)
-    db.execute(
-        '''UPDATE accounts SET
-               node_count=?,
-               traffic_used_bytes=COALESCE(?, traffic_used_bytes, 0),
-               traffic_upload_bytes=COALESCE(?, traffic_upload_bytes),
-               traffic_download_bytes=COALESCE(?, traffic_download_bytes),
-               traffic_limit_gb=COALESCE(?, traffic_limit_gb),
-               expire_date=COALESCE(?, expire_date),
-               last_synced_at=?,
-               updated_at=CURRENT_TIMESTAMP
-           WHERE id=?''',
-        (len(nodes), *_traffic_update_values(traffic_info),
-         datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f'), account_id),
-    )
+    try:
+        _store_synced_account(db, account, nodes, traffic_info)
+    except ValueError as error:
+        db.rollback()
+        audit_event('account.sync', 'failure', account_id=account_id, reason='invalid_node_policy')
+        flash(f'同步失败: {error}', 'error')
+        return redirect(url_for('account_detail', account_id=account_id))
     db.commit()
     audit_event('account.sync', 'success', account_id=account_id, node_count=len(nodes))
     flash(f'同步完成，更新了 {len(nodes)} 个节点', 'success')
@@ -1825,10 +1875,12 @@ def service_add():
     except ValueError as error:
         return _form_error(str(error), 'services_list')
     db = get_db()
+    db.execute('BEGIN IMMEDIATE')
     account = db.execute(
         'SELECT status FROM accounts WHERE id=?', (account_id,)
     ).fetchone()
     if not account or account['status'] != 'active':
+        db.rollback()
         return _form_error('专线账号不存在或未启用', 'services_list')
     try:
         service_id = db.execute(
@@ -1848,6 +1900,7 @@ def service_add():
         ).lastrowid
         db.commit()
     except sqlite3.IntegrityError:
+        db.rollback()
         return _form_error('相同用户、专线账号和开始日期的服务记录已存在', 'services_list')
     audit_event(
         'customer_service.create', 'success', service_id=service_id,
@@ -1861,6 +1914,7 @@ def service_add():
 @login_required
 def service_detail(service_id):
     db = get_db()
+    apply_due_traffic_resets(db)
     service = db.execute(
         '''SELECT cs.*, a.name AS account_name, a.expire_date AS account_expires_on,
                   a.traffic_limit_gb, a.traffic_used_bytes, a.status AS account_status
@@ -1901,10 +1955,18 @@ def service_edit(service_id):
     except ValueError as error:
         return _form_error(str(error), 'service_detail', service_id=service_id)
     db = get_db()
+    db.execute('BEGIN IMMEDIATE')
+    service = db.execute(
+        'SELECT account_id FROM customer_services WHERE id=?', (service_id,)
+    ).fetchone()
+    if not service:
+        db.rollback()
+        return _form_error('用户服务不存在', 'services_list')
     account = db.execute(
         'SELECT status FROM accounts WHERE id=?', (account_id,)
     ).fetchone()
-    if not account or account['status'] != 'active':
+    if not account or (account['status'] != 'active' and account_id != service['account_id']):
+        db.rollback()
         return _form_error('专线账号不存在或未启用', 'service_detail', service_id=service_id)
     try:
         cursor = db.execute(
@@ -1918,6 +1980,7 @@ def service_edit(service_id):
         )
         db.commit()
     except sqlite3.IntegrityError:
+        db.rollback()
         return _form_error('修改后会与已有服务记录重复', 'service_detail', service_id=service_id)
     if cursor.rowcount == 0:
         return _form_error('用户服务不存在', 'services_list')
@@ -2213,8 +2276,8 @@ def api_report_traffic_counter():
     if not isinstance(data, dict):
         return jsonify({"error": "Invalid JSON"}), 400
 
-    collector_id = str(data.get('collector_id', ''))
-    if not re.fullmatch(r'[A-Za-z0-9._:-]{8,128}', collector_id):
+    collector_id = data.get('collector_id', '')
+    if not isinstance(collector_id, str) or not re.fullmatch(r'[A-Za-z0-9._:-]{8,128}', collector_id):
         return jsonify({"error": "invalid collector_id"}), 400
     try:
         counter_bytes = parse_nonnegative_int(
@@ -2338,6 +2401,7 @@ def api_set_traffic():
 @login_required
 def api_accounts():
     db = get_db()
+    apply_due_traffic_resets(db)
     accounts = db.execute('SELECT * FROM accounts ORDER BY id').fetchall()
     return jsonify([dict(a) for a in accounts])
 
@@ -2477,6 +2541,8 @@ def api_check_node(node_id):
 @login_required
 @single_bulk_operation
 def api_check_all_nodes(account_id):
+    if not get_db().execute('SELECT 1 FROM accounts WHERE id=?', (account_id,)).fetchone():
+        return jsonify({'error': '账号不存在'}), 404
     # Negative IDs reserve an account batch across Gunicorn workers.
     token = _acquire_probe(-account_id)
     if token is None:
@@ -2492,7 +2558,7 @@ def api_check_all_nodes(account_id):
 def _check_account_nodes(account_id):
     db = get_db()
     nodes = [dict(n) for n in db.execute(
-        'SELECT * FROM nodes WHERE account_id=? ORDER BY id LIMIT ?',
+        "SELECT * FROM nodes WHERE account_id=? ORDER BY COALESCE(probe_attempt_at, ''), id LIMIT ?",
         (account_id, MAX_CHECK_NODES + 1))]
     if len(nodes) > MAX_CHECK_NODES:
         return jsonify({'error': f'节点批量检测上限为 {MAX_CHECK_NODES}，请拆分账号后重试'}), 413
@@ -2590,21 +2656,13 @@ def api_sync_all():
                 })
                 db.rollback()
                 return
-            _replace_account_nodes(db, account['id'], nodes)
-            db.execute(
-                '''UPDATE accounts SET
-                       node_count=?,
-                       traffic_used_bytes=COALESCE(?, traffic_used_bytes, 0),
-                       traffic_upload_bytes=COALESCE(?, traffic_upload_bytes),
-                       traffic_download_bytes=COALESCE(?, traffic_download_bytes),
-                       traffic_limit_gb=COALESCE(?, traffic_limit_gb),
-                       expire_date=COALESCE(?, expire_date),
-                       last_synced_at=?,
-                       updated_at=CURRENT_TIMESTAMP
-                   WHERE id=?''',
-                (len(nodes), *_traffic_update_values(traffic_info),
-                 datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f'), account['id']),
-            )
+            try:
+                _store_synced_account(db, account, nodes, traffic_info)
+            except ValueError as error:
+                db.rollback()
+                results.append({'id': account['id'], 'name': account['name'],
+                                'status': 'error', 'msg': str(error)})
+                return
             results.append({"id": account['id'], "name": account['name'], "status": "ok", "nodes": len(nodes)})
         else:
             results.append({"id": account['id'], "name": account['name'], "status": "error", "msg": error})
@@ -2688,12 +2746,18 @@ def change_password():
         return redirect(url_for('dashboard'))
 
     new_hash = hash_password(new_pw)
-    db.execute(
+    cursor = db.execute(
         'UPDATE admin_users SET password_hash=?, '
-        'session_version=session_version + 1 WHERE id=?',
-        (new_hash, user['id']),
+        'session_version=session_version + 1 '
+        'WHERE id=? AND password_hash=? AND session_version=?',
+        (new_hash, user['id'], user['password_hash'], user['session_version']),
     )
     db.commit()
+    if cursor.rowcount != 1:
+        session.clear()
+        audit_event('auth.password_change', 'failure', reason='credentials_changed')
+        flash('账号凭据已更新，本次修改未保存，请重新登录', 'error')
+        return redirect(url_for('login'))
     audit_event('auth.password_change', 'success', username=user['username'])
     password_file = app.config.get('INITIAL_ADMIN_PASSWORD_FILE')
     if password_file:
@@ -2720,9 +2784,9 @@ def _node_is_blocked(name, keywords):
     return any(keyword.casefold() in name.casefold() for keyword in keywords)
 
 
-def _get_rename_rules():
+def _get_rename_rules(db=None):
     """获取所有启用的重命名规则"""
-    db = get_db()
+    db = db if db is not None else get_db()
     return db.execute('SELECT old_text, new_text FROM rename_rules WHERE enabled=1 ORDER BY id').fetchall()
 
 
@@ -2943,7 +3007,20 @@ def rename_rule_toggle(rule_id):
 @login_required
 def rename_rule_delete(rule_id):
     db = get_db()
+    db.execute('BEGIN IMMEDIATE')
+    was_valid = True
+    try:
+        validate_rename_rules(_get_rename_rules(), (r[0] for r in db.execute('SELECT name FROM nodes')))
+    except ValueError:
+        was_valid = False  # Invalid legacy rules must still be removable for repair.
     db.execute('DELETE FROM rename_rules WHERE id=?', (rule_id,))
+    try:
+        validate_rename_rules(_get_rename_rules(), (r[0] for r in db.execute('SELECT name FROM nodes')))
+    except ValueError as exc:
+        if was_valid:
+            db.rollback()
+            flash(str(exc), 'error')
+            return redirect(url_for('rename_rules_page'))
     db.commit()
     audit_event('rename_rule.delete', 'success', rule_id=rule_id)
     flash('规则已删除', 'success')

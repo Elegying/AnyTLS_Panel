@@ -26,7 +26,7 @@
     </div>
 </header>
 
-{% set pct = calc_traffic_percent(account.traffic_used_bytes or 0, account.traffic_limit_gb or 250) %}
+{% set pct = calc_traffic_percent(account.traffic_used_bytes or 0, account.traffic_limit_gb) %}
 <section class="detail-summary" aria-label="账号概览">
     <div class="system-metric">
         <div class="metric-label"><i class="bi bi-hdd-network" aria-hidden="true"></i>节点总数</div>
