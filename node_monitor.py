@@ -23,7 +23,8 @@ def check_due_nodes(panel, limit=32, budget=45):
             def check(item):
                 node, token = item
                 try:
-                    result = panel._run_probe(node, timeout=max(0.1, min(8, deadline - time.monotonic())))
+                    remaining = deadline - time.monotonic()
+                    result = panel._run_probe(node, timeout=min(8, remaining)) if remaining > 0 else None
                 except Exception:
                     result = None
                 return node, token, result
@@ -33,7 +34,8 @@ def check_due_nodes(panel, limit=32, budget=45):
                 if health:
                     results.append(health['status'])
     return {'checked': len(results), 'verified': results.count('verified'),
-            'failed': results.count('failed'), 'incomplete': results.count('error')}
+            'failed': sum(status in ('failed', 'tls_error') for status in results),
+            'incomplete': results.count('error')}
 
 
 if __name__ == '__main__':

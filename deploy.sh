@@ -22,7 +22,7 @@ TRAFFIC_LOG_RETENTION_DAYS="${ANYTLS_TRAFFIC_LOG_RETENTION_DAYS:-90}"
 MAX_REQUEST_BYTES="${ANYTLS_MAX_REQUEST_BYTES:-4194304}"
 PANEL_DOMAIN="${ANYTLS_PANEL_DOMAIN:-}"
 REPO_URL="${ANYTLS_REPO_URL:-https://github.com/Elegying/AnyTLS_Panel.git}"
-REPO_REF="${ANYTLS_REPO_REF:-v1.4.16}"
+REPO_REF="${ANYTLS_REPO_REF:-v1.4.17}"
 REPO_SUBDIR="${ANYTLS_REPO_SUBDIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 APT_UPDATED=0
@@ -357,7 +357,11 @@ validate_configuration() {
     fi
     validate_panel_dir
     validate_secret_paths
-    if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+    if ! [[ "$PORT" =~ ^0*([1-9][0-9]{0,4})$ ]]; then
+        fail "invalid port: $PORT"
+    fi
+    PORT=$((10#${BASH_REMATCH[1]}))
+    if (( PORT < 1 || PORT > 65535 )); then
         fail "invalid port: $PORT"
     fi
     if ! [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]*$ ]]; then
@@ -385,16 +389,25 @@ validate_configuration() {
     if [[ "$SESSION_COOKIE_SECURE" != "1" || "$TRUST_PROXY" != "1" ]]; then
         fail "automatic HTTPS requires secure cookies and trusted proxy handling"
     fi
-    if ! [[ "$TRAFFIC_LOG_RETENTION_DAYS" =~ ^[0-9]+$ ]] || \
-       (( TRAFFIC_LOG_RETENTION_DAYS < 1 || TRAFFIC_LOG_RETENTION_DAYS > 3650 )); then
+    if ! [[ "$TRAFFIC_LOG_RETENTION_DAYS" =~ ^0*([1-9][0-9]{0,3})$ ]]; then
         fail "ANYTLS_TRAFFIC_LOG_RETENTION_DAYS must be between 1 and 3650"
     fi
-    if ! [[ "$MAX_REQUEST_BYTES" =~ ^[0-9]+$ ]] || \
-       (( MAX_REQUEST_BYTES < 65536 || MAX_REQUEST_BYTES > 16777216 )); then
+    TRAFFIC_LOG_RETENTION_DAYS=$((10#${BASH_REMATCH[1]}))
+    if (( TRAFFIC_LOG_RETENTION_DAYS < 1 || TRAFFIC_LOG_RETENTION_DAYS > 3650 )); then
+        fail "ANYTLS_TRAFFIC_LOG_RETENTION_DAYS must be between 1 and 3650"
+    fi
+    if ! [[ "$MAX_REQUEST_BYTES" =~ ^0*([1-9][0-9]{0,7})$ ]]; then
         fail "ANYTLS_MAX_REQUEST_BYTES must be between 65536 and 16777216"
     fi
-    if ! [[ "$BACKUP_RETENTION_COUNT" =~ ^[0-9]+$ ]] || \
-       (( BACKUP_RETENTION_COUNT < 2 || BACKUP_RETENTION_COUNT > 365 )); then
+    MAX_REQUEST_BYTES=$((10#${BASH_REMATCH[1]}))
+    if (( MAX_REQUEST_BYTES < 65536 || MAX_REQUEST_BYTES > 16777216 )); then
+        fail "ANYTLS_MAX_REQUEST_BYTES must be between 65536 and 16777216"
+    fi
+    if ! [[ "$BACKUP_RETENTION_COUNT" =~ ^0*([1-9][0-9]{0,2})$ ]]; then
+        fail "ANYTLS_BACKUP_RETENTION_COUNT must be between 2 and 365"
+    fi
+    BACKUP_RETENTION_COUNT=$((10#${BASH_REMATCH[1]}))
+    if (( BACKUP_RETENTION_COUNT < 2 || BACKUP_RETENTION_COUNT > 365 )); then
         fail "ANYTLS_BACKUP_RETENTION_COUNT must be between 2 and 365"
     fi
     if ! [[ "$DAILY_BACKUP_ROOT" =~ ^/var/backups/[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then

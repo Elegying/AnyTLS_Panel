@@ -8,6 +8,8 @@ from pathlib import Path
 import secrets
 import sqlite3
 
+from input_limits import MAX_NAME_CHARS, MAX_NOTES_CHARS, validate_text
+
 
 def _date(value, field):
     try:
@@ -20,34 +22,33 @@ def import_services(database, source):
     records = json.loads(Path(source).read_text(encoding="utf-8"))
     if not isinstance(records, list) or not records:
         raise ValueError("source must contain a non-empty JSON array")
+    if any(not isinstance(row, dict) for row in records):
+        raise ValueError("each service record must be an object")
 
     db = sqlite3.connect(database, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     try:
-        accounts = {
-            row["name"]: row["id"]
-            for row in db.execute("SELECT id, name FROM accounts")
-        }
-        missing = sorted({str(row.get("account", "")) for row in records} - accounts.keys())
+        db.execute("BEGIN IMMEDIATE")
+        accounts = {}
+        for row in db.execute("SELECT id, name FROM accounts"):
+            accounts.setdefault(row["name"], []).append(row["id"])
+        requested = {str(row.get("account", "")) for row in records}
+        missing = sorted(requested - accounts.keys())
         if missing:
             raise ValueError("unknown account names: " + ", ".join(missing))
+        ambiguous = sorted(name for name in requested if len(accounts[name]) != 1)
+        if ambiguous:
+            raise ValueError("ambiguous account names: " + ", ".join(ambiguous))
 
         created = updated = 0
-        db.execute("BEGIN IMMEDIATE")
         for row in records:
-            account_id = accounts[str(row["account"])]
-            wechat_id = str(row.get("wechat_id", "")).strip()
-            relationship = str(row.get("relationship", "自用")).strip()
-            notes = str(row.get("notes", "")).strip()
+            account_id = accounts[str(row["account"])][0]
+            wechat_id = validate_text(row.get("wechat_id"), "wechat_id", MAX_NAME_CHARS, required=True)
+            relationship = validate_text(row.get("relationship", "自用"), "relationship", 20, required=True)
+            notes = validate_text(row.get("notes"), "notes", MAX_NOTES_CHARS)
             started_on = _date(row.get("started_on"), "started_on")
             expires_on = _date(row.get("expires_on"), "expires_on")
-            if not wechat_id or len(wechat_id) > 120:
-                raise ValueError("wechat_id must contain 1-120 characters")
-            if not relationship or len(relationship) > 20:
-                raise ValueError("relationship must contain 1-20 characters")
-            if len(notes) > 2000:
-                raise ValueError("notes may contain at most 2000 characters")
             if started_on > expires_on:
                 raise ValueError("expires_on must not be earlier than started_on")
 

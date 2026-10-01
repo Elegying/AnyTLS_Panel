@@ -30,15 +30,15 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.16/install-release.sh -o "$installer_dir/install-release.sh"
-  bash "$installer_dir/install-release.sh" v1.4.16
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.17/install-release.sh -o "$installer_dir/install-release.sh"
+  bash "$installer_dir/install-release.sh" v1.4.17
 )
 ```
 
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.4.16 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.17 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -46,7 +46,7 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-bash /opt/anytls-panel/install-release.sh v1.4.16
+bash /opt/anytls-panel/install-release.sh v1.4.17
 ```
 
 上述本机更新命令适用于已安装 `v1.4.5` 或更新版本的部署脚本；更早版本请使用前面的完整下载命令。指定 `ANYTLS_REPO_REF`、`ANYTLS_REPO_URL` 或 `ANYTLS_REPO_SUBDIR` 时会从仓库拉取；均未指定且脚本旁有完整项目源码时使用本地文件。形如 `vX.Y.Z` 的版本必须是真实标签，且源码 `VERSION` 必须匹配，检查在停服前完成。
@@ -70,6 +70,8 @@ bash deploy.sh
 ```
 
 首次安装时脚本会初始化管理员账号；如果数据库已存在，会保留原有账号，不会用环境变量覆盖。首次密码会暂存到面板 `data/.initial_admin_password`，文件仅 root 可读，并在管理员首次修改密码后自动删除。若通过 `ANYTLS_ADMIN_PASSWORD_FILE` 把文件放在受保护的 `/etc/anytls-panel/`，systemd 沙箱不允许应用删除它；首次改密后应由 root 手工删除该自定义文件。部署输出默认隐藏密码和流量 API token；如确需打印敏感值，可临时设置 `ANYTLS_SHOW_SECRETS=1`。
+
+并发修改密码或登录升级旧密码哈希时，旧请求不会覆盖已更新的凭据；收到“账号凭据已更新”提示后，使用当前密码重新登录。
 
 部署目录必须是 `/opt/<专用名称>` 或 `/srv/<专用名称>`，且父目录由 root 所有并不可组/全局写。脚本会拒绝符号链接路径以及没有 AnyTLS 安装标记的非空目录；卸载时也会在停止服务前验证同一标记。代码和每次重建的 venv 由 root 所有且服务只读，数据库、WAL 和运行密钥位于服务可写的 `data/` 子目录。旧版根目录状态会在停服后通过 SQLite backup/安全复制迁入 `data/`。
 
@@ -162,7 +164,7 @@ runuser -u anytls-panel -- /opt/anytls-panel/venv/bin/python \
 rm -f /opt/anytls-panel/data/customer-services-import.json
 ```
 
-工具会先验证全部账号名称和日期，再开启写事务；有任何未知账号或非法记录时整批失败，不会只导入一半。重复导入会按“专线账号 + 微信号 + 开始日期”更新原记录并保留用户 Token，因此可以安全复跑。导入完成后登录「用户服务」核对总数、到期日、专线分配和覆盖警告，并确认临时文件已删除。
+工具在写事务内验证账号名称的唯一性及记录字段；引用未知或同名账号、包含非法记录时整批失败，不会只导入一半。同名账号需先在面板中改为唯一名称，再按对应名称导入。微信号最多 200 字、备注最多 4000 字，与页面限制一致。重复导入会按“专线账号 + 微信号 + 开始日期”更新原记录并保留用户 Token，因此可以安全复跑。导入完成后登录「用户服务」核对总数、到期日、专线分配和覆盖警告，并确认临时文件已删除。
 
 ## 部署后验证
 
@@ -247,8 +249,8 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.16/install-release.sh -o "$installer_dir/install-release.sh"
-  bash "$installer_dir/install-release.sh" v1.4.16
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.17/install-release.sh -o "$installer_dir/install-release.sh"
+  bash "$installer_dir/install-release.sh" v1.4.17
 )
 ```
 

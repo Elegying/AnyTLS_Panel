@@ -77,11 +77,17 @@ validate_configuration() {
         echo "ACCOUNT_ID is required (or PASSWORD for the legacy main-token mode)" >&2
         return 2
     fi
-    if ! [[ "$ANYTLS_PORT" =~ ^[0-9]+$ ]] || \
-       (( ANYTLS_PORT < 1 || ANYTLS_PORT > 65535 )); then
+    if ! [[ "$ANYTLS_PORT" =~ ^0*([1-9][0-9]{0,4})$ ]]; then
         echo "ANYTLS_PORT must be an integer between 1 and 65535" >&2
         return 2
     fi
+    ANYTLS_PORT=$((10#${BASH_REMATCH[1]}))
+    if (( ANYTLS_PORT < 1 || ANYTLS_PORT > 65535 )); then
+        echo "ANYTLS_PORT must be an integer between 1 and 65535" >&2
+        return 2
+    fi
+    INPUT_RULE_COMMENT="anytls-panel-traffic-in-${ANYTLS_PORT}"
+    OUTPUT_RULE_COMMENT="anytls-panel-traffic-out-${ANYTLS_PORT}"
     if [[ "$(current_euid)" -ne 0 ]]; then
         echo "traffic_collector.sh must run as root to read and manage iptables" >&2
         return 2

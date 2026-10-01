@@ -150,6 +150,21 @@ def run_core(proxy, directory, deadline):
                     process.wait(timeout=1)
 
 
+def _run_core_addresses(proxy, addresses, directory, deadline):
+    """Try only validated addresses, sharing one bounded probe budget."""
+    for index, address in enumerate(addresses):
+        now = time.monotonic()
+        remaining = deadline - now
+        if remaining < 0.2:
+            raise TimeoutError('probe deadline exceeded')
+        attempt_deadline = now + remaining / (len(addresses) - index)
+        try:
+            return run_core({**proxy, 'server': address}, directory, attempt_deadline)
+        except ProxyAccessFailed:
+            if index == len(addresses) - 1:
+                raise
+
+
 def verify_node_proxy(node, resolver, directory, timeout=8, allow_private=False):
     deadline = time.monotonic() + timeout
     addresses = []
@@ -169,7 +184,7 @@ def verify_node_proxy(node, resolver, directory, timeout=8, allow_private=False)
         return result
     proxy.pop('dialer-proxy', None)
     original_host = proxy['server']
-    proxy['server'], proxy['name'] = addresses[0], 'health-probe'
+    proxy['name'] = 'health-probe'
     if proxy['type'] in ('trojan', 'anytls', 'tuic', 'hysteria2'):
         proxy['sni'] = proxy.get('sni') or proxy.get('servername') or original_host
     elif proxy.get('tls') or proxy.get('reality-opts'):
@@ -185,7 +200,7 @@ def verify_node_proxy(node, resolver, directory, timeout=8, allow_private=False)
             result.update(status='error', msg='代理检测繁忙或时间预算已用尽，请稍后重试', online=False)
             return result
         try:
-            delay = run_core(proxy, directory, deadline)
+            delay = _run_core_addresses(proxy, addresses, directory, deadline)
         except ProxyAccessFailed:
             # Neither the core's raw error nor the configuration may enter logs/UI.
             result['stages']['auth'] = {'state': 'not_run', 'detail': '代理访问未成功，无法单独确定认证结果'}

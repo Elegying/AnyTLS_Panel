@@ -29,8 +29,11 @@ validate_configuration() {
     [[ "${EUID:-$(id -u)}" -eq 0 ]] || fail "please run as root"
     [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]*$ ]] || \
         fail "invalid service name"
-    if ! [[ "$RETENTION_COUNT" =~ ^[0-9]+$ ]] || \
-       (( RETENTION_COUNT < 2 || RETENTION_COUNT > 365 )); then
+    if ! [[ "$RETENTION_COUNT" =~ ^0*([1-9][0-9]{0,2})$ ]]; then
+        fail "ANYTLS_BACKUP_RETENTION_COUNT must be between 2 and 365"
+    fi
+    RETENTION_COUNT=$((10#${BASH_REMATCH[1]}))
+    if (( RETENTION_COUNT < 2 || RETENTION_COUNT > 365 )); then
         fail "ANYTLS_BACKUP_RETENTION_COUNT must be between 2 and 365"
     fi
     [[ "$BACKUP_ROOT" =~ ^/var/backups/[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || \
@@ -175,8 +178,9 @@ create_backup() {
     "$PYTHON_BIN" - "$DATABASE_FILE" "$BACKUP_STAGING/anytls.db" <<'PY'
 import sqlite3
 import sys
+from pathlib import Path
 
-source_uri = f"file:{sys.argv[1]}?mode=ro"
+source_uri = Path(sys.argv[1]).resolve().as_uri() + '?mode=ro'
 with sqlite3.connect(source_uri, timeout=30, uri=True) as source, \
      sqlite3.connect(sys.argv[2], timeout=30) as target:
     source.backup(target)
