@@ -57,10 +57,10 @@
 ### 流量采集
 
 1. 节点采集器读取自己创建的 iptables 规则累计字节数；
-2. 使用稳定 `collector_id` 和账号级 Token 调用 `/api/traffic/counter`；
-3. 服务端在 `BEGIN IMMEDIATE` 事务中比较上次原始值；
+2. 发送前持久化递增 `sample_seq`，使用稳定 `collector_id` 和账号级 Token 调用 `/api/traffic/counter`；
+3. 服务端在 `BEGIN IMMEDIATE` 事务中拒绝旧序号，比较上次原始值；
 4. 只把差额写入账号累计量，首次样本只建立基线；
-5. 计数器回绕或重置时，从新值继续累计。
+5. 更高序号的计数下降视为重置，从新值继续累计；旧客户端未传序号时只接受单调值，下降返回 `409`。
 
 ### 公开订阅
 

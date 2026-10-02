@@ -663,6 +663,8 @@ def _read_subscription_body(response, sock, deadline):
             _SUBSCRIPTION_READ_CHUNK,
             _MAX_SUBSCRIPTION_BYTES + 1 - size,
         ))
+        # A deadline-triggered shutdown can look like EOF for close-delimited bodies.
+        _subscription_remaining_time(deadline)
         if not chunk:
             remaining = getattr(response, 'length', None)
             if isinstance(remaining, int) and remaining > 0:
@@ -686,6 +688,7 @@ def _read_pinned_subscription_response(
     for index, address in enumerate(addresses):
         connection = None
         sock = None
+        deadline_timer = None
         try:
             try:
                 remaining = _subscription_remaining_time(deadline)
@@ -700,6 +703,18 @@ def _read_pinned_subscription_response(
                 context.minimum_version = ssl.TLSVersion.TLSv1_2
                 sock = context.wrap_socket(sock, server_hostname=parsed.hostname)
             remaining = _set_subscription_socket_deadline(sock, attempt_deadline)
+
+            # Socket timeouts alone cannot bound a continuously trickling header.
+            # Shutdown wakes buffered HTTP reads; join before closing/reusing the fd.
+            def expire_socket():
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+            deadline_timer = threading.Timer(remaining, expire_socket)
+            deadline_timer.daemon = True
+            deadline_timer.start()
 
             connection = http.client.HTTPConnection(
                 parsed.hostname,
@@ -722,6 +737,7 @@ def _read_pinned_subscription_response(
             connection.endheaders()
             _set_subscription_socket_deadline(sock, attempt_deadline)
             response = connection.getresponse()
+            _subscription_remaining_time(attempt_deadline)
 
             if response.status in (301, 302, 303, 307, 308):
                 location = response.getheader('Location')
@@ -745,6 +761,9 @@ def _read_pinned_subscription_response(
         except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
             last_error = exc
         finally:
+            if deadline_timer is not None:
+                deadline_timer.cancel()
+                deadline_timer.join()
             if connection is not None:
                 connection.close()
             elif sock is not None:
@@ -2283,8 +2302,15 @@ def api_report_traffic_counter():
         counter_bytes = parse_nonnegative_int(
             data.get('counter_bytes'), 'counter_bytes'
         )
+        sample_seq = None
+        if 'sample_seq' in data:
+            if not isinstance(data['sample_seq'], int) or isinstance(data['sample_seq'], bool):
+                raise ValueError('sample_seq must be a JSON integer')
+            sample_seq = parse_nonnegative_int(data['sample_seq'], 'sample_seq')
+            if sample_seq == 0:
+                raise ValueError('sample_seq must be positive')
     except ValueError:
-        return jsonify({"error": "counter_bytes must be a nonnegative integer"}), 400
+        return jsonify({"error": "counter_bytes must be nonnegative; sample_seq must be a positive integer"}), 400
 
     db = get_db()
     apply_due_traffic_resets(db)
@@ -2295,7 +2321,7 @@ def api_report_traffic_counter():
         return jsonify({"error": identity_error}), identity_status
 
     previous = db.execute(
-        'SELECT account_id, last_counter_bytes FROM traffic_collectors '
+        'SELECT account_id, last_counter_bytes, last_sample_seq FROM traffic_collectors '
         'WHERE collector_id=?',
         (collector_id,),
     ).fetchone()
@@ -2304,6 +2330,20 @@ def api_report_traffic_counter():
         return jsonify({"error": "collector_id belongs to another account"}), 409
 
     previous_bytes = previous['last_counter_bytes'] if previous else counter_bytes
+    if previous:
+        previous_seq = previous['last_sample_seq']
+        if previous_seq is not None and (sample_seq is None or sample_seq <= previous_seq):
+            if sample_seq == previous_seq and counter_bytes == previous_bytes:
+                total = db.execute('SELECT traffic_used_bytes FROM accounts WHERE id=?',
+                                   (account_id,)).fetchone()[0]
+                db.rollback()
+                return jsonify(status='ok', account_id=account_id, delta_bytes=0,
+                               total_bytes=total)
+            db.rollback()
+            return jsonify(error='stale or missing sample_seq'), 409
+        if sample_seq is None and counter_bytes < previous_bytes:
+            db.rollback()
+            return jsonify(error='counter reset requires an ordered sample_seq'), 409
     delta_bytes = 0 if not previous else (
         counter_bytes - previous_bytes
         if counter_bytes >= previous_bytes
@@ -2320,15 +2360,15 @@ def api_report_traffic_counter():
 
     if previous:
         db.execute(
-            'UPDATE traffic_collectors SET last_counter_bytes=?, '
+            'UPDATE traffic_collectors SET last_counter_bytes=?, last_sample_seq=?, '
             'updated_at=CURRENT_TIMESTAMP WHERE collector_id=?',
-            (counter_bytes, collector_id),
+            (counter_bytes, sample_seq, collector_id),
         )
     else:
         db.execute(
             'INSERT INTO traffic_collectors '
-            '(collector_id, account_id, last_counter_bytes) VALUES (?, ?, ?)',
-            (collector_id, account_id, counter_bytes),
+            '(collector_id, account_id, last_counter_bytes, last_sample_seq) VALUES (?, ?, ?, ?)',
+            (collector_id, account_id, counter_bytes, sample_seq),
         )
     db.commit()
     return jsonify({

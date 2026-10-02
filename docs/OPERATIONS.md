@@ -30,15 +30,15 @@ Python 生产依赖由 `requirements.in` 声明，并锁定到带 SHA-256 哈希
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.17/install-release.sh -o "$installer_dir/install-release.sh"
-  bash "$installer_dir/install-release.sh" v1.4.17
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.18/install-release.sh -o "$installer_dir/install-release.sh"
+  bash "$installer_dir/install-release.sh" v1.4.18
 )
 ```
 
 克隆后部署：
 
 ```bash
-git clone --depth 1 --branch v1.4.17 https://github.com/Elegying/AnyTLS_Panel.git
+git clone --depth 1 --branch v1.4.18 https://github.com/Elegying/AnyTLS_Panel.git
 cd AnyTLS_Panel
 bash deploy.sh
 ```
@@ -46,7 +46,7 @@ bash deploy.sh
 部署指定正式版本（推荐生产更新使用）：
 
 ```bash
-bash /opt/anytls-panel/install-release.sh v1.4.17
+bash /opt/anytls-panel/install-release.sh v1.4.18
 ```
 
 上述本机更新命令适用于已安装 `v1.4.5` 或更新版本的部署脚本；更早版本请使用前面的完整下载命令。指定 `ANYTLS_REPO_REF`、`ANYTLS_REPO_URL` 或 `ANYTLS_REPO_SUBDIR` 时会从仓库拉取；均未指定且脚本旁有完整项目源码时使用本地文件。形如 `vX.Y.Z` 的版本必须是真实标签，且源码 `VERSION` 必须匹配，检查在停服前完成。
@@ -181,6 +181,8 @@ curl --fail http://127.0.0.1:8866/readyz
 
 ## 更新
 
+累计流量采集器升级时应同步更新节点侧 `traffic_collector.sh`，并保留采集器 ID 及其 `.sequence` 文件。新版通过持久化采样序号拒绝乱序请求；旧采集器的计数下降会返回 `409`，不会再自动视为重置。可先升级采集器，再升级面板，旧面板会忽略新增序号字段。备份采集器状态时同时保留 ID 和序号文件；序号丢失后使用新的采集器 ID 建立基线。
+
 面板左下角显示安装文件 `VERSION` 中的当前版本。管理员点击「检查更新」后，服务器查询 [GitHub 最新正式发布接口](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)，按主版本、次版本和修订号比较，只提示已发布的正式版本；本地版本高于正式版时明确提示，不建议降级。网络、限流或返回格式异常会显示检查失败，不能据此判断已经是最新版。
 
 检查接口需要有效登录和 CSRF，仅查询公开版本元数据，不发送客户记录、订阅或密钥，也不会自动执行部署。成功结果在当前应用进程缓存 5 分钟，失败结果缓存 1 分钟，刷新页面不会自动访问 GitHub。实际更新继续由服务器上的管理员执行下面的固定版本流程，并保留相同的自定义配置。
@@ -249,8 +251,8 @@ journalctl -u anytls-panel-backup.service -n 30 --no-pager
   installer_dir="$(mktemp -d)"
   trap 'rm -rf -- "$installer_dir"' EXIT
   curl -fL --connect-timeout 10 --max-time 120 \
-    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.17/install-release.sh -o "$installer_dir/install-release.sh"
-  bash "$installer_dir/install-release.sh" v1.4.17
+    https://raw.githubusercontent.com/Elegying/AnyTLS_Panel/v1.4.18/install-release.sh -o "$installer_dir/install-release.sh"
+  bash "$installer_dir/install-release.sh" v1.4.18
 )
 ```
 

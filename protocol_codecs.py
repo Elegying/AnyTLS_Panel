@@ -499,6 +499,16 @@ def _apply_stream(proxy, params):
         service_name = _query_value(params, 'serviceName')
         if service_name:
             proxy['grpc-opts'] = {'grpc-service-name': service_name}
+    elif network in ('h2', 'http'):
+        hosts = [host.strip() for host in _query_value(params, 'host').split(',') if host.strip()]
+        path = _query_value(params, 'path', default='/') or '/'
+        if network == 'h2':
+            proxy['h2-opts'] = {'host': hosts, 'path': path}
+        else:
+            options = {'method': 'GET', 'path': [item.strip() for item in path.split(',') if item.strip()]}
+            if hosts:
+                options['headers'] = {'Host': hosts}
+            proxy['http-opts'] = options
 
 
 def _to_anytls(proxy, node, params):

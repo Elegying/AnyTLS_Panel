@@ -1,6 +1,6 @@
 """Small, ordered SQLite schema migrations for existing installations."""
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def _add_account_metadata_columns(db):
@@ -134,6 +134,12 @@ def _add_canonical_proxy(db):
         db.execute("ALTER TABLE nodes ADD COLUMN clash_config TEXT NOT NULL DEFAULT ''")
 
 
+def _add_collector_sample_sequence(db):
+    columns = {row[1] for row in db.execute('PRAGMA table_info(traffic_collectors)')}
+    if 'last_sample_seq' not in columns:
+        db.execute('ALTER TABLE traffic_collectors ADD COLUMN last_sample_seq INTEGER')
+
+
 _MIGRATIONS = (
     (1, _add_account_metadata_columns),
     (2, _add_rate_limits),
@@ -143,6 +149,7 @@ _MIGRATIONS = (
     (6, _add_node_probe_results),
     (7, _add_node_filter),
     (8, _add_canonical_proxy),
+    (9, _add_collector_sample_sequence),
 )
 
 

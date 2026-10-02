@@ -269,3 +269,30 @@ test('rotating a demo share link refreshes both generic and Clash copy controls'
     assert.equal(row.children[0].value, 'https://panel.example/sub/new-token?format=clash');
     assert.equal(row.children[1].dataset.inputId, 'clashShareUrl');
 });
+
+test('share rotation blocks duplicate requests and restores controls after failure', async () => {
+    const {context, get, document} = setup('account_detail.html');
+    const button = element();
+    document.querySelectorAll = () => [button];
+    const messages = [];
+    context.showToast = (...args) => messages.push(args);
+    const pending = [];
+    context.fetch = () => new Promise((resolve, reject) => pending.push({resolve, reject}));
+    const first = context.regenerateToken();
+    await context.regenerateToken();
+    assert.equal(pending.length, 1);
+    assert.equal(button.disabled, true);
+    pending[0].resolve(response({url: 'https://panel.example/sub/current-token'}));
+    await first;
+    assert.equal(get('shareUrl').value, 'https://panel.example/sub/current-token');
+    assert.equal(button.disabled, false);
+    const failed = context.regenerateToken();
+    pending[1].reject(new Error('connection lost'));
+    await failed;
+    assert.equal(button.disabled, false);
+    assert.match(messages.at(-1)[0], /刷新页面核对/);
+    const retry = context.regenerateToken();
+    pending[2].resolve(response({url: 'https://panel.example/sub/next-token'}));
+    await retry;
+    assert.equal(get('shareUrl').value, 'https://panel.example/sub/next-token');
+});
