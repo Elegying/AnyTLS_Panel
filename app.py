@@ -1443,10 +1443,14 @@ def _form_error(message, endpoint, **values):
         '订阅拉取失败，请检查地址和上游服务后重试',
         f'订阅节点超过安全上限 {MAX_NODES_PER_SUBSCRIPTION}',
         f'重命名后的节点名称不能超过 {MAX_NODE_NAME_CHARS} 个字符',
+        '账号状态无效', '节点名称或重命名规则数量超过上限',
+        '重命名匹配文字不能为空', f'重命名规则最多 {MAX_RENAME_RULES} 条',
     ]
     for label, limit in [('微信号', MAX_NAME_CHARS), ('账号名称', MAX_NAME_CHARS),
                          ('备注', MAX_NOTES_CHARS), ('续期备注', MAX_NOTES_CHARS),
-                         ('账号关系', 20), ('订阅内容', MAX_SUBSCRIPTION_TEXT_CHARS)]:
+                         ('账号关系', 20), ('订阅内容', MAX_SUBSCRIPTION_TEXT_CHARS),
+                         ('名称', MAX_NAME_CHARS), ('原名称', MAX_RENAME_TEXT_CHARS),
+                         ('新名称', MAX_RENAME_TEXT_CHARS)]:
         safe_messages.extend([f'{label}不能为空', f'{label}不能超过{limit}个字符'])
     for label in ['专线账号', '流量限制', '开始日期', '到期日期', '新到期日期']:
         safe_messages.extend(label + suffix for suffix in [
@@ -1462,6 +1466,8 @@ def _form_error(message, endpoint, **values):
             '到期日期': 'expires_on', '新到期日期': 'new_expires_on',
             '续期备注': 'notes', '备注': 'notes', '账号名称': 'name',
             '订阅': 'subscribe_url', '流量': 'traffic_limit_gb',
+            '名称': 'name', '原名称': 'old_text', '新名称': 'new_text',
+            '账号状态': 'status',
         }
         field = next((value for key, value in fields.items()
                       if message.startswith(key)), '')
@@ -1608,8 +1614,7 @@ def account_rename(account_id):
             request.form.get('name', ''), '名称', MAX_NAME_CHARS, required=True
         )
     except ValueError as e:
-        flash(str(e), 'error')
-        return redirect(url_for('account_detail', account_id=account_id))
+        return _form_error(str(e), 'account_detail', account_id=account_id)
 
     db = get_db()
     db.execute(
@@ -1619,7 +1624,7 @@ def account_rename(account_id):
     db.commit()
     audit_event('account.rename', 'success', account_id=account_id)
     flash(f'已重命名为 "{new_name}"', 'success')
-    return redirect(url_for('account_detail', account_id=account_id))
+    return _form_redirect('account_detail', account_id=account_id)
 
 @app.route('/accounts/<int:account_id>/edit', methods=['POST'])
 @login_required
@@ -1633,19 +1638,16 @@ def account_edit(account_id):
         )
         notes = validate_text(request.form.get('notes', ''), '备注', MAX_NOTES_CHARS)
     except ValueError as e:
-        flash(str(e), 'error')
-        return redirect(url_for('account_detail', account_id=account_id))
+        return _form_error(str(e), 'account_detail', account_id=account_id)
     traffic_limit = request.form.get('traffic_limit_gb', '250').strip()
     status = request.form.get('status', 'active')
     if status not in {'active', 'suspended', 'disabled'}:
-        flash('账号状态无效', 'error')
-        return redirect(url_for('account_detail', account_id=account_id))
+        return _form_error('账号状态无效', 'account_detail', account_id=account_id)
 
     try:
         traffic_limit = parse_nonnegative_float(traffic_limit, '流量限制')
     except ValueError as e:
-        flash(str(e), 'error')
-        return redirect(url_for('account_detail', account_id=account_id))
+        return _form_error(str(e), 'account_detail', account_id=account_id)
 
     db = get_db()
     db.execute(
@@ -1656,7 +1658,7 @@ def account_edit(account_id):
     db.commit()
     audit_event('account.update', 'success', account_id=account_id, status=status)
     flash('账号信息已更新', 'success')
-    return redirect(url_for('account_detail', account_id=account_id))
+    return _form_redirect('account_detail', account_id=account_id)
 
 @app.route('/accounts/<int:account_id>/delete', methods=['POST'])
 @login_required
@@ -3003,8 +3005,7 @@ def rename_rule_add():
             MAX_RENAME_TEXT_CHARS,
         )
     except ValueError as e:
-        flash(str(e), 'error')
-        return redirect(url_for('rename_rules_page'))
+        return _form_error(str(e), 'rename_rules_page')
     db = get_db()
     db.execute('BEGIN IMMEDIATE')
     try:
@@ -3014,8 +3015,7 @@ def rename_rule_add():
         validate_rename_rules(rules, (r[0] for r in db.execute('SELECT name FROM nodes')))
     except ValueError as exc:
         db.rollback()
-        flash(str(exc), 'error')
-        return redirect(url_for('rename_rules_page'))
+        return _form_error(str(exc), 'rename_rules_page')
     rule_id = db.execute(
         'INSERT INTO rename_rules (old_text, new_text) VALUES (?, ?)',
         (old_text, new_text),
@@ -3023,7 +3023,7 @@ def rename_rule_add():
     db.commit()
     audit_event('rename_rule.create', 'success', rule_id=rule_id)
     flash(f'规则已添加：{old_text} → {new_text}', 'success')
-    return redirect(url_for('rename_rules_page'))
+    return _form_redirect('rename_rules_page')
 
 
 @app.route('/settings/rename-rules/<int:rule_id>/toggle', methods=['POST'])

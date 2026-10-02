@@ -113,7 +113,7 @@
 <div class="modal-overlay" id="renameModal" aria-hidden="true">
     <section class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="renameModalTitle">
         <div class="modal-header"><div><h2 class="modal-title" id="renameModalTitle"><i class="bi bi-pencil" aria-hidden="true"></i>重命名账号</h2><p class="modal-description">仅修改面板内的显示名称。</p></div><button type="button" class="icon-button modal-close" data-action="close-modal" data-modal="renameModal" aria-label="关闭重命名弹窗"><i class="bi bi-x-lg" aria-hidden="true"></i></button></div>
-        <div class="modal-body"><form method="POST" action="{{ url_for('account_rename', account_id=account.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><div class="form-group"><label for="rename-account">新名称</label><input id="rename-account" name="name" value="{{ account.name }}" required></div><div class="modal-actions"><button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="renameModal">取消</button><button type="submit" class="btn btn-primary">保存名称</button></div></form></div>
+        <div class="modal-body"><form method="POST" data-preserve-form action="{{ url_for('account_rename', account_id=account.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><div class="form-group"><label for="rename-account">新名称</label><input id="rename-account" name="name" value="{{ account.name }}" required></div><div class="modal-actions"><button type="button" class="btn btn-ghost" data-action="close-modal" data-modal="renameModal">取消</button><button type="submit" class="btn btn-primary">保存名称</button></div></form></div>
     </section>
 </div>
 
@@ -121,7 +121,7 @@
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="editModalTitle">
         <div class="modal-header"><div><h2 class="modal-title" id="editModalTitle"><i class="bi bi-sliders" aria-hidden="true"></i>账号设置</h2><p class="modal-description">更新订阅来源、流量配额和账号状态。</p></div><button type="button" class="icon-button modal-close" data-action="close-modal" data-modal="editModal" aria-label="关闭账号设置弹窗"><i class="bi bi-x-lg" aria-hidden="true"></i></button></div>
         <div class="modal-body">
-            <form method="POST" action="{{ url_for('account_edit', account_id=account.id) }}">
+            <form method="POST" data-preserve-form action="{{ url_for('account_edit', account_id=account.id) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group"><label for="edit-subscribe-url">订阅链接</label><textarea id="edit-subscribe-url" name="subscribe_url" rows="3">{{ account.subscribe_url }}</textarea></div>
                 <div class="form-row"><div class="form-group"><label for="edit-limit">流量上限（GB）</label><input id="edit-limit" name="traffic_limit_gb" type="number" value="{{ account.traffic_limit_gb }}" step="0.1" min="0"></div><div class="form-group"><label for="edit-status">状态</label><select id="edit-status" name="status"><option value="active" {{ 'selected' if account.status == 'active' }}>活跃</option><option value="suspended" {{ 'selected' if account.status == 'suspended' }}>暂停</option><option value="disabled" {{ 'selected' if account.status == 'disabled' }}>停用</option></select></div></div>
