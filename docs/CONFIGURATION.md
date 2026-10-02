@@ -21,7 +21,7 @@ AnyTLS Panel 使用环境变量覆盖默认配置。生产环境由 `deploy.sh` 
 | `ANYTLS_SERVICE_USER` | `anytls-panel` | 低权限运行用户，不能是 `root` |
 | `ANYTLS_BIND_HOST` | `127.0.0.1` | 允许 `127.0.0.1` 或 `::1`；服务、反向代理和健康检查使用同一回环地址 |
 | `ANYTLS_REPO_URL` | 官方 GitHub 仓库 | 部署脚本拉取代码的 Git 仓库 |
-| `ANYTLS_REPO_REF` | `v1.4.17` | 显式设置时优先从仓库拉取；官方正式标签应通过 `install-release.sh` 验证后安装；自定义 Git 源用于已受信任的开发部署 |
+| `ANYTLS_REPO_REF` | `v1.4.18` | 显式设置时优先从仓库拉取；官方正式标签应通过 `install-release.sh` 验证后安装；自定义 Git 源用于已受信任的开发部署 |
 | `ANYTLS_REPO_SUBDIR` | 空 | 仓库中的项目子目录，常规部署不需要设置 |
 | `ANYTLS_ADMIN_USER` | 交互输入 | 首次无人值守安装时的管理员用户名 |
 | `ANYTLS_ADMIN_PASS` | 交互输入 | 首次无人值守部署必须提供的 8–128 字符密码，首尾空格属于密码本身 |
@@ -94,7 +94,7 @@ bash deploy.sh
 | `PASSWORD` | 无 | 仅供主 Token 兼容定位账号；不推荐新部署使用 |
 | `ANYTLS_PORT` | `443` | 当前节点上由该账号独占的 AnyTLS TCP 端口 |
 | `COLLECTOR_ID` | 自动持久化 | 采集实例唯一标识，8–128 个安全字符 |
-| `COLLECTOR_ID_FILE` | `/var/lib/anytls-panel-traffic.id` | 跨重启保存采集器 ID 的 root 私有文件 |
+| `COLLECTOR_ID_FILE` | `/var/lib/anytls-panel-traffic.id` | 跨重启保存采集器 ID 的 root 私有文件；同目录的 `.sequence` 文件持久化采样序号，不可删除 |
 | `COLLECTOR_LOCK_FILE` | `/run/anytls-panel-traffic.lock` | 防止定时任务和手工执行并发的锁文件 |
 
 最小配置：

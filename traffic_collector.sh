@@ -93,7 +93,7 @@ validate_configuration() {
         return 2
     fi
     local command_name
-    for command_name in awk base64 curl dirname flock iptables mv od realpath stat tr; do
+    for command_name in awk base64 curl dirname flock iptables mktemp mv od realpath stat tr; do
         if ! command_is_available "$command_name"; then
             echo "required command is missing: $command_name" >&2
             return 2
@@ -225,20 +225,56 @@ ensure_collector_id() {
     fi
 }
 
+# Reserve before sending, under the collector lock. Failed requests may leave gaps.
+reserve_sample_sequence() {
+    local sequence_file="${COLLECTOR_ID_FILE}.sequence"
+    validate_collector_path_parent "$sequence_file" "sample sequence" || return 1
+    if [[ -e "$sequence_file" && ! -f "$sequence_file" || -L "$sequence_file" ]]; then
+        echo "sample sequence must be a regular non-symlink file" >&2
+        return 1
+    fi
+    local previous=0
+    if [[ -e "$sequence_file" ]]; then
+        IFS= read -r previous < "$sequence_file" || return 1
+    fi
+    # Compare equal-length decimal text before arithmetic to avoid signed overflow.
+    # shellcheck disable=SC2071
+    if ! [[ "$previous" =~ ^(0|[1-9][0-9]{0,18})$ ]] ||
+       [[ ${#previous} -eq 19 && ! "$previous" < "9223372036854775807" ]]; then
+        echo "invalid or exhausted sample sequence" >&2
+        return 1
+    fi
+    SAMPLE_SEQ=$((previous + 1))
+    local temp_file
+    temp_file=$(mktemp "${sequence_file}.tmp.XXXXXX") || return 1
+    if ! printf '%s\n' "$SAMPLE_SEQ" > "$temp_file"; then
+        rm -f -- "$temp_file"
+        return 1
+    fi
+    if ! mv -f -- "$temp_file" "$sequence_file"; then
+        rm -f -- "$temp_file"
+        return 1
+    fi
+}
+
 # 上报流量
 report_traffic() {
     local bytes=$1
+    if ! [[ "${SAMPLE_SEQ:-}" =~ ^[1-9][0-9]{0,18}$ ]]; then
+        echo "a persisted sample sequence is required" >&2
+        return 1
+    fi
     local payload
     if [[ -n "${ACCOUNT_ID}" ]]; then
         if ! [[ "${ACCOUNT_ID}" =~ ^[1-9][0-9]*$ ]]; then
             echo "ACCOUNT_ID must be a positive integer" >&2
             return 2
         fi
-        payload="{\"collector_id\": \"${COLLECTOR_ID}\", \"account_id\": ${ACCOUNT_ID}, \"counter_bytes\": ${bytes}}"
+        payload="{\"collector_id\": \"${COLLECTOR_ID}\", \"account_id\": ${ACCOUNT_ID}, \"counter_bytes\": ${bytes}, \"sample_seq\": ${SAMPLE_SEQ}}"
     else
         local password_b64
         password_b64=$(printf '%s' "${PASSWORD}" | base64 | tr -d '\r\n')
-        payload="{\"collector_id\": \"${COLLECTOR_ID}\", \"password_b64\": \"${password_b64}\", \"counter_bytes\": ${bytes}}"
+        payload="{\"collector_id\": \"${COLLECTOR_ID}\", \"password_b64\": \"${password_b64}\", \"counter_bytes\": ${bytes}, \"sample_seq\": ${SAMPLE_SEQ}}"
     fi
     curl -fsS --connect-timeout 10 --max-time 30 -o /dev/null \
         -X POST "${PANEL_URL}/api/traffic/counter" \
@@ -264,6 +300,7 @@ main() {
     ensure_iptables || return
     local current_bytes
     current_bytes=$(get_traffic_bytes) || return
+    reserve_sample_sequence || return
     report_traffic "${current_bytes}" || return
 }
 

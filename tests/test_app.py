@@ -442,6 +442,7 @@ ensure_iptables() {{ :; }}
 get_traffic_bytes() {{ printf '%s\\n' "$CURRENT_BYTES"; }}
 report_traffic() {{ printf 'reported=%s\\n' "$1"; }}
 CURRENT_BYTES=125
+reserve_sample_sequence() {{ :; }}
 main
 CURRENT_BYTES=20
 main
@@ -464,6 +465,7 @@ curl() {{
 }}
 source "{script}"
 COLLECTOR_ID=collector-test-123
+SAMPLE_SEQ=1
 ACCOUNT_ID=42
 report_traffic 25
 ACCOUNT_ID=
@@ -477,6 +479,7 @@ report_traffic 30
             "collector_id": "collector-test-123",
             "account_id": 42,
             "counter_bytes": 25,
+            "sample_seq": 1,
         })
         password = base64.b64decode(payloads[1]["password_b64"]).decode()
         self.assertEqual(password, 'p@ss:/"word\\tail')
@@ -2121,15 +2124,15 @@ proxies:
 
             headers = {"Authorization": "Bearer traffic-token"}
             samples = [
-                ("collector-one", 100),
-                ("collector-one", 100),
-                ("collector-one", 120),
-                ("collector-one", 20),
-                ("collector-two", 10),
+                ("collector-one", 100, 1),
+                ("collector-one", 100, 1),
+                ("collector-one", 120, 2),
+                ("collector-one", 20, 3),
+                ("collector-two", 10, 1),
             ]
             responses = []
             with app.app.test_client() as client:
-                for collector_id, counter_bytes in samples:
+                for collector_id, counter_bytes, sample_seq in samples:
                     responses.append(client.post(
                         "/api/traffic/counter",
                         headers=headers,
@@ -2137,6 +2140,7 @@ proxies:
                             "collector_id": collector_id,
                             "account_id": account_id,
                             "counter_bytes": counter_bytes,
+                            "sample_seq": sample_seq,
                         },
                     ))
 

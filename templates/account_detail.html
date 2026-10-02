@@ -162,11 +162,17 @@ function shareNode(button) {
 
 function openShareModal() { openModal('shareModal'); }
 
+let shareTokenPending = false;
 async function regenerateToken() {
+    if (shareTokenPending) return;
+    shareTokenPending = true;
+    const buttons = document.querySelectorAll('[data-action="regenerate-token"]');
+    const buttonLabels = new Map();
+    buttons.forEach(button => { buttonLabels.set(button, button.innerHTML); button.disabled = true; button.setAttribute('aria-busy', 'true'); button.textContent = '生成中…'; });
     try {
         const response = await fetch('/api/accounts/{{ account.id }}/generate-token', {method: 'POST', headers: csrfHeaders({'Content-Type': 'application/json'})});
         const data = await response.json();
-        if (!data.url) throw new Error(data.error || '未返回分享链接');
+        if (!response.ok || response.redirected || !data.url) throw new Error(data.error || '未返回分享链接，请刷新页面核对当前链接');
         document.getElementById('shareContent').innerHTML = '<div class="form-group"><label for="shareUrl">分享链接</label><div class="cell-row"><input id="shareUrl" class="code-value" readonly><button class="btn btn-primary" type="button" data-action="copy-input" data-input-id="shareUrl"><i class="bi bi-copy" aria-hidden="true"></i>复制</button></div><p class="field-help">可直接导入 Shadowrocket 或 Clash。</p></div><button class="btn btn-sm btn-ghost" type="button" data-action="regenerate-token"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>重新生成链接</button>';
         const shareUrl = document.getElementById('shareUrl');
         shareUrl.value = data.url;
@@ -192,7 +198,11 @@ async function regenerateToken() {
         clashGroup.append(clashLabel, clashRow);
         document.getElementById('shareContent').append(clashGroup);
         showToast('分享链接已生成', true);
-    } catch (error) { showToast('生成失败：' + error.message, false); }
+    } catch (error) { showToast('生成未完成，请刷新页面核对当前链接：' + error.message, false); }
+    finally {
+        shareTokenPending = false;
+        buttons.forEach(button => { button.innerHTML = buttonLabels.get(button); button.disabled = false; button.removeAttribute('aria-busy'); });
+    }
 }
 
 const visiblePasswords = {};
