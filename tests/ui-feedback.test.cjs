@@ -142,6 +142,32 @@ test('node request errors preserve saved evidence and statistics; valid failure 
     assert.equal(requests[0].options.headers['X-CSRFToken'], 'fake');
 });
 
+test('automatic probe expiry preserves the focused disclosure without stealing outside focus', () => {
+    for (const focused of [true, false]) {
+        const {context, cell, advance, tick} = monitorSetup();
+        const previousSummary = element(), outside = element();
+        cell.replaceChildren = (...children) => { cell.children = children; };
+        context.document.activeElement = focused ? previousSummary : outside;
+        cell.querySelector = selector => selector === 'summary' ? previousSummary : {open: true};
+        context.document.createElement = tag => {
+            const el = {...element(), tag};
+            el.focus = options => {
+                assert.equal(options.preventScroll, true);
+                context.document.activeElement = el;
+            };
+            return el;
+        };
+        advance(901000);
+        tick();
+        assert.equal(JSON.parse(cell.dataset.health).status, 'expired');
+        assert.equal(cell.children.at(-1).open, true);
+        if (focused) {
+            assert.equal(context.document.activeElement.tag, 'summary');
+            assert.equal(context.document.activeElement.textContent, '检测详情');
+        } else assert.equal(context.document.activeElement, outside);
+    }
+});
+
 test('node repeats share one request; persisted task error stays unknown after response', async () => {
     const {context, cell, requests, makeHealth} = monitorSetup();
     context.response = response({health: {...makeHealth('error'),label:'检测未完成'}}, 503);

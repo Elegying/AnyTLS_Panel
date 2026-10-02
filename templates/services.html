@@ -8,9 +8,13 @@
         <p class="page-description">为每位用户独立管理专线分配、服务期、续费提醒和订阅链接。</p>
     </div>
     <div class="page-actions">
-        <button class="btn btn-primary" type="button" data-action="open-modal" data-modal="addServiceModal"><i class="bi bi-person-plus" aria-hidden="true"></i>添加用户服务</button>
+        <button class="btn btn-primary" type="button" data-action="open-modal" data-modal="addServiceModal" {% if not accounts %}disabled aria-describedby="service-account-required"{% endif %}><i class="bi bi-person-plus" aria-hidden="true"></i>添加用户服务</button>
     </div>
 </header>
+
+{% if not accounts %}
+<div class="info-banner" id="service-account-required"><div><strong>暂无可分配的活跃专线账号</strong>创建用户服务前，请先<a class="text-link" href="{{ url_for('accounts_list') }}">导入或启用专线账号</a>。</div></div>
+{% endif %}
 
 <section class="monitor-summary" aria-label="用户服务概览">
     <div class="summary-card"><div class="metric-label">全部服务</div><div class="summary-card-value">{{ services | length }}</div><div class="metric-note">历史和当前服务记录</div></div>
@@ -64,7 +68,7 @@
     </div>
     <p id="service-no-match" class="panel-body" hidden>没有匹配的用户，请调整关键词或服务状态。</p>
     {% else %}
-    <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-person-plus" aria-hidden="true"></i></span><h3>还没有用户服务</h3><p>添加第一位用户后，系统会自动管理其到期提醒和独立订阅链接。</p><button class="btn btn-primary" type="button" data-action="open-modal" data-modal="addServiceModal">添加用户服务</button></div></div>
+    <div class="empty-state"><div class="empty-state-inner"><span class="empty-icon"><i class="bi bi-person-plus" aria-hidden="true"></i></span><h3>还没有用户服务</h3><p>添加第一位用户后，系统会自动管理其到期提醒和独立订阅链接。</p>{% if accounts %}<button class="btn btn-primary" type="button" data-action="open-modal" data-modal="addServiceModal">添加用户服务</button>{% else %}<a class="btn btn-primary" href="{{ url_for('accounts_list') }}">管理专线账号</a>{% endif %}</div></div>
     {% endif %}
 </section>
 

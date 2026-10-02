@@ -30,9 +30,11 @@
         cell.dataset.health = JSON.stringify(health);
         const h = effective(health);
         const open = cell.querySelector('details')?.open || false;
+        const summaryFocused = cell.querySelector('summary') === document.activeElement;
         const detail = document.createElement('details');
         detail.open = open;
-        detail.append(text('summary', '检测详情'));
+        const summary = text('summary', '检测详情');
+        detail.append(summary);
         detail.append(text('p', '来源：面板服务器 · 有效期 15 分钟', 'cell-subtitle'));
         detail.append(text('p', '证书验证模式：' + (h.tls_mode === 'strict' ? '严格验证' : h.tls_mode === 'pinned' ? '固定证书指纹校验' : h.tls_mode === 'insecure_configured' ? '节点配置跳过验证（不证明证书有效）' : '未执行或未记录'), 'cell-subtitle'));
         if (['expired', 'error', 'checking'].includes(h.status)) detail.append(text('p', '上次：' + h.previous));
@@ -48,6 +50,7 @@
         cell.replaceChildren(text('span', h.label, 'badge badge-' + h.tone),
             text('span', h.msg, 'cell-subtitle'),
             text('span', h.checked_at ? h.checked_at + ' · ' + age + ' 分钟前' : '尚无检测时间', 'cell-subtitle probe-time'), detail);
+        if (summaryFocused) summary.focus({preventScroll: true});
     }
     function stats() {
         const values = cells().map(cell => effective(JSON.parse(cell.dataset.health)));

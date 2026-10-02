@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -80,6 +81,72 @@ class FormFeedbackTests(unittest.TestCase):
         self.assertEqual(response.json['field'], 'subscribe_url')
         response = self.client.post('/services/add', headers={'X-Panel-Form': '1'}, data=self.values())
         self.assertEqual(response.status_code, 400)
+
+    def test_account_settings_errors_identify_fields_without_writing(self):
+        values = dict(subscribe_url='https://example.invalid', notes='draft',
+                      traffic_limit_gb='250', status='active')
+        for changes, field in [({'subscribe_url': ' '}, 'subscribe_url'),
+                               ({'notes': 'x' * 4001}, 'notes'),
+                               ({'traffic_limit_gb': 'nan'}, 'traffic_limit_gb'),
+                               ({'status': 'invalid'}, 'status')]:
+            with self.subTest(field=field):
+                response = self.client.post('/accounts/1/edit', headers=self.headers,
+                                            data={**values, **changes})
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json['field'], field)
+        with self.module.app.app_context():
+            self.assertEqual(self.module.get_db().execute(
+                'SELECT notes FROM accounts WHERE id=1').fetchone()[0], '')
+        response = self.client.post('/accounts/1/edit', headers=self.headers, data=values)
+        self.assertEqual(response.json, {'redirect': '/accounts/1'})
+
+    def test_service_creation_explains_missing_active_account(self):
+        for status in ('active', 'suspended', 'disabled'):
+            with self.subTest(status=status):
+                with self.module.app.app_context():
+                    db = self.module.get_db()
+                    db.execute('UPDATE accounts SET status=? WHERE id=1', (status,))
+                    db.commit()
+                page = self.client.get('/services').get_data(as_text=True)
+                trigger = re.search(r'<button[^>]*data-modal="addServiceModal"[^>]*>', page).group()
+                self.assertEqual('disabled' in trigger, status != 'active')
+                if status != 'active':
+                    self.assertIn('暂无可分配的活跃专线账号', page)
+                    self.assertIn('导入或启用专线账号', page)
+
+    def test_account_rename_error_and_plain_post_compatibility(self):
+        response = self.client.post('/accounts/1/rename', headers=self.headers,
+                                    data={'name': ' '})
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json['field'], 'name')
+        response = self.client.post('/accounts/1/rename', headers=self.headers,
+                                    data={'name': 'updated'})
+        self.assertEqual(response.json, {'redirect': '/accounts/1'})
+        headers = {'X-CSRFToken': self.headers['X-CSRFToken']}
+        response = self.client.post('/accounts/1/rename', headers=headers, data={'name': ' '})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, '/accounts/1')
+
+    def test_rule_errors_and_expansion_rollback_preserve_existing_rules(self):
+        for data, field in [({'old_text': ' ', 'new_text': 'draft'}, 'old_text'),
+                            ({'old_text': 'a', 'new_text': 'x' * 201}, 'new_text')]:
+            response = self.client.post('/settings/rename-rules/add', headers=self.headers, data=data)
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(response.json['field'], field)
+        with self.module.app.app_context():
+            db = self.module.get_db()
+            db.execute("INSERT INTO nodes(account_id,name,host,port,password) VALUES(1,?,'example.invalid',443,'fake')", ('a' * 512,))
+            db.commit()
+        response = self.client.post('/settings/rename-rules/add', headers=self.headers,
+                                    data={'old_text': 'a', 'new_text': 'aa'})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn('不能超过', response.json['error'])
+        with self.module.app.app_context():
+            self.assertEqual(self.module.get_db().execute(
+                'SELECT COUNT(*) FROM rename_rules').fetchone()[0], 0)
+        response = self.client.post('/settings/rename-rules/add', headers=self.headers,
+                                    data={'old_text': 'a', 'new_text': 'b'})
+        self.assertEqual(response.json, {'redirect': '/settings/rename-rules'})
 
     def test_exception_details_are_not_exposed(self):
         secret = 'private-token-do-not-display'

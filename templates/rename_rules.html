@@ -56,7 +56,7 @@
     <section class="panel">
         <header class="panel-header"><h2 class="panel-title"><i class="bi bi-plus-circle" aria-hidden="true"></i>添加规则</h2></header>
         <div class="panel-body">
-            <form method="POST" action="{{ url_for('rename_rule_add') }}">
+            <form method="POST" data-preserve-form action="{{ url_for('rename_rule_add') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="rule-preview">
                     <div class="form-group"><label for="old-text">查找名称</label><input id="old-text" name="old_text" placeholder="例如：HK-" required></div>

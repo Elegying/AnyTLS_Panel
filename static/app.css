@@ -9,7 +9,7 @@
     --border-strong: #354158;
     --text: #f1f4fb;
     --text-2: #a2acc0;
-    --text-3: #778299;
+    --text-3: #8590a6;
     --accent: #7768e8;
     --accent-hover: #897cf3;
     --accent-soft: rgba(119, 104, 232, 0.14);
@@ -189,7 +189,7 @@ summary:focus-visible, button:focus-visible, a:focus-visible, input:focus-visibl
 }
 .page-heading { min-width: 0; }
 .eyebrow { margin: 0 0 3px; color: var(--text-3); font-size: 12px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
-.page-title { margin: 0; font-size: clamp(24px, 2vw, 29px); font-weight: 720; line-height: 1.24; letter-spacing: -.02em; }
+.page-title { margin: 0; min-width: 0; overflow-wrap: anywhere; font-size: clamp(24px, 2vw, 29px); font-weight: 720; line-height: 1.24; letter-spacing: -.02em; }
 .page-description { max-width: 680px; margin: 7px 0 0; color: var(--text-2); font-size: 13px; }
 .page-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
 .page-meta { color: var(--text-3); font-size: 12px; white-space: nowrap; }
@@ -204,11 +204,12 @@ summary:focus-visible, button:focus-visible, a:focus-visible, input:focus-visibl
 .panel + .panel { margin-top: 18px; }
 .panel-header {
     display: flex;
+    flex-wrap: wrap;
     min-height: 57px;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 0 18px;
+    padding: 12px 18px;
     border-bottom: 1px solid var(--border);
 }
 .panel-title { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 15px; font-weight: 700; }
@@ -327,7 +328,10 @@ tr.clickable { cursor: pointer; }
 .cell-title { display: block; color: var(--text); font-weight: 650; }
 .cell-subtitle { display: block; margin-top: 2px; color: var(--text-3); font-size: 11px; }
 .cell-stack { display: grid; gap: 7px; min-width: 150px; }
-.cell-row { display: flex; align-items: center; gap: 8px; }
+.cell-row { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.cell-row > input { min-width: 0; }
+.panel-header > div:first-child { min-width: 0; flex: 1; }
+.panel-header .cell-row { flex-wrap: wrap; }
 .cell-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .text-link { color: #9e94ff; font-weight: 650; text-decoration: none; }
 .text-link:hover { color: #b5adff; text-decoration: underline; }
@@ -385,12 +389,13 @@ code, .code-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", 
 .btn-sm { min-height: 32px; padding: 0 10px; border-radius: 7px; font-size: 11px; }
 .btn-icon { width: 34px; padding: 0; }
 
-.accounts-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
-.account-count { color: var(--text-3); font-size: 12px; }
+.accounts-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+.account-count { flex-shrink: 0; color: var(--text-3); font-size: 12px; }
 .accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; }
 .account-card {
     position: relative;
     display: grid;
+    min-width: 0;
     min-height: 220px;
     padding: 19px;
     border: 1px solid var(--border);
@@ -403,6 +408,9 @@ code, .code-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", 
 }
 .account-card:hover { border-color: rgba(119, 104, 232, .62); background: var(--surface-2); transform: translateY(-2px); }
 .account-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.account-card > *, .account-card-header > div { min-width: 0; }
+.account-card-header > div { flex: 1; }
+.account-card-header > .badge { flex-shrink: 0; }
 .account-card-name { margin: 0; overflow: hidden; font-size: 16px; font-weight: 720; white-space: nowrap; text-overflow: ellipsis; }
 .account-card-meta { display: flex; gap: 13px; margin-top: 6px; color: var(--text-3); font-size: 11px; flex-wrap: wrap; }
 .account-card-meta span { display: inline-flex; align-items: center; gap: 5px; }
@@ -411,6 +419,7 @@ code, .code-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", 
 .account-traffic-main { font-size: 19px; font-weight: 720; }
 .account-traffic-limit { color: var(--text-3); font-size: 11px; }
 .account-card-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 15px; color: var(--text-3); font-size: 11px; }
+.account-card-footer span { min-width: 0; overflow-wrap: anywhere; }
 .account-card-footer i { color: #9e94ff; font-size: 15px; }
 
 .detail-summary { display: grid; grid-template-columns: 1fr 1.35fr 1fr 1.2fr; margin-bottom: 18px; }
@@ -479,6 +488,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
     width: min(100%, 560px);
     max-height: min(88vh, 800px);
     overflow-y: auto;
+    overflow-wrap: anywhere;
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-lg);
     background: var(--surface);
@@ -505,7 +515,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
 }
 .flash-success { border-color: rgba(54, 207, 167, .28); background: var(--green-soft); color: #9ce8d4; }
 .flash-error { border-color: rgba(255, 100, 116, .28); background: var(--red-soft); color: #ffb2ba; }
-.breadcrumb { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; color: var(--text-3); font-size: 12px; }
+.breadcrumb { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; color: var(--text-3); font-size: 12px; }
+.breadcrumb [aria-current], .metric-value, .info-banner > div { min-width: 0; overflow-wrap: anywhere; }
 .breadcrumb a { color: var(--text-2); text-decoration: none; }
 .breadcrumb a:hover { color: #a99fff; }
 .breadcrumb .sep { color: #4a556a; }
@@ -601,7 +612,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
     .dashboard-grid > .panel:last-child { grid-column: auto; }
     .dashboard-grid .attention-panel { grid-row: auto; }
     .dashboard-grid .panel-body { min-height: auto; }
-    .panel-header { min-height: 54px; padding: 0 14px; }
+    .panel-header { min-height: 54px; padding: 12px 14px; }
     .panel-body { padding: 14px; }
     .panel-footer { padding: 0 14px; }
     .accounts-grid { grid-template-columns: 1fr; }
@@ -628,11 +639,13 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
     .rwd-table tbody { padding: 8px; }
     .rwd-table tr { margin-bottom: 9px; padding: 8px 11px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
     .rwd-table tr:last-child { margin-bottom: 0; }
-    .rwd-table td { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 0; border-bottom: 1px solid rgba(39,49,69,.72); text-align: right; }
+    .rwd-table td { display: grid; grid-template-columns: 76px minmax(0, 1fr); min-height: 38px; align-items: center; column-gap: 14px; padding: 8px 0; border-bottom: 1px solid rgba(39,49,69,.72); text-align: right; overflow-wrap: anywhere; }
     .rwd-table td:last-child { border-bottom: 0; }
     .rwd-table td[data-label]::before { content: attr(data-label); flex: 0 0 76px; color: var(--text-3); font-size: 11px; font-weight: 600; text-align: left; }
     .rwd-table td.hide-mobile { display: none !important; }
-    .rwd-table td > * { max-width: calc(100% - 90px); }
+    .rwd-table td > * { grid-column: 2; min-width: 0; max-width: 100%; justify-self: end; }
+    .rwd-table td .cell-title, .rwd-table td > strong { width: 100%; }
+    .rwd-table .secret-value { flex-wrap: wrap; justify-content: flex-end; }
     .rwd-table .cell-stack { width: min(100%, 230px); min-width: 0; }
     .rwd-table .cell-row, .rwd-table .cell-actions { justify-content: flex-end; }
 }
@@ -692,7 +705,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
 /* Probe evidence must remain readable in the existing mobile table cards. */
 .node-health { min-width: 230px; max-width: 470px; white-space: normal; overflow-wrap: anywhere; }
 .node-health .badge { white-space: normal; text-align: left; }
-.node-health summary { cursor: pointer; margin-top: 8px; color: var(--accent); }
+.node-health summary { cursor: pointer; margin-top: 8px; color: #b3aaff; }
 .probe-stage { margin: 10px 0; }
 @media (max-width: 768px) {
     .rwd-table td.node-health { display: block; min-width: 0; max-width: none; text-align: left; }
