@@ -389,8 +389,8 @@ code, .code-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", 
 .btn-sm { min-height: 32px; padding: 0 10px; border-radius: 7px; font-size: 11px; }
 .btn-icon { width: 34px; padding: 0; }
 
-.accounts-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
-.account-count { color: var(--text-3); font-size: 12px; }
+.accounts-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+.account-count { flex-shrink: 0; color: var(--text-3); font-size: 12px; }
 .accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; }
 .account-card {
     position: relative;
