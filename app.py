@@ -1781,9 +1781,9 @@ def account_sync(account_id):
             raise ValueError(
                 f'订阅节点超过安全上限 {MAX_NODES_PER_SUBSCRIPTION}'
             )
-    except ValueError as e:
+    except ValueError:
         audit_event('account.sync', 'failure', account_id=account_id, reason='invalid_subscription')
-        flash(f'同步失败: {e}', 'error')
+        flash('同步失败，请检查订阅地址、节点数量和上游服务后重试', 'error')
         return redirect(url_for('account_detail', account_id=account_id))
 
     # 网络请求不持有写锁；拒绝覆盖请求期间修改或同步过的账号。
@@ -1795,10 +1795,10 @@ def account_sync(account_id):
 
     try:
         _store_synced_account(db, account, nodes, traffic_info)
-    except ValueError as error:
+    except ValueError:
         db.rollback()
         audit_event('account.sync', 'failure', account_id=account_id, reason='invalid_node_policy')
-        flash(f'同步失败: {error}', 'error')
+        flash('同步失败，请检查节点配置和重命名规则后重试', 'error')
         return redirect(url_for('account_detail', account_id=account_id))
     db.commit()
     audit_event('account.sync', 'success', account_id=account_id, node_count=len(nodes))
@@ -2672,8 +2672,8 @@ def api_sync_all():
                     f'订阅节点超过安全上限 {MAX_NODES_PER_SUBSCRIPTION}'
                 )
             return account, nodes, traffic_info, None
-        except Exception as e:
-            return account, None, None, str(e)
+        except Exception:
+            return account, None, None, '同步失败，请检查订阅地址、节点数量和上游服务后重试'
 
     results = []
 
@@ -2700,10 +2700,10 @@ def api_sync_all():
                 return
             try:
                 _store_synced_account(db, account, nodes, traffic_info)
-            except ValueError as error:
+            except ValueError:
                 db.rollback()
                 results.append({'id': account['id'], 'name': account['name'],
-                                'status': 'error', 'msg': str(error)})
+                                'status': 'error', 'msg': '同步失败，请检查节点配置和重命名规则后重试'})
                 return
             results.append({"id": account['id'], "name": account['name'], "status": "ok", "nodes": len(nodes)})
         else:
