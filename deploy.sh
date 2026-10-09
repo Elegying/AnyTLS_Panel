@@ -619,6 +619,26 @@ install_caddy_from_official_repository() {
     install_packages caddy
 }
 
+# Fixed vendor release fallback when the signed apt repository is unavailable.
+# Verify bytes before allowing dpkg to execute any package maintainer scripts.
+install_caddy_from_verified_release() (
+    local arch digest package_dir
+    arch="$(dpkg --print-architecture)"
+    case "$arch" in
+        amd64) digest="a22b914ffd1958da42bc7ab13b7b62c6100634e0798ab594891d2d61d53ba749" ;;
+        arm64) digest="ca8ae5a50439642d7672344b4ec64e47cbddf81beb5da302420a78522eb5a47e" ;;
+        *) log "no pinned Caddy fallback for architecture $arch"; return 1 ;;
+    esac
+    package_dir="$(mktemp -d)" || return 1
+    trap 'rm -rf -- "$package_dir"' EXIT
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --fail --silent --show-error --location --retry 2 --max-time 120 \
+        "https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_linux_${arch}.deb" \
+        --output "$package_dir/caddy.deb" || return 1
+    printf '%s  %s\n' "$digest" "$package_dir/caddy.deb" | sha256sum --check --status || return 1
+    dpkg -i "$package_dir/caddy.deb" || return 1
+)
+
 ensure_caddy() {
     local caddy_preexisting=0
     if command -v caddy >/dev/null 2>&1; then
@@ -634,8 +654,9 @@ ensure_caddy() {
     fi
 
     CADDY_INSTALL_ATTEMPTED=1
-    if ! install_caddy_from_official_repository; then
-        fail "Caddy is unavailable from the configured package repositories"
+    if ! install_caddy_from_official_repository || ! caddy_version_is_supported; then
+        log "official apt repository unavailable or outdated; trying SHA-256 verified vendor release"
+        install_caddy_from_verified_release || fail "Caddy is unavailable from verified official sources"
     fi
     if [[ "$caddy_preexisting" -eq 0 ]]; then
         CADDY_INSTALLED_NOW=1
