@@ -18,6 +18,7 @@ install-monitor.sh
 docs/API.md
 docs/ARCHITECTURE.md
 docs/CONFIGURATION.md
+docs/DEVELOPMENT.md
 docs/FAQ.md
 docs/OPERATIONS.md
 docs/QUICKSTART.md

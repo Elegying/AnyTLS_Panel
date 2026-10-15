@@ -11,6 +11,8 @@
 
 ## 本地环境
 
+重装或更换电脑后，请先按[新电脑开发环境恢复与版本发布](docs/DEVELOPMENT.md)安装工具、恢复 GitHub 授权并验证环境。
+
 推荐使用 Python 3.12 或 3.13：
 
 ```bash
@@ -64,6 +66,7 @@ shellcheck deploy.sh start.sh traffic_collector.sh uninstall.sh tests/ubuntu24_i
 
 - README 只保留项目定位、快速入口和最重要的安全提示；
 - 操作步骤放在 `docs/QUICKSTART.md` 或 `docs/OPERATIONS.md`；
+- 本地开发环境恢复与维护者发布步骤放在 `docs/DEVELOPMENT.md`；
 - 配置项放在 `docs/CONFIGURATION.md`；
 - 外部接口放在 `docs/API.md`；
 - 模块职责和重要取舍放在 `docs/ARCHITECTURE.md`；
@@ -96,5 +99,7 @@ Pull Request 描述应回答：
 ## 发布约定
 
 正式版本遵循语义化版本号 `v主版本.次版本.修订号`。Release 标签只能指向 `main` 当前提交，并且该提交必须已通过 push CI。发布说明来自 `CHANGELOG.md` 对应版本段落。
+
+版本文件同步、PR 合并、等待主分支 CI、推送标签和发布验收的完整步骤见[新电脑开发环境恢复与版本发布](docs/DEVELOPMENT.md#6-准备版本提交并通过-pr-合并)。
 
 不要在普通 Pull Request 中自行创建或移动正式标签。
